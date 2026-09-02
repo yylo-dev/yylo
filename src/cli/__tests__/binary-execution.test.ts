@@ -294,11 +294,17 @@ describe('Binary Execution Tests', () => {
       const observedPromptPath = path.join(tempDir, 'prompt-before-preprocessor.txt');
       const kanbanCallsPath = path.join(tempDir, 'kanban-read-calls.txt');
       await Promise.all([
+        fs.ensureDir(path.join(projectDir, '.juno_task')),
         fs.ensureDir(path.dirname(installedExtension)),
         fs.ensureDir(path.dirname(installedSkill)),
         fs.ensureDir(fakeBin),
         fs.ensureDir(servicesDir),
       ]);
+      await fs.outputFile(
+        path.join(projectDir, '.juno_task/scripts/install_requirements.sh'),
+        '#!/bin/sh\nexit 0\n',
+        { mode: 0o755 },
+      );
       expect(await fs.pathExists(builtYpl)).toBe(true);
       expect(await fs.pathExists(builtPiExtension)).toBe(true);
       expect(await fs.pathExists(builtRalphSkill)).toBe(true);
