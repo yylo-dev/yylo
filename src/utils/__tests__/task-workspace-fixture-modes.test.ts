@@ -54,14 +54,14 @@ describe('task-workspace supported profiler and runner', () => {
   it('test_task_workspace_profile_reports_per_test_fixture_and_git_process_timing', () => {
     const root = temporaryDirectory();
     const receipt = path.join(root, 'receipt.json');
-    const result = spawnSync(process.execPath, [runner, '--mode', 'affected', '--receipt', receipt,
+    const result = spawnSync(process.execPath, [runner, '--mode', 'seeded', '--receipt', receipt,
       '--test-id', 'SemVerValidationTests.test_rejects_malformed_versions'], {
       cwd: path.join(repository, 'juno-code'), encoding: 'utf8', timeout: 10_000,
     });
     expect(result.status, result.stderr).toBe(0);
     const value = JSON.parse(fs.readFileSync(receipt, 'utf8')) as Record<string, any>;
     expect(value.schema_version).toBe('juno.task_workspace.profile.v1');
-    expect(value.mode).toBe('affected');
+    expect(value.mode).toBe('seeded');
     expect(value.eligible).toBe(true);
     expect(value.tests).toEqual([
       expect.objectContaining({
@@ -78,6 +78,76 @@ describe('task-workspace supported profiler and runner', () => {
     expect(value.summary.wall).toEqual(expect.objectContaining({ p50_ms: expect.any(Number), p95_ms: expect.any(Number) }));
     expect(value.processes).toEqual(expect.objectContaining({ settled: true }));
   });
+
+  it('rejects an ineligible applicable performance gate with a truthful nonzero result', () => {
+    const root = temporaryDirectory();
+    const receipt = path.join(root, 'performance.json');
+    const result = spawnSync(process.execPath, [runner, '--mode', 'affected', '--receipt', receipt,
+      '--command', process.execPath, '--command-arg', '-e', '--command-arg',
+      'setTimeout(() => {}, 5100)'], {
+      cwd: path.join(repository, 'juno-code'), encoding: 'utf8', timeout: 10_000,
+    });
+    expect(result.status).not.toBe(0);
+    const value = JSON.parse(fs.readFileSync(receipt, 'utf8')) as Record<string, any>;
+    expect(value.eligible).toBe(false);
+    expect(value.performance_gate).toEqual(expect.objectContaining({
+      applicable: true,
+      eligible: false,
+    }));
+    expect(['target_exceeded', 'incomparable_environment']).toContain(
+      value.performance_gate.reason,
+    );
+  }, 15_000);
+
+  it('replays an explicitly requested seeded test hermetically and rejects zero selection', () => {
+    const root = temporaryDirectory();
+    const seededId = 'TaskWorkspaceTests.test_finish_queues_clean_committed_tip_without_merging_or_cleanup';
+    const replayReceipt = path.join(root, 'replay.json');
+    const replay = spawnSync(process.execPath, [runner, '--mode', 'hermetic', '--receipt', replayReceipt,
+      '--test-id', seededId], {
+      cwd: path.join(repository, 'juno-code'), encoding: 'utf8', timeout: 30_000,
+    });
+    expect(replay.status, replay.stderr).toBe(0);
+    const replayValue = JSON.parse(fs.readFileSync(replayReceipt, 'utf8')) as Record<string, any>;
+    expect(replayValue.selected).toEqual([seededId]);
+    expect(replayValue.counts.selected).toBe(1);
+    expect(replayValue.eligible).toBe(true);
+
+    const missingReceipt = path.join(root, 'missing.json');
+    const missing = spawnSync(process.execPath, [runner, '--mode', 'hermetic', '--receipt', missingReceipt,
+      '--test-id', 'TaskWorkspaceTests.test_not_in_inventory'], {
+      cwd: path.join(repository, 'juno-code'), encoding: 'utf8', timeout: 10_000,
+    });
+    expect(missing.status).not.toBe(0);
+    const missingValue = JSON.parse(fs.readFileSync(missingReceipt, 'utf8')) as Record<string, any>;
+    expect(missingValue.selected).toEqual([]);
+    expect(missingValue.counts.selected).toBe(0);
+    expect(missingValue.eligible).toBe(false);
+  }, 45_000);
+
+  it('reconciles descendants after a normal leader exit before claiming settlement', () => {
+    const root = temporaryDirectory();
+    const receipt = path.join(root, 'normal-exit.json');
+    const probe = path.join(root, 'normal-exit.py');
+    const childPid = path.join(root, 'normal-child.pid');
+    fs.writeFileSync(probe, [
+      'import pathlib, subprocess, sys',
+      `p=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(2)'])`,
+      `pathlib.Path(${JSON.stringify(childPid)}).write_text(str(p.pid))`,
+    ].join('\n'));
+    const started = performance.now();
+    const result = spawnSync(process.execPath, [runner, '--mode', 'seeded', '--receipt', receipt,
+      '--command', 'python3', '--command-arg', probe], {
+      cwd: path.join(repository, 'juno-code'), encoding: 'utf8', timeout: 5_000,
+    });
+    const elapsed = performance.now() - started;
+    expect(result.status, result.stderr).toBe(0);
+    expect(elapsed).toBeLessThan(1_000);
+    const value = JSON.parse(fs.readFileSync(receipt, 'utf8')) as Record<string, any>;
+    expect(value.processes).toEqual({ settled: true, surviving: [] });
+    const pid = Number(fs.readFileSync(childPid, 'utf8'));
+    expect(() => process.kill(pid, 0)).toThrow();
+  }, 10_000);
 
   it('task-workspace-wrapper-enforces-child-timeout-and-process-settlement', () => {
     const root = temporaryDirectory();

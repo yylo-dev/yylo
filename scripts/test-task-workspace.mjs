@@ -38,6 +38,50 @@ function quantile(values, percentile) {
   return ordered[Math.max(0, Math.ceil(percentile * ordered.length) - 1)];
 }
 
+function processGroupAlive(pid) {
+  if (process.platform === 'win32') return false;
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== 'ESRCH';
+  }
+}
+
+function signalOwnedGroup(child, signal) {
+  try {
+    if (process.platform === 'win32') child.kill(signal);
+    else process.kill(-child.pid, signal);
+  } catch (error) {
+    if (error?.code !== 'ESRCH') throw error;
+  }
+}
+
+async function waitForGroupExit(pid, timeoutMs) {
+  const deadline = performance.now() + timeoutMs;
+  while (processGroupAlive(pid) && performance.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return !processGroupAlive(pid);
+}
+
+async function reconcileOwnedGroup(child) {
+  if (process.platform === 'win32') {
+    child.stdout.destroy();
+    child.stderr.destroy();
+    return { settled: child.exitCode !== null || child.signalCode !== null, surviving: [] };
+  }
+  if (processGroupAlive(child.pid)) signalOwnedGroup(child, 'SIGTERM');
+  let settled = await waitForGroupExit(child.pid, 300);
+  if (!settled) {
+    signalOwnedGroup(child, 'SIGKILL');
+    settled = await waitForGroupExit(child.pid, 1_000);
+  }
+  child.stdout.destroy();
+  child.stderr.destroy();
+  return { settled, surviving: settled ? [] : [`process_group:${child.pid}`] };
+}
+
 async function runOwned(command, args, timeoutMs, fixtureMode, outputLimit = 262_144) {
   const started = performance.now();
   const child = spawn(command, args, {
@@ -59,28 +103,27 @@ async function runOwned(command, args, timeoutMs, fixtureMode, outputLimit = 262
   child.stderr.on('data', append);
   let timedOut = false;
   let timer;
+  let escalationTimer;
   const status = await new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('exit', (code, signal) => resolve({ code, signal }));
     timer = setTimeout(() => {
       timedOut = true;
-      try {
-        if (process.platform === 'win32') child.kill('SIGTERM');
-        else process.kill(-child.pid, 'SIGTERM');
-      } catch {}
-      setTimeout(() => {
-        try {
-          if (process.platform === 'win32') child.kill('SIGKILL');
-          else process.kill(-child.pid, 'SIGKILL');
-        } catch {}
-      }, 200).unref();
+      signalOwnedGroup(child, 'SIGTERM');
+      escalationTimer = setTimeout(() => signalOwnedGroup(child, 'SIGKILL'), 200);
+      escalationTimer.unref();
     }, timeoutMs);
   });
   clearTimeout(timer);
-  // `exit` is emitted after the owned leader exits. A process-group kill also
-  // reconciles descendants; the bounded delay lets kernel process accounting settle.
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  return { ...status, timedOut, wallMs: performance.now() - started, output: output.toString('utf8'), settled: true };
+  const reconciliation = await reconcileOwnedGroup(child);
+  if (escalationTimer) clearTimeout(escalationTimer);
+  return {
+    ...status,
+    timedOut,
+    wallMs: performance.now() - started,
+    output: output.toString('utf8'),
+    ...reconciliation,
+  };
 }
 
 function atomicWrite(target, value) {
@@ -141,6 +184,7 @@ async function main() {
     wallMs: Math.max(...runs.map((value) => value.run.wallMs)),
     output: runs.map((value) => value.run.output).join('\n'),
     settled: runs.every((value) => value.run.settled),
+    surviving: runs.flatMap((value) => value.run.surviving),
   };
   const command = plans[0].command;
   const args = plans[0].args;
@@ -161,7 +205,7 @@ async function main() {
     timeout_ms: options.timeoutMs,
     timeout: run.timedOut,
     exit_code: run.code ?? (run.timedOut ? 124 : 1),
-    eligible: !run.timedOut && run.code === 0 && profile?.success !== false && tests.every((test) => test.outcome === 'passed'),
+    eligible: !run.timedOut && run.code === 0 && run.settled && profile?.success !== false && tests.every((test) => test.outcome === 'passed'),
     environment: { platform: os.platform(), release: os.release(), arch: os.arch(), node: process.version, cpu_count: cpuCount, initial_loadavg: initialLoad },
     comparability: { comparable, reason: comparable ? null : 'reference_load_exceeded', max_load_1m: cpuCount * 2 },
     inventory: profile?.inventory ?? [],
@@ -172,7 +216,7 @@ async function main() {
       wall: { count: walls.length || 1, p50_ms: quantile(walls.length ? walls : [run.wallMs], 0.50), p95_ms: quantile(walls.length ? walls : [run.wallMs], 0.95) },
       total_wall_ms: Math.round(run.wallMs * 1000) / 1000,
     },
-    processes: { settled: run.settled, surviving: [] },
+    processes: { settled: run.settled, surviving: run.surviving },
     failure_guidance: options.mode === 'seeded' && run.code !== 0
       ? { replay_mode: 'hermetic', command: `npm run test:task-workspace:hermetic -- --test-id ${tests.find((test) => test.outcome !== 'passed')?.id ?? '<test-id>'}` }
       : null,
@@ -180,16 +224,20 @@ async function main() {
     output: { truncated_tail: run.output },
   };
   const targetMs = options.mode === 'affected' ? 5_000 : options.mode === 'complete' ? 90_000 : null;
+  const testEligible = receipt.eligible;
   receipt.performance_gate = {
     applicable: targetMs !== null,
     target_ms: targetMs,
-    eligible: targetMs === null ? null : receipt.eligible && comparable && run.wallMs <= targetMs,
-    reason: !receipt.eligible ? 'run_failed' : !comparable ? 'incomparable_environment' : run.wallMs > targetMs ? 'target_exceeded' : null,
+    eligible: targetMs === null ? null : testEligible && comparable && run.wallMs <= targetMs,
+    reason: !testEligible ? 'run_failed' : !comparable ? 'incomparable_environment' : run.wallMs > targetMs ? 'target_exceeded' : null,
   };
+  receipt.eligible = testEligible && (targetMs === null || receipt.performance_gate.eligible === true);
   atomicWrite(path.resolve(options.receipt), receipt);
   if (!receipt.eligible) process.stderr.write(run.output);
   process.stdout.write(`${JSON.stringify({ receipt: path.resolve(options.receipt), eligible: receipt.eligible, mode: options.mode, selected: receipt.selected.length })}\n`);
-  return receipt.eligible ? 0 : (run.timedOut ? 124 : (run.code ?? 1));
+  if (receipt.eligible) return 0;
+  if (run.timedOut) return 124;
+  return run.code && run.code !== 0 ? run.code : 1;
 }
 
 main().then((code) => { process.exitCode = code; }).catch((error) => {

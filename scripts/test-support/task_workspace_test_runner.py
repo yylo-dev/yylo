@@ -166,6 +166,7 @@ def main() -> int:
         parser.error("invalid shard")
     selected = []
     wanted = set(args.test_id)
+    missing_wanted = wanted - set(inventory)
     if args.mode == "affected" and not wanted:
         changed = args.changed_path or ["juno-code/src/templates/scripts/task_workspace.py"]
         wanted = set(getattr(module, "affected_fixture_tests")(changed))
@@ -176,9 +177,12 @@ def main() -> int:
             continue
         if args.mode == "seeded" and tier not in {"pure", "seeded-repository", "seeded-controller", "seeded-history"}:
             continue
-        if args.mode == "hermetic" and tier not in {"hermetic", "shared-resource"}:
+        if (args.mode == "hermetic" and not args.test_id
+                and tier not in {"hermetic", "shared-resource"}):
             continue
         selected.append(test)
+    matched_explicit = [".".join(test.id().split(".")[-2:]) for test in selected]
+    selection_error = bool(args.test_id) and (bool(missing_wanted) or not matched_explicit)
     weights, weights_identity = load_duration_weights(args.duration_weights)
     plan = balanced_shards(
         [".".join(test.id().split(".")[-2:]) for test in selected],
@@ -251,15 +255,26 @@ def main() -> int:
         "selected": [".".join(test.id().split(".")[-2:]) for test in selected],
         "tests": metrics,
         "wall_ms": wall_ms,
-        "success": result.wasSuccessful(),
+        "success": result.wasSuccessful() and not selection_error,
         "counts": {
             "inventory": len(inventory), "selected": len(selected),
-            "failures": len(result.failures), "errors": len(result.errors),
+            "failures": len(result.failures), "errors": len(result.errors) + int(selection_error),
             "skipped": len(result.skipped), "git_processes": git_count["value"],
         },
     }
+    if selection_error:
+        payload["selection_error"] = {
+            "requested": sorted(wanted),
+            "missing": sorted(missing_wanted),
+            "reason": "explicit_test_not_selectable",
+        }
+        print(
+            "explicit task-workspace test selection matched no runnable inventory: "
+            + ", ".join(sorted(missing_wanted or wanted)),
+            file=sys.stderr,
+        )
     Path(args.out).write_text(json.dumps(payload, sort_keys=True) + "\n")
-    return 0 if result.wasSuccessful() else 1
+    return 0 if result.wasSuccessful() and not selection_error else 1
 
 
 if __name__ == "__main__":
