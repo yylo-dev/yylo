@@ -37,7 +37,7 @@ yy --help
 
 ### Stable and prerelease channels
 
-The stable npm channel is `@latest` (`0.2.0` when this README was audited). The current prerelease is on `@next` (`0.2.1-rc.3`), not `latest`:
+The stable npm channel is `@latest` (`0.2.0` when this README was audited). The current prerelease is on `@next` (`0.2.1-rc.4`), not `latest`:
 
 ```bash
 # Stable
@@ -46,7 +46,7 @@ npm install --global '@yylo/cli@latest'
 # Explicit prerelease
 npm install --global '@yylo/cli@next'
 # Exact prerelease for reproducible installs
-npm install -g @yylo/cli@0.2.1-rc.3
+npm install -g @yylo/cli@0.2.1-rc.4
 
 npm view '@yylo/cli' version dist-tags --json
 yy --version
