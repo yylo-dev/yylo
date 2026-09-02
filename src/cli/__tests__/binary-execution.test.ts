@@ -494,8 +494,8 @@ exit 1
       expect(result.stdout).toContain('Usage:');
       expect(result.stdout).toContain('Options:');
       expect(result.stdout).toContain('Commands:');
-      expect(result.stdout).toContain('ledger [options] [args...]');
-      expect(result.stdout).toContain('Juno Ledger');
+      expect(result.stdout).toContain('ledger [args...]');
+      expect(result.stdout).toContain('YYLO Ledger CLI');
       expect(result.all).not.toContain('refusing to reinterpret it as an agent prompt');
     });
 
@@ -847,7 +847,7 @@ exit 1
       }
     });
 
-    it('should retain assignment isolation after real CLI startup refreshes project scripts', async () => {
+    it('should retain assignment isolation after an explicit managed script refresh', async () => {
       const scriptsDir = path.join(tempDir, '.juno_task', 'scripts');
       const guardDir = path.join(tempDir, 'guard');
       const records = path.join(tempDir, 'backlog.ndjson');
@@ -879,10 +879,10 @@ exit 1
         ].join('\n'),
       );
 
-      const startup = await executeCLI(['--help'], {
+      const refresh = await executeCLI(['scripts', 'update', '--force'], {
         env: { JUNO_TASK_ROOT: tempDir, JUNO_WORKSPACE_ROLE: 'controller' },
       });
-      expect(startup.exitCode).toBe(0);
+      expect(refresh.exitCode).toBe(0);
       const wrapper = path.join(scriptsDir, 'kanban.sh');
       const installed = await fs.readFile(wrapper, 'utf8');
       expect(installed).toContain('ASSIGNED_TASK_ID');
@@ -928,9 +928,9 @@ exit 1
       const result = await executeCLI(['--help']);
 
       expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain('Shell safety');
-      expect(result.stdout).toContain('backticks');
-      expect(result.stdout).toContain("single quotes or -f/stdin");
+      expect(result.stdout).toContain('prefer single quotes for shell metacharacters');
+      expect(result.stdout).toContain('Prompt input (inline text, file path, or heredoc/stdin');
+      expect(result.stdout).toContain('shell-safe for backticks/$()');
     });
 
     it('should document ypl shortcut and named branch workflow in Pi help', async () => {
@@ -1160,11 +1160,14 @@ exit 1
     });
 
     it('recovers the exact target-bound metadata-controller bundle through scripts update', async () => {
+      const currentPackageVersion = (await fs.readJson(
+        path.join(PROJECT_ROOT, 'package.json'),
+      )).version as string;
       const { targetSha, changedScripts } = await createTargetBoundMetadataController(
-        tempDir, '0.2.0', { routedCurrentPackage: true },
+        tempDir, currentPackageVersion, { routedCurrentPackage: true },
       );
       const manifestPath = path.join(tempDir, '.juno_task/managed-assets.json');
-      expect((await fs.readJson(manifestPath)).packageVersion).not.toBe('0.2.0');
+      expect((await fs.readJson(manifestPath)).packageVersion).not.toBe(currentPackageVersion);
 
       const update = await executeCLI(['scripts', 'update', '--force'], { timeout: 120_000 });
       expect(update.exitCode).toBe(0);
@@ -1175,10 +1178,10 @@ exit 1
       expect(manifest).toMatchObject({
         schemaVersion: 2,
         packageName: '@yylo/cli',
-        packageVersion: '0.2.0',
+        packageVersion: currentPackageVersion,
         instructionBundle: {
           schemaVersion: 'juno_instruction_bundle.v1',
-          packageVersion: '0.2.0',
+          packageVersion: currentPackageVersion,
           assetCount: Object.keys(manifest.assets).length,
         },
       });
@@ -1248,16 +1251,16 @@ exit 1
       execFileSync('git', ['add', '.'], { cwd: tempDir });
       execFileSync('git', ['commit', '-qm', 'fixture'], { cwd: tempDir });
 
-      const result = await executeCLI(['-s', 'codex', '--model=:sonnet', '-p', 'precedence check'], {
+      const result = await executeCLI(['-s', 'codex', '--model=gpt-5.3-codex', '-p', 'precedence check'], {
         expectError: true,
-        env: { YYLO_MODEL: ':codex', PATH: `${path.join(tempDir, 'bin')}:${process.env.PATH ?? ''}` },
+        env: { YYLO_MODEL: 'gpt-5.2-codex', PATH: `${path.join(tempDir, 'bin')}:${process.env.PATH ?? ''}` },
       });
       const logs = await fs.readdir(path.join(tempDir, '.juno_task', 'logs'));
       const log = await fs.readFile(path.join(tempDir, '.juno_task', 'logs', logs[0]), 'utf8');
 
       expect(result.exitCode).not.toBe(0);
-      expect(log).toContain('"model":":sonnet"');
-      expect(log).not.toContain('"model":":codex"');
+      expect(log).toContain('"model":"gpt-5.3-codex"');
+      expect(log).not.toContain('"model":"gpt-5.2-codex"');
       expect(log).toContain('FAKE_CODEX_ARGS:');
     });
 
