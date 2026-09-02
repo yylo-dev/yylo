@@ -9,7 +9,7 @@ import { ManagedProjectAssets } from '../../../utils/managed-project-assets.js';
 const sha256 = (value: Buffer | string) => createHash('sha256').update(value).digest('hex');
 
 export const REAL_METADATA_CONTROLLER_TARGET_REF =
-  '2af5e14543781c6b085d0f21838caf4159cba9ae';
+  '235f8297ed15e5718f5e20c7ef5f4b680ca43e19';
 export const REAL_STALE_CONTROLLER_SCRIPTS = {
   'managed_agent_runner.py': {
     targetSha256: '01cd94c975de13c4b7744317fb6b1083c62f154328cea2c8cda2f783044fc17b',
@@ -37,7 +37,7 @@ export const REAL_STALE_CONTROLLER_SCRIPTS = {
     staleSha256: '30652580f93cb4150b4435c868e1b750cdfaa7a2e9b188d124fd3668f3d902f4',
   },
   'tests/test_merge_queue.py': {
-    targetSha256: '492a0e93c0edaaf3b3942b308ac24bbbeae16c81556c4cdd344f6cac6abfb710',
+    targetSha256: '79a545a5bb33993d5831d28cd6825130bcb197fadbaafbfb6698e1464900de6c',
     staleBlob: '842f255e1d93470af02b068c5171657e5090f8ec',
     staleSha256: 'a7d3f9619943537660cab3741096aeb51c60d71f7215ece6cf796e798c41d41f',
   },

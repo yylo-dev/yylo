@@ -15,7 +15,10 @@ Use `npm run test:task-workspace:affected`, `:seeded`, `:hermetic`, or
 `:complete`. Complete is authoritative and always unions seeded and
 fresh-topology contracts. Receipts include inventory, tiers, shards,
 Git-process counts, timeout/process settlement, and p50/p95 timing. Seeded
-failures include a hermetic replay command.
+failures include a hermetic replay command. The umbrella `npm test` suite checks
+runner and representative real-Git contracts but does not launch `:complete`;
+the explicit complete command is the single task-owned 239-case performance
+gate, preventing duplicate expensive profiles and resource-lock races.
 
 The Python boundary extends the canonical `juno.test.fixture.base.v1` identity
 and gives every consumer a disposable private instance. Drift or corruption

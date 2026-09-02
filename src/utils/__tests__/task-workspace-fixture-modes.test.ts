@@ -36,6 +36,9 @@ describe('task-workspace supported profiler and runner', () => {
     const scripts = (JSON.parse(fs.readFileSync(packageJson, 'utf8')) as {
       scripts: Record<string, string>;
     }).scripts;
+    const performanceGuide = fs.readFileSync(path.join(
+      repository, 'juno-code/docs/test-performance.md',
+    ), 'utf8');
 
     expect(scripts['test:task-workspace:complete']).toBe(
       'node scripts/test-task-workspace.mjs --mode complete',
@@ -43,6 +46,9 @@ describe('task-workspace supported profiler and runner', () => {
     expect(umbrellaTest).not.toContain("'--mode', 'complete'");
     expect(umbrellaTest).not.toContain('complete profile prerequisite drain');
     expect(umbrellaTest).not.toContain('acquireTestResourceLock');
+    expect(performanceGuide).toContain(
+      'the single task-owned 239-case performance gate',
+    );
   });
 
   it('test_task_workspace_profile_reports_per_test_fixture_and_git_process_timing', () => {
