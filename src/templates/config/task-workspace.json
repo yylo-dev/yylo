@@ -89,12 +89,7 @@
         "python3",
         "test_task_workspace.py",
         "TaskWorkspaceTests.test_finish_queues_clean_committed_tip_without_merging_or_cleanup"
-      ],
-      "resource": {
-        "id": "yylo-real-git-managed-install",
-        "lock_path": "/tmp/yylo-focused-real-git-managed-install.lock",
-        "wait_timeout_seconds": 1200
-      }
+      ]
     },
     {
       "id": "integration-workspace",

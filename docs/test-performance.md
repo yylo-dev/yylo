@@ -9,6 +9,22 @@ controller construction.
 Wave 2 (persistent advisory test daemon, warm affected edit loop, and the
 warm/cold equivalence matrix) is documented in [test-daemon.md](./test-daemon.md).
 
+## Task-workspace fixture modes
+
+Use `npm run test:task-workspace:affected`, `:seeded`, `:hermetic`, or
+`:complete`. Complete is authoritative and always unions seeded and
+fresh-topology contracts. Receipts include inventory, tiers, shards,
+Git-process counts, timeout/process settlement, and p50/p95 timing. Seeded
+failures include a hermetic replay command.
+
+The Python boundary extends the canonical `juno.test.fixture.base.v1` identity
+and gives every consumer a disposable private instance. Drift or corruption
+quarantines a published base and builds a new one; it is never repaired in
+place. Force the permanent cold fallback with
+`YYLO_TEST_DISABLE_FIXTURE_BASE_CACHE=1 npm run test:task-workspace:complete`.
+Failed, skipped, timed-out, inventory-drifted, or host-incomparable receipts are
+not performance evidence.
+
 ## Benchmark profile
 
 The harness `scripts/test-performance/benchmark-profile.mjs` measures one
