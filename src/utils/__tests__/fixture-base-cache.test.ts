@@ -74,6 +74,8 @@ describe('content-addressed fixture bases', () => {
       expect(fixtureBaseKey(drifted)).not.toBe(fixtureBaseKey(base));
     }
     expect(fixtureBaseKey(identity({ fixtureSchema: 'other' }))).not.toBe(fixtureBaseKey(base));
+    expect(fixtureBaseKey(identity({ contract: 'task-workspace.v1' }))).not.toBe(fixtureBaseKey(base));
+    expect(fixtureBaseKey(identity({ boundInputs: { policy: 'drift' } }))).not.toBe(fixtureBaseKey(base));
   });
 
   it('materializes once and reuses the exact sealed base across calls', () => {

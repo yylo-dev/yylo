@@ -44,6 +44,10 @@ export interface FixtureBaseIdentity {
 
 export interface FixtureBaseKeyInput extends FixtureBaseIdentity {
   fixtureSchema: string;
+  /** Contract-specific namespace sharing the canonical cache safely. */
+  contract?: string;
+  /** Additional exact identity fields required by a specialized fixture. */
+  boundInputs?: Record<string, string>;
 }
 
 export interface SealedFixtureBase {
@@ -96,14 +100,19 @@ export function resolvePythonIdentity(): string {
 }
 
 export function fixtureBaseKey(input: FixtureBaseKeyInput): string {
+  const boundInputs = Object.fromEntries(
+    Object.entries(input.boundInputs ?? {}).sort(([left], [right]) => left.localeCompare(right)),
+  );
   const canonical = JSON.stringify(
     {
       schema: FIXTURE_BASE_SCHEMA,
+      contract: input.contract ?? 'global-setup.v1',
       fixture_schema: input.fixtureSchema,
       dependency_lock_sha256: input.dependencyLockSha256,
       admission_contract_sha256: input.admissionContractSha256,
       python_identity: input.pythonIdentity,
       node_version: input.nodeVersion,
+      bound_inputs: boundInputs,
     },
     null,
     0,
@@ -115,10 +124,17 @@ export function defaultFixtureBaseRoot(): string {
   return path.join(fs.realpathSync(os.tmpdir()), 'yylo-fixture-bases');
 }
 
-function entryPath(entry: { parentPath?: string; path?: string; name: string }): string {
-  // recursive readdir: parentPath exists on Node 20.12+; older Node 20
-  // releases expose the same value as `path`.
-  return path.join(entry.parentPath ?? entry.path ?? '.', entry.name);
+function fixtureEntries(root: string): string[] {
+  const values: string[] = [];
+  const visit = (directory: string): void => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const target = path.join(directory, entry.name);
+      if (entry.isDirectory() && !entry.isSymbolicLink()) visit(target);
+      values.push(target);
+    }
+  };
+  visit(root);
+  return values;
 }
 
 function chmodFixtureEntry(target: string, writable: boolean): void {
@@ -137,9 +153,7 @@ function chmodFixtureEntry(target: string, writable: boolean): void {
 }
 
 function sealReadOnly(root: string): void {
-  for (const entry of fs.readdirSync(root, { withFileTypes: true, recursive: true })) {
-    chmodFixtureEntry(entryPath(entry), false);
-  }
+  for (const target of fixtureEntries(root)) chmodFixtureEntry(target, false);
   chmodFixtureEntry(root, false);
 }
 
@@ -149,9 +163,7 @@ export function makeFixtureTreeOwnerWritable(root: string): void {
   if (!rootEntry.isDirectory() || rootEntry.isSymbolicLink()) {
     throw new Error(`refusing to make non-directory fixture root writable: ${root}`);
   }
-  for (const entry of fs.readdirSync(root, { withFileTypes: true, recursive: true })) {
-    chmodFixtureEntry(entryPath(entry), true);
-  }
+  for (const target of fixtureEntries(root)) chmodFixtureEntry(target, true);
   chmodFixtureEntry(root, true);
 }
 
@@ -174,6 +186,10 @@ function writeManifest(root: string, key: string, identity: FixtureBaseKeyInput)
       admission_contract_sha256: identity.admissionContractSha256,
       python_identity: identity.pythonIdentity,
       node_version: identity.nodeVersion,
+      contract: identity.contract ?? 'global-setup.v1',
+      bound_inputs: Object.fromEntries(
+        Object.entries(identity.boundInputs ?? {}).sort(([left], [right]) => left.localeCompare(right)),
+      ),
     },
     content_sha256: baseManifestDigest(root),
   };
