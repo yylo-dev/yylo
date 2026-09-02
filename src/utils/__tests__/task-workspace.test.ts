@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { acquireTestResourceLock } from '../../test-utils/resource-lock.js';
 
 const repository = resolve(import.meta.dirname, '../../../..');
 
@@ -273,7 +274,7 @@ describe('Bolt task workspace managed runtime', () => {
     );
   });
 
-  it('ships one small standalone engine with sparse, orphan, and negative real-Git contracts', () => {
+  it('ships one small standalone engine with sparse, orphan, and negative real-Git contracts', async () => {
     const runtime = resolve(repository, 'juno-code/src/templates/scripts/task_workspace.py');
     const tests = resolve(repository, 'juno-code/src/templates/scripts/tests/test_task_workspace.py');
     const source = readFileSync(runtime, 'utf8');
@@ -290,6 +291,10 @@ describe('Bolt task workspace managed runtime', () => {
     expect(testSource).toContain('test_runtime_bootstrap_refuses_product_bearing_metadata_controller');
     const runner = resolve(repository, 'juno-code/scripts/test-task-workspace.mjs');
     const receipt = resolve(repository, 'juno-code/test-results/task-workspace/vitest-complete.json');
+    const prerequisiteLease = await acquireTestResourceLock(
+      'task-workspace complete profile prerequisite drain',
+    );
+    await prerequisiteLease.release();
     execFileSync(process.execPath, [runner, '--mode', 'complete', '--shards', '8',
       '--timeout-ms', '180000', '--receipt', receipt], {
       cwd: resolve(repository, 'juno-code'),
