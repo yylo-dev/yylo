@@ -46,8 +46,8 @@ describe('task-workspace supported profiler and runner', () => {
     expect(umbrellaTest).not.toContain("'--mode', 'complete'");
     expect(umbrellaTest).not.toContain('complete profile prerequisite drain');
     expect(umbrellaTest).not.toContain('acquireTestResourceLock');
-    expect(performanceGuide).toContain(
-      'the single task-owned 239-case performance gate',
+    expect(performanceGuide).toMatch(
+      /the single task-owned 239-case performance\s+gate/,
     );
   });
 
