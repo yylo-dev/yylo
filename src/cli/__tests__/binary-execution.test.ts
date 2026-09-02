@@ -212,6 +212,8 @@ describe('Binary Execution Tests', () => {
     const invocation = `/skill:native ${raw}`;
 
     const piExecutable = execFileSync('sh', ['-c', 'command -v pi'], { encoding: 'utf8' }).trim();
+    const piNode = path.join(path.dirname(piExecutable), 'node');
+    expect(fs.realpathSync(piNode)).toContain('/versions/node/v22.');
     const piCli = fs.realpathSync(piExecutable);
     const piPackageRoot = path.dirname(path.dirname(piCli));
     const piPackage = JSON.parse(
@@ -236,21 +238,26 @@ describe('Binary Execution Tests', () => {
     });
     expect(nativeSource).toContain('return args ? `${skillBlock}\\n\\n${args}` : skillBlock;');
 
-    const installedPi = (await import(pathToFileURL(path.join(piPackageRoot, 'dist/index.js')).href)) as {
-      AgentSession: { prototype: { _expandSkillCommand(text: string): string } };
-    };
-    const nativeSession = {
-      resourceLoader: {
-        getSkills: () => ({
-          skills: [{ name: 'native', filePath: findSkillFile('native', tempDir)!, baseDir: path.dirname(findSkillFile('native', tempDir)!) }],
-        }),
-      },
-      _extensionRunner: { emitError: vi.fn() },
-    };
-    const nativeOutput = installedPi.AgentSession.prototype._expandSkillCommand.call(
-      nativeSession,
-      invocation,
-    );
+    const nativeSkillPath = findSkillFile('native', tempDir)!;
+    const nativeHarness = path.join(tempDir, 'invoke-provenance-bound-native-skill.mjs');
+    await fs.writeFile(nativeHarness, [
+      "import { readFileSync } from 'node:fs';",
+      `import { AgentSession } from ${JSON.stringify(pathToFileURL(path.join(piPackageRoot, 'dist/index.js')).href)};`,
+      'const { invocation, skillPath, baseDir } = JSON.parse(readFileSync(0, \'utf8\'));',
+      'const session = {',
+      '  resourceLoader: { getSkills: () => ({ skills: [{',
+      "    name: 'native', filePath: skillPath, baseDir,",
+      '  }] }) },',
+      '  _extensionRunner: { emitError() {} },',
+      '};',
+      'process.stdout.write(AgentSession.prototype._expandSkillCommand.call(session, invocation));',
+    ].join('\n'));
+    const nativeOutput = execFileSync(piNode, [nativeHarness], {
+      input: JSON.stringify({
+        invocation, skillPath: nativeSkillPath, baseDir: path.dirname(nativeSkillPath),
+      }),
+      encoding: 'utf8',
+    });
     const junoOutput = expandSkillInvocation(invocation, tempDir);
 
     expect(junoOutput).toBe(nativeOutput);

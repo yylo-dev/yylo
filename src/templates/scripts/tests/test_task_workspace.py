@@ -3740,6 +3740,16 @@ raise SystemExit(2)
 
         updated = run([str(PUBLIC_YY), "scripts", "update", "--force"], self.controller)
         self.assertEqual(updated.returncode, 0)
+        canonical_kanban = self.controller / ".venv_juno/bin/juno-kanban"
+        canonical_kanban.parent.mkdir(parents=True, exist_ok=True)
+        canonical_kanban.write_text(
+            FAKE_KANBAN_SOURCE.replace("@BOARD@", repr(str(self.board))))
+        canonical_kanban.chmod(0o755)
+        git(self.controller, "add", "-u", "--", ".juno_task")
+        git(self.controller, "add", "-f", "--", ".juno_task/managed-assets.json",
+            ".juno_task/prompts", ".juno_task/wiki", ".juno_task/workflows")
+        if git(self.controller, "diff", "--cached", "--name-only"):
+            git(self.controller, "commit", "-m", "install current managed controller generation")
         controller_runtime = self.controller / task_runtime.RUNTIME_PATH
         self.assertEqual(
             controller_runtime.read_bytes(),
@@ -3753,8 +3763,11 @@ raise SystemExit(2)
         self.assertEqual(refused.returncode, 2)
         self.assertIn("yy task runtime-bootstrap --dry-run", refused.stderr)
         self.assertFalse((self.workspaces / "X").exists())
-        self.assertEqual(task_runtime._bootstrap_target_status(self.controller), "",
-                         "public task-start refusal dirtied the configured repository")
+        target_status = task_runtime._bootstrap_target_status(self.controller)
+        self.assertFalse(
+            target_status,
+            f"public task-start refusal dirtied the configured repository:\n{target_status}",
+        )
 
         planned = run(
             [str(PUBLIC_YY), "task", "runtime-bootstrap", "--dry-run"], self.controller)
@@ -3786,6 +3799,16 @@ raise SystemExit(2)
         self.assertEqual(package.get("name"), "@yylo/cli")
         self.assertTrue(PUBLIC_YY.is_file())
         run([str(PUBLIC_YY), "scripts", "update", "--force"], self.controller)
+        canonical_kanban = self.controller / ".venv_juno/bin/juno-kanban"
+        canonical_kanban.parent.mkdir(parents=True, exist_ok=True)
+        canonical_kanban.write_text(
+            FAKE_KANBAN_SOURCE.replace("@BOARD@", repr(str(self.board))))
+        canonical_kanban.chmod(0o755)
+        git(self.controller, "add", "-u", "--", ".juno_task")
+        git(self.controller, "add", "-f", "--", ".juno_task/prompts",
+            ".juno_task/wiki", ".juno_task/workflows")
+        if git(self.controller, "diff", "--cached", "--name-only"):
+            git(self.controller, "commit", "-m", "install current managed controller generation")
         packaged_executable = PACKAGE_ROOT / "dist/bin/cli.mjs"
         identity = self.controller / ".juno_task/runtime/identity.json"
         identity.parent.mkdir(parents=True, exist_ok=True)
@@ -3796,6 +3819,16 @@ raise SystemExit(2)
             "source": "installed-release", "tracked": False,
         }) + "\n")
         packaged_runtime = PACKAGE_ROOT / "dist/templates/scripts/task_workspace.py"
+        managed_inventory_path = self.controller / ".juno_task/managed-assets.json"
+        managed_inventory = json.loads(managed_inventory_path.read_text())
+        managed_inventory["schemaVersion"] = 1
+        managed_inventory["packageName"] = package["name"]
+        managed_inventory["packageVersion"] = package["version"]
+        runtime_inventory = managed_inventory["assets"][task_runtime.RUNTIME_PATH]
+        runtime_hash = hashlib.sha256(packaged_runtime.read_bytes()).hexdigest()
+        runtime_inventory["sourceSha256"] = runtime_hash
+        runtime_inventory["installedSha256"] = runtime_hash
+        managed_inventory_path.write_text(json.dumps(managed_inventory) + "\n")
         runtime = self.repository / task_runtime.RUNTIME_PATH
         runtime.write_bytes(packaged_runtime.read_bytes())
         git(self.repository, "rm", "juno-code/src/templates/scripts/task_workspace.py",
@@ -3817,6 +3850,12 @@ raise SystemExit(2)
         self.assertEqual(refused.returncode, 2)
         self.assertIn("target-runtime-provenance plan", refused.stderr)
         plan_path = self.root / "package-provenance-plan.json"
+        controller_status = git(
+            self.controller, "status", "--porcelain=v1", "--untracked-files=all")
+        self.assertFalse(
+            controller_status,
+            f"fixture controller must be clean before provenance planning:\n{controller_status}",
+        )
         planned = run([str(PUBLIC_YY), "migrate", "target-runtime-provenance", "plan",
                        "--controller", str(self.controller), "--output", str(plan_path)],
                       self.controller)
