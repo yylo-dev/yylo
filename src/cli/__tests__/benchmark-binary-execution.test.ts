@@ -9,7 +9,7 @@ const projectRoot = path.resolve(__dirname, '../../..');
 const wrapper = path.join(projectRoot, 'dist/bin/yylo.sh');
 const fixtures: string[] = [];
 
-async function makeFixture(version = 'yylo-benchmark 0.1.0-rc.8'): Promise<{
+async function makeFixture(version = 'yylo-benchmark 0.1.0-rc.9'): Promise<{
   root: string; env: NodeJS.ProcessEnv; record: string;
 }> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'yylo-benchmark-built-'));
