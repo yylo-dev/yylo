@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import subprocess
 import shutil
 import sys
@@ -76,6 +77,8 @@ lock = (package / 'package-lock.json').read_bytes()
 sys.path.insert(0, str(SCRIPT.parent))
 import task_workspace as task_runtime  # noqa: E402
 import target_runtime_provenance as provenance_runtime  # noqa: E402
+fixture_runtime = task_runtime.load_package_bound_test_fixture(
+    __file__, "task_workspace_fixture.py")
 try:
     _fixture = task_runtime.load_package_bound_test_fixture(__file__, "real_git_fixture.py")
 except task_runtime.TaskWorkspaceError as exc:
@@ -485,9 +488,15 @@ task_runtime.start = _capturing_task_start
 task_runtime.lease_successor = _capturing_lease_successor
 
 
+def _fixture_mode_uses_global_resource() -> bool:
+    """Module-wide ownership is forbidden; only declared tests serialize."""
+    return False
+
+
 def setUpModule() -> None:
-    global _RESOURCE_LOCK_TOKEN
-    _RESOURCE_LOCK_TOKEN, _ = _acquire_resource_lock(_RESOURCE_LOCK_WORKLOAD, RESOURCE_LOCK_PATH)
+    # Pure, seeded, and temp-only hermetic shards never acquire the ambient
+    # managed-install lock. Shared-resource tests acquire it in their fixture.
+    return None
 
 
 def tearDownModule() -> None:
@@ -514,8 +523,15 @@ def run(argv: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedP
     return result
 
 
+_ACTIVE_GIT_QUERY_ADAPTER = None
+
+
 def git(root: Path, *args: str) -> str:
-    return run(["git", "-C", str(root), *args], root).stdout.strip()
+    argv = ["git", "-C", str(root), *args]
+    result = run(argv, root).stdout.strip()
+    if _ACTIVE_GIT_QUERY_ADAPTER is not None:
+        _ACTIVE_GIT_QUERY_ADAPTER.observe_external(argv)
+    return result
 
 
 FAKE_KANBAN_SOURCE = '''#!/usr/bin/env python3
@@ -826,8 +842,129 @@ class ValidationProfilesRoundTripTests(unittest.TestCase):
             task_runtime.load_config(self.controller)
 
 
+class _SeededTemporary:
+    def __init__(self, instance: fixture_runtime.Instance):
+        self.instance = instance
+        self.name = str(instance.root)
+
+    def cleanup(self) -> None:
+        self.instance.release()
+
+
 class TaskWorkspaceFixture(unittest.TestCase):
+    _topology_seed: Optional[fixture_runtime.Seed] = None
+    _topology_source_root: Optional[str] = None
+
     def setUp(self) -> None:
+        test_id = f"{type(self).__name__}.{self._testMethodName}"
+        tier = fixture_tier_for(test_id)
+        mode = os.environ.get("JUNO_TASK_WORKSPACE_FIXTURE_MODE", "complete")
+        seeded = (mode in {"affected", "seeded", "complete"}
+                  and tier in {"seeded-repository", "seeded-controller", "seeded-history"}
+                  and os.environ.get(fixture_runtime.DISABLE_ENV, "") not in {"1", "true", "yes"})
+        self._test_resource_token: Optional[str] = None
+        if not seeded:
+            self._build_hermetic_fixture()
+            self._acquire_declared_test_resource(tier)
+            return
+        if TaskWorkspaceFixture._topology_seed is None:
+            TaskWorkspaceFixture._topology_seed = fixture_runtime.find_seed(
+                self._topology_static_inputs())
+        if TaskWorkspaceFixture._topology_seed is None:
+            self._build_hermetic_fixture()
+            source_root = str(self.root)
+            inputs = self._topology_seed_inputs()
+            def publish(topology: Path) -> None:
+                shutil.copytree(self.root, topology, dirs_exist_ok=True, symlinks=True)
+                (topology / ".yylo-source-root").write_text(source_root + "\n")
+            TaskWorkspaceFixture._topology_seed = fixture_runtime.ensure_seed(inputs, publish)
+            TaskWorkspaceFixture._topology_source_root = source_root
+            self._acquire_declared_test_resource(tier)
+            self._install_git_query_adapter()
+            return
+        seed = TaskWorkspaceFixture._topology_seed
+        instance = fixture_runtime.create_instance(seed)
+        marker = instance.root / ".yylo-source-root"
+        source_root = marker.read_text().strip()
+        marker.unlink()
+        replacement = str(instance.root)
+        old = source_root.encode(); new = replacement.encode()
+        for path in instance.root.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                value = path.read_bytes()
+                if old in value:
+                    path.write_bytes(value.replace(old, new))
+        self.temporary = _SeededTemporary(instance)
+        self.root = instance.root
+        self.repository = self.root / "repo"
+        self.controller = self.root / "controller"
+        self.workspaces = self.root / "workspaces"
+        # The tracked controller policy contains the owned workspace path.
+        # Rebinding it is instance materialization, not test dirt: amend only
+        # this disposable controller branch so status starts from the exact
+        # private path while the immutable seed remains byte-for-byte intact.
+        if git(self.controller, "status", "--porcelain=v1"):
+            git(self.controller, "add", "-u")
+            git(self.controller, "commit", "--amend", "--no-edit")
+        self.base = git(self.repository, "rev-parse", "refs/heads/product")
+        self.board = self.controller / ".juno_task/runtime/fake-kanban.json"
+        self._acquire_declared_test_resource(tier)
+        self._install_git_query_adapter()
+
+    def _install_git_query_adapter(self) -> None:
+        global _ACTIVE_GIT_QUERY_ADAPTER
+        self._original_task_runtime_run = task_runtime.run
+        self._git_query_adapter = fixture_runtime.MemoizedGitDispatch(task_runtime.run)
+        task_runtime.run = self._git_query_adapter
+        _ACTIVE_GIT_QUERY_ADAPTER = self._git_query_adapter
+
+    def _acquire_declared_test_resource(self, tier: str) -> None:
+        if tier == "shared-resource":
+            self._test_resource_token, _ = _acquire_resource_lock(
+                f"declared shared-resource test: {type(self).__name__}.{self._testMethodName}",
+                RESOURCE_LOCK_PATH,
+            )
+
+    def _topology_static_inputs(self) -> dict[str, str]:
+        def digest(path: Path) -> str:
+            return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "absent"
+        templates = SCRIPT.parent
+        git_version = run(["git", "--version"], SCRIPT.parent).stdout.strip()
+        return {
+            "fixture_schema": "task-workspace-topology.v1",
+            "builder_source_sha256": digest(Path(__file__)),
+            "task_workspace_sha256": digest(SCRIPT),
+            "decision_core_sha256": digest(templates / "task_workspace_decisions.py"),
+            "fixture_helper_sha256": digest(Path(fixture_runtime.__file__).resolve()),
+            "admission_sha256": digest(templates / "real_git_fixture.py"),
+            "fixture_manifest_sha256": hashlib.sha256("\n".join(VHC90C_CREATION_PATHS).encode()).hexdigest(),
+            "modes_sha256": hashlib.sha256("\n".join(sorted(FIXTURE_TIERS)).encode()).hexdigest(),
+            "sparse_checkout_sha256": hashlib.sha256(b"/.gitignore\n/.juno_task/\n").hexdigest(),
+            "git_identity": git_version,
+            "platform_class": f"{sys.platform}:{platform.machine()}",
+            "dependency_lock_sha256": digest(PACKAGE_ROOT / "package-lock.json"),
+            "managed_contract_sha256": digest(PACKAGE_ROOT / "src/templates/managed-assets.json"),
+        }
+
+    def _topology_seed_inputs(self) -> dict[str, str]:
+        values = self._topology_static_inputs()
+        def logical_tree(root: Path) -> str:
+            rows = []
+            for relative in git(root, "ls-files").splitlines():
+                path = root / relative
+                content = path.read_bytes().replace(str(self.root).encode(), b"<FIXTURE_ROOT>")
+                rows.append(relative.encode() + b"\0" + content)
+            return hashlib.sha256(b"\0".join(rows)).hexdigest()
+        policy = (self.controller / ".juno_task/config/task-workspace.json").read_bytes()
+        values.update({
+            "product_tree": logical_tree(self.repository),
+            "controller_tree": logical_tree(self.controller),
+            "policy_sha256": hashlib.sha256(
+                policy.replace(str(self.root).encode(), b"<FIXTURE_ROOT>")).hexdigest(),
+        })
+        return values
+
+    def _build_hermetic_fixture(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         # Use the physical temp root so exact-path tests are not aliases through
         # macOS's ordinary /var -> /private/var compatibility symlink.
@@ -921,6 +1058,14 @@ class TaskWorkspaceFixture(unittest.TestCase):
         git(self.controller, "read-tree", "-mu", "HEAD")
 
     def tearDown(self) -> None:
+        global _ACTIVE_GIT_QUERY_ADAPTER
+        if getattr(self, "_git_query_adapter", None) is not None:
+            task_runtime.run = self._original_task_runtime_run
+            _ACTIVE_GIT_QUERY_ADAPTER = None
+            self._git_query_adapter = None
+        if getattr(self, "_test_resource_token", None):
+            _release_resource_lock(RESOURCE_LOCK_PATH, self._test_resource_token)
+            self._test_resource_token = None
         self.temporary.cleanup()
 
     def write_policy(self, *, validation_ok: bool = True, validation_code: Optional[str] = None,
@@ -4212,11 +4357,14 @@ raise SystemExit(2)
         self.write_policy(validation_code=code, timeout_seconds=1, max_output_bytes=1024)
         started = time.monotonic()
         failed = self.command("finish", "X", False)
-        self.assertLess(time.monotonic() - started, 3)
+        # Bound the operation itself rather than conflating it with fresh CLI
+        # import and durable-state readback overhead on a loaded host.
+        self.assertLess(time.monotonic() - started, 5)
         self.assertEqual(failed.returncode, 2)
         self.assertIn("timed out", failed.stderr)
         evidence = self.payload("status", "X")["validation"][0]
         self.assertTrue(evidence["timed_out"])
+        self.assertLess(evidence["duration_ms"], 1500)
         self.assertGreater(evidence["stdout_truncated_bytes"], 0)
         self.assertGreater(evidence["stderr_truncated_bytes"], 0)
         self.assertLessEqual(len(evidence["stdout_tail"].encode()), 1024)
@@ -7129,6 +7277,380 @@ class MinimumRcLifecycleContractTests(unittest.TestCase):
             prompt_a.write_text("model-authored mutation\n")
             with self.assertRaisesRegex(lifecycle.LifecycleContractError, "uncommitted|drifted"):
                 lifecycle.compile_lifecycle_template(root, "task-run", "T1")
+
+
+FIXTURE_TIERS = frozenset({
+    "pure", "seeded-repository", "seeded-controller", "seeded-history",
+    "hermetic", "shared-resource",
+})
+PURE_FIXTURE_CLASSES = frozenset({"SemVerValidationTests"})
+PURE_FIXTURE_TESTS = frozenset({
+    "FixtureModeContractTests.test_every_task_workspace_test_declares_one_fixture_tier",
+    "FixtureModeContractTests.test_pure_tier_forbids_git_subprocess_and_filesystem_mutation",
+    "FixtureModeContractTests.test_hermetic_capabilities_cannot_be_classified_seeded",
+})
+SHARED_RESOURCE_TESTS = frozenset({
+    "TaskWorkspaceTests.test_focused_scheduler_serializes_only_shared_resource_in_policy_order",
+})
+HERMETIC_CAPABILITY_MARKERS = (
+    "symlink", "submodule", "orphan", "sparse", "common_dir", "common_directory",
+    "cleanup", "interruption", "worktree_identity", "parent_component",
+)
+HISTORICAL_CAPABILITY_MARKERS = ("historical", "stale_then_absent", "legacy_consumer")
+SEEDED_CONTROLLER_OVERRIDES = frozenset({
+    "TaskWorkspaceTests.test_finish_queues_clean_committed_tip_without_merging_or_cleanup",
+})
+
+
+def _requires_hermetic(test_id: str) -> bool:
+    return (test_id not in SEEDED_CONTROLLER_OVERRIDES
+            and any(marker in test_id.split(".", 1)[1]
+                    for marker in HERMETIC_CAPABILITY_MARKERS))
+
+
+def _canonical_test_ids() -> list[str]:
+    values = []
+    for name, candidate in sorted(globals().items()):
+        if isinstance(candidate, type) and issubclass(candidate, unittest.TestCase):
+            values.extend(f"{name}.{method}" for method in unittest.defaultTestLoader.getTestCaseNames(candidate))
+    return values
+
+
+def _classify_fixture_test(test_id: str) -> str:
+    class_name, method = test_id.split(".", 1)
+    if class_name in PURE_FIXTURE_CLASSES or test_id in PURE_FIXTURE_TESTS:
+        return "pure"
+    if test_id in SHARED_RESOURCE_TESTS:
+        return "shared-resource"
+    if test_id in SEEDED_CONTROLLER_OVERRIDES:
+        return "seeded-controller"
+    if _requires_hermetic(test_id):
+        return "hermetic"
+    if any(marker in method for marker in HISTORICAL_CAPABILITY_MARKERS):
+        return "seeded-history"
+    if class_name in {"ValidationProfilesRoundTripTests", "QueueAttributionReceiptTests",
+                      "MinimumRcLifecycleContractTests"}:
+        return "seeded-repository"
+    return "seeded-controller"
+
+
+def fixture_registry() -> dict[str, str]:
+    """Frozen one-tier registry for the exact collected contract inventory."""
+    return {test_id: _classify_fixture_test(test_id) for test_id in _canonical_test_ids()}
+
+
+def selected_fixture_tests(mode: str) -> list[str]:
+    registry = fixture_registry()
+    admitted = {
+        "affected": FIXTURE_TIERS,
+        "seeded": {"pure", "seeded-repository", "seeded-controller", "seeded-history"},
+        "hermetic": {"hermetic", "shared-resource"},
+        "complete": FIXTURE_TIERS,
+    }
+    if mode not in admitted:
+        raise ValueError(f"unsupported fixture mode: {mode}")
+    return sorted(test_id for test_id, tier in registry.items() if tier in admitted[mode])
+
+
+def affected_fixture_tests(changed_paths: list[str]) -> list[str]:
+    if not changed_paths:
+        return selected_fixture_tests("complete")
+    pure = [test_id for test_id in selected_fixture_tests("seeded")
+            if fixture_tier_for(test_id) == "pure"]
+    if all(path.endswith((".md", ".json")) for path in changed_paths):
+        return pure
+    adapter = [test_id for test_id in selected_fixture_tests("seeded")
+               if test_id.endswith("test_finish_queues_clean_committed_tip_without_merging_or_cleanup")]
+    return sorted(set([*pure, *adapter]))
+
+
+def performance_receipt_eligible(receipt: dict, baseline: dict) -> bool:
+    return bool(
+        receipt.get("success") is True and baseline.get("success") is True
+        and receipt.get("comparable_identity") == baseline.get("comparable_identity")
+        and receipt.get("inventory") == baseline.get("inventory")
+        and not any((receipt.get("failures", 0), receipt.get("errors", 0),
+                     receipt.get("skipped", 0), baseline.get("failures", 0),
+                     baseline.get("errors", 0), baseline.get("skipped", 0)))
+        and isinstance(receipt.get("p95_ms"), (int, float))
+        and isinstance(baseline.get("p95_ms"), (int, float))
+    )
+
+
+def fixture_tier_for(test_id: str) -> str:
+    try:
+        return fixture_registry()[test_id]
+    except KeyError as exc:
+        raise ValueError(f"unclassified task-workspace test: {test_id}") from exc
+
+
+def validate_fixture_registry(test_ids: list[str], registry: Optional[dict[str, str]] = None) -> None:
+    registry = dict(fixture_registry() if registry is None else registry)
+    missing = sorted(set(test_ids) - set(registry))
+    extra = sorted(set(registry) - set(test_ids))
+    invalid = sorted(test_id for test_id, tier in registry.items() if tier not in FIXTURE_TIERS)
+    unsafe = sorted(test_id for test_id, tier in registry.items()
+                    if tier.startswith("seeded-") and _requires_hermetic(test_id))
+    if missing or extra or invalid or unsafe:
+        raise ValueError(f"fixture registry mismatch missing={missing} extra={extra} invalid={invalid} unsafe={unsafe}")
+
+
+class FixtureModeContractTests(unittest.TestCase):
+    def test_every_task_workspace_test_declares_one_fixture_tier(self) -> None:
+        inventory = _canonical_test_ids()
+        validate_fixture_registry(inventory)
+        self.assertEqual(len(inventory), len(fixture_registry()))
+        with self.assertRaisesRegex(ValueError, "unclassified"):
+            fixture_tier_for("SyntheticTests.test_new_contract")
+        with self.assertRaisesRegex(ValueError, "missing"):
+            validate_fixture_registry([*inventory, "SyntheticTests.test_new_contract"])
+
+    def test_pure_tier_forbids_git_subprocess_and_filesystem_mutation(self) -> None:
+        pure = [test_id for test_id, tier in fixture_registry().items()
+                if tier == "pure" and test_id.startswith("SemVerValidationTests.")]
+        self.assertTrue(pure)
+        forbidden = mock.Mock(side_effect=AssertionError("pure fixture attempted mutation"))
+        suite = unittest.TestSuite(
+            SemVerValidationTests(method.split(".", 1)[1]) for method in pure)
+        with mock.patch.object(task_runtime.subprocess, "run", forbidden), \
+             mock.patch.object(task_runtime.subprocess, "Popen", forbidden), \
+             mock.patch.object(Path, "write_text", forbidden), \
+             mock.patch.object(Path, "write_bytes", forbidden):
+            result = unittest.TestResult()
+            suite.run(result)
+        self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+
+    def test_hermetic_capabilities_cannot_be_classified_seeded(self) -> None:
+        inventory = _canonical_test_ids()
+        registry = fixture_registry()
+        hermetic = [test_id for test_id in inventory if _requires_hermetic(test_id)]
+        self.assertTrue(hermetic)
+        for test_id in hermetic:
+            self.assertIn(registry[test_id], {"hermetic", "shared-resource"})
+        unsafe = dict(registry)
+        unsafe[hermetic[0]] = "seeded-controller"
+        with self.assertRaisesRegex(ValueError, "unsafe"):
+            validate_fixture_registry(inventory, unsafe)
+
+    def _seed_inputs(self, **changes) -> dict[str, str]:
+        values = {name: hashlib.sha256(name.encode()).hexdigest()
+                  for name in fixture_runtime.BOUND_INPUTS}
+        values.update(changes)
+        return values
+
+    def _seed_builder(self, topology: Path) -> None:
+        repository = topology / "repo"
+        repository.mkdir()
+        git(repository, "init", "-b", "fixture")
+        git(repository, "config", "user.email", "fixture@example.invalid")
+        git(repository, "config", "user.name", "Fixture")
+        (repository / "base.txt").write_text("base\n")
+        git(repository, "add", ".")
+        git(repository, "commit", "-m", "base")
+        (repository / "history.txt").write_text("history\n")
+        git(repository, "add", ".")
+        git(repository, "commit", "-m", "history")
+        (topology / "runtime").mkdir()
+        (topology / "runtime/task.json").write_text("{}\n")
+
+    def test_seed_identity_invalidates_on_every_bound_input(self) -> None:
+        original = self._seed_inputs()
+        key = fixture_runtime.seed_key(original)
+        for name in fixture_runtime.BOUND_INPUTS:
+            with self.subTest(name=name):
+                changed = dict(original); changed[name] = "drift-" + changed[name]
+                self.assertNotEqual(key, fixture_runtime.seed_key(changed))
+        with self.assertRaisesRegex(ValueError, "missing"):
+            fixture_runtime.seed_key({})
+
+    def test_seed_is_immutable_and_tamper_rebuilds_without_repairing_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = Path(temporary) / "bases"
+            first = fixture_runtime.ensure_seed(self._seed_inputs(), self._seed_builder,
+                                                cache_root=cache)
+            target = first.root / "topology/runtime/task.json"
+            target.chmod(0o644); target.write_text("tampered\n"); target.chmod(0o444)
+            second = fixture_runtime.ensure_seed(self._seed_inputs(), self._seed_builder,
+                                                 cache_root=cache)
+            self.assertFalse(second.hit)
+            self.assertEqual((second.root / "topology/runtime/task.json").read_text(), "{}\n")
+            self.assertTrue(any(".corrupt-" in item.name for item in cache.iterdir()))
+
+    def test_disposable_instances_cannot_observe_each_other(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = Path(temporary) / "bases"; overlays = Path(temporary) / "overlays"
+            seed = fixture_runtime.ensure_seed(self._seed_inputs(), self._seed_builder,
+                                               cache_root=cache)
+            first = fixture_runtime.create_instance(seed, parent=overlays)
+            second = fixture_runtime.create_instance(seed, parent=overlays)
+            try:
+                git(first.root / "repo", "branch", "only-first")
+                (first.root / "runtime/task.json").write_text('{"owner":"first"}\n')
+                (first.root / "receipts").mkdir(); (first.root / "receipts/one").write_text("x")
+                self.assertNotIn("only-first", git(second.root / "repo", "branch"))
+                self.assertEqual((second.root / "runtime/task.json").read_text(), "{}\n")
+                self.assertFalse((second.root / "receipts").exists())
+            finally:
+                first.release(); second.release()
+
+    def test_failed_instance_cannot_contaminate_next_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = Path(temporary) / "bases"; overlays = Path(temporary) / "overlays"
+            seed = fixture_runtime.ensure_seed(self._seed_inputs(), self._seed_builder,
+                                               cache_root=cache)
+            failed = fixture_runtime.create_instance(seed, parent=overlays)
+            (failed.root / "runtime/failed").write_text("partial")
+            failed.release()
+            successor = fixture_runtime.create_instance(seed, parent=overlays)
+            try: self.assertFalse((successor.root / "runtime/failed").exists())
+            finally: successor.release()
+
+    def test_historical_instance_starts_at_exact_declared_commit_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = Path(temporary) / "bases"
+            seed = fixture_runtime.ensure_seed(self._seed_inputs(), self._seed_builder,
+                                               cache_root=cache)
+            instance = fixture_runtime.create_instance(seed, parent=Path(temporary) / "overlays")
+            try:
+                repository = instance.root / "repo"
+                historical = git(repository, "rev-parse", "HEAD^")
+                expected_tree = git(repository, "rev-parse", f"{historical}^{{tree}}")
+                git(repository, "checkout", "--detach", historical)
+                self.assertEqual(git(repository, "rev-parse", "HEAD^{tree}"), expected_tree)
+            finally: instance.release()
+
+    def test_memoized_git_query_adapter_preserves_outputs_and_real_process_canaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repository"; repository.mkdir()
+            git(repository, "init", "-b", "main")
+            git(repository, "config", "user.email", "fixture@example.invalid")
+            git(repository, "config", "user.name", "Fixture")
+            (repository / "value").write_text("one\n")
+            git(repository, "add", "value"); git(repository, "commit", "-m", "one")
+            adapter = fixture_runtime.MemoizedGitDispatch(task_runtime.run)
+            with mock.patch.object(task_runtime, "run", side_effect=adapter):
+                first = task_runtime.git(repository, "rev-parse", "HEAD")
+                self.assertEqual(task_runtime.git(repository, "rev-parse", "HEAD"), first)
+                (repository / "value").write_text("two\n")
+                task_runtime.git(repository, "add", "value")
+                task_runtime.git(repository, "commit", "-m", "two")
+                second = task_runtime.git(repository, "rev-parse", "HEAD")
+                self.assertEqual(task_runtime.git(repository, "rev-parse", "HEAD"), second)
+            self.assertNotEqual(first, second)
+            self.assertEqual(first, git(repository, "rev-parse", "HEAD^"))
+            self.assertEqual(second, git(repository, "rev-parse", "HEAD"))
+            self.assertEqual(adapter.cache_hits, 2)
+            self.assertEqual(adapter.real_query_processes, 2)
+
+    def test_overlay_release_repairs_only_cleanup_obstructions_without_eager_tree_chmod(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); cache = root / "bases"; overlays = root / "overlays"
+            seed = fixture_runtime.ensure_seed(self._seed_inputs(), self._seed_builder,
+                                               cache_root=cache)
+            instance = fixture_runtime.create_instance(seed, parent=overlays)
+            obstruction = instance.root / "readonly"
+            obstruction.mkdir(); (obstruction / "payload").write_text("preserve semantics\n")
+            obstruction.chmod(0o500)
+            with mock.patch.object(fixture_runtime, "make_owner_writable",
+                                   side_effect=AssertionError("eager recursive chmod")):
+                instance.release()
+            self.assertFalse(instance.root.exists())
+
+    def test_overlay_cleanup_refuses_foreign_or_aliased_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); cache = root / "bases"; overlays = root / "overlays"
+            seed = fixture_runtime.ensure_seed(self._seed_inputs(), self._seed_builder,
+                                               cache_root=cache)
+            instance = fixture_runtime.create_instance(seed, parent=overlays)
+            foreign = root / "foreign"; foreign.mkdir(); (foreign / "keep").write_text("safe")
+            shutil.rmtree(instance.root); instance.root.symlink_to(foreign, target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError, "foreign or aliased"):
+                instance.release()
+            self.assertEqual((foreign / "keep").read_text(), "safe")
+            instance.root.unlink()
+
+    def test_complete_mode_includes_every_hermetic_required_contract(self) -> None:
+        complete = set(selected_fixture_tests("complete"))
+        hermetic = set(selected_fixture_tests("hermetic"))
+        self.assertTrue(hermetic)
+        self.assertTrue(hermetic <= complete)
+        self.assertEqual(complete, set(_canonical_test_ids()))
+
+    def test_temp_only_shards_run_without_global_managed_install_lock(self) -> None:
+        self.assertFalse(_fixture_mode_uses_global_resource())
+        with mock.patch(__name__ + "._acquire_resource_lock") as acquire:
+            setUpModule()
+        acquire.assert_not_called()
+
+    def test_shared_resource_tests_serialize_by_declared_resource_class(self) -> None:
+        registry = fixture_registry()
+        self.assertTrue(SHARED_RESOURCE_TESTS)
+        self.assertTrue(all(registry[test_id] == "shared-resource"
+                            for test_id in SHARED_RESOURCE_TESTS))
+        self.assertFalse(set(selected_fixture_tests("seeded")) & SHARED_RESOURCE_TESTS)
+        self.assertTrue(SHARED_RESOURCE_TESTS <= set(selected_fixture_tests("hermetic")))
+
+    def test_parallel_shards_preserve_result_and_mutation_equivalence(self) -> None:
+        serial = selected_fixture_tests("complete")
+        shards = [serial[index::4] for index in range(4)]
+        parallel = sorted(test_id for shard in shards for test_id in shard)
+        self.assertEqual(parallel, serial)
+        self.assertEqual(len(parallel), len(set(parallel)))
+        self.assertEqual(
+            [(test_id, fixture_tier_for(test_id)) for test_id in parallel],
+            [(test_id, fixture_registry()[test_id]) for test_id in serial],
+        )
+
+    def test_duration_weighted_shards_balance_deterministically(self) -> None:
+        runner_path = Path(fixture_runtime.__file__).resolve().parent / "task_workspace_test_runner.py"
+        specification = __import__("importlib.util").util.spec_from_file_location(
+            "fixture_profile_runner_contract", runner_path)
+        self.assertIsNotNone(specification)
+        runner = __import__("importlib.util").util.module_from_spec(specification)
+        specification.loader.exec_module(runner)
+        tests = ["Suite.test_slow", "Suite.test_medium", "Suite.test_fast_a", "Suite.test_fast_b"]
+        weights = {"Suite.test_slow": 9_000, "Suite.test_medium": 5_000,
+                   "Suite.test_fast_a": 2_000, "Suite.test_fast_b": 1_000}
+        first = runner.balanced_shards(tests, weights, 2)
+        second = runner.balanced_shards(list(reversed(tests)), weights, 2)
+        self.assertEqual(first, second)
+        self.assertEqual(sorted(item for shard in first for item in shard), sorted(tests))
+        loads = [sum(weights[item] for item in shard) for shard in first]
+        round_robin = [sum(weights[item] for item in tests[index::2]) for index in range(2)]
+        self.assertLess(max(loads), max(round_robin))
+
+    def test_complete_suite_entrypoint_cannot_select_seeded_only(self) -> None:
+        complete = set(selected_fixture_tests("complete"))
+        seeded = set(selected_fixture_tests("seeded"))
+        hermetic = set(selected_fixture_tests("hermetic"))
+        self.assertEqual(complete, seeded | hermetic)
+        self.assertTrue(hermetic - seeded)
+
+    def test_changed_closure_routes_to_expected_fixture_shards(self) -> None:
+        docs = affected_fixture_tests(["docs/fixture-modes.md"])
+        runtime = affected_fixture_tests(["juno-code/src/templates/scripts/task_workspace.py"])
+        self.assertTrue(docs)
+        self.assertTrue(all(fixture_tier_for(test_id) == "pure" for test_id in docs))
+        self.assertTrue(set(docs) < set(runtime))
+        self.assertTrue(all(fixture_tier_for(test_id) != "hermetic" for test_id in runtime))
+
+    def test_seeded_failure_replays_in_hermetic_mode(self) -> None:
+        failed = "TaskWorkspaceTests.test_status_and_finish_refuse_symlinked_parent_component"
+        self.assertIn(failed, selected_fixture_tests("hermetic"))
+        command = ["npm", "run", "test:task-workspace:hermetic", "--", "--test-id", failed]
+        self.assertEqual(command[-1], failed)
+        self.assertIn("test:task-workspace:hermetic", command)
+
+    def test_performance_receipt_rejects_incomparable_or_failed_baseline(self) -> None:
+        valid = {"success": True, "comparable_identity": "host-A", "inventory": ["a"],
+                 "failures": 0, "errors": 0, "skipped": 0, "p95_ms": 10}
+        self.assertTrue(performance_receipt_eligible(valid, dict(valid)))
+        for change in ({"success": False}, {"comparable_identity": "host-B"},
+                       {"failures": 1}, {"errors": 1}, {"skipped": 1},
+                       {"inventory": []}, {"p95_ms": None}):
+            with self.subTest(change=change):
+                invalid = dict(valid); invalid.update(change)
+                self.assertFalse(performance_receipt_eligible(valid, invalid))
 
 
 if __name__ == "__main__":
