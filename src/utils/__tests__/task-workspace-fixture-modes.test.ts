@@ -89,6 +89,8 @@ describe('task-workspace supported profiler and runner', () => {
     });
     expect(result.status).not.toBe(0);
     const value = JSON.parse(fs.readFileSync(receipt, 'utf8')) as Record<string, any>;
+    expect(value.exit_code).toBe(result.status);
+    expect(value.shards[0].exit_code).toBe(0);
     expect(value.eligible).toBe(false);
     expect(value.performance_gate).toEqual(expect.objectContaining({
       applicable: true,
@@ -149,6 +151,52 @@ describe('task-workspace supported profiler and runner', () => {
     expect(() => process.kill(pid, 0)).toThrow();
   }, 10_000);
 
+  it.runIf(process.platform !== 'win32')('reconciles a descendant that escapes into a new session', () => {
+    const root = temporaryDirectory();
+    const receipt = path.join(root, 'escaped-session.json');
+    const probe = path.join(root, 'escaped-session.py');
+    const childPid = path.join(root, 'escaped-child.pid');
+    fs.writeFileSync(probe, [
+      'import pathlib, subprocess, sys',
+      `p=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)`,
+      `pathlib.Path(${JSON.stringify(childPid)}).write_text(str(p.pid))`,
+    ].join('\n'));
+    let pid: number | undefined;
+    try {
+      const result = spawnSync(process.execPath, [runner, '--mode', 'seeded', '--receipt', receipt,
+        '--command', 'python3', '--command-arg', probe], {
+        cwd: path.join(repository, 'juno-code'), encoding: 'utf8', timeout: 5_000,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const value = JSON.parse(fs.readFileSync(receipt, 'utf8')) as Record<string, any>;
+      expect(value.exit_code).toBe(result.status);
+      expect(value.processes).toEqual({ settled: true, surviving: [] });
+      pid = Number(fs.readFileSync(childPid, 'utf8'));
+      expect(() => process.kill(pid!, 0)).toThrow();
+    } finally {
+      if (pid) {
+        try { process.kill(pid, 'SIGKILL'); } catch { /* already reconciled */ }
+      }
+    }
+  }, 10_000);
+
+  it('returns nonzero and reports survivors when settlement cannot be verified', () => {
+    const root = temporaryDirectory();
+    const receipt = path.join(root, 'unverified.json');
+    const result = spawnSync(process.execPath, [runner, '--mode', 'seeded', '--receipt', receipt,
+      '--command', process.execPath, '--command-arg', '-e', '--command-arg', 'process.exit(0)'], {
+      cwd: path.join(repository, 'juno-code'), encoding: 'utf8', timeout: 5_000,
+      env: { ...process.env, PATH: root },
+    });
+    expect(result.status).not.toBe(0);
+    const value = JSON.parse(fs.readFileSync(receipt, 'utf8')) as Record<string, any>;
+    expect(value.exit_code).toBe(result.status);
+    expect(value.processes.settled).toBe(false);
+    expect(value.processes.surviving).toEqual([
+      expect.stringMatching(/^verification:/),
+    ]);
+  });
+
   it('task-workspace-wrapper-enforces-child-timeout-and-process-settlement', () => {
     const root = temporaryDirectory();
     const receipt = path.join(root, 'timeout.json');
@@ -167,6 +215,7 @@ describe('task-workspace supported profiler and runner', () => {
     expect(result.status).not.toBe(0);
     const value = JSON.parse(fs.readFileSync(receipt, 'utf8')) as Record<string, any>;
     expect(value.timeout).toBe(true);
+    expect(value.exit_code).toBe(result.status);
     expect(value.eligible).toBe(false);
     expect(value.processes.settled).toBe(true);
     const pid = Number(fs.readFileSync(childPid, 'utf8'));

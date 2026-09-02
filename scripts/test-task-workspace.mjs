@@ -57,33 +57,130 @@ function signalOwnedGroup(child, signal) {
   }
 }
 
-async function waitForGroupExit(pid, timeoutMs) {
-  const deadline = performance.now() + timeoutMs;
-  while (processGroupAlive(pid) && performance.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  return !processGroupAlive(pid);
+function captureBounded(command, args, timeoutMs = 1_000, outputLimit = 16 * 1024 * 1024) {
+  return new Promise((resolve) => {
+    let output = Buffer.alloc(0);
+    let settled = false;
+    let child;
+    try {
+      child = spawn(command, args, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    } catch (error) {
+      resolve({ ok: false, output: '', error: String(error) });
+      return;
+    }
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.stdout.destroy();
+      resolve(value);
+    };
+    child.stdout.on('data', (chunk) => {
+      output = Buffer.concat([output, Buffer.from(chunk)]);
+      if (output.length > outputLimit) {
+        child.kill('SIGKILL');
+        finish({ ok: false, output: '', error: 'process inventory exceeded bounded output' });
+      }
+    });
+    child.once('error', (error) => finish({ ok: false, output: '', error: String(error) }));
+    child.once('exit', (code) => finish({
+      ok: code === 0,
+      output: output.toString('utf8'),
+      error: code === 0 ? null : `process inventory exited ${code}`,
+    }));
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish({ ok: false, output: '', error: 'process inventory timed out' });
+    }, timeoutMs);
+  });
 }
 
-async function reconcileOwnedGroup(child) {
-  if (process.platform === 'win32') {
+async function discoverOwnedProcesses(ownerToken, knownPids) {
+  if (process.platform !== 'win32') {
+    const inventory = await captureBounded('ps', ['eww', '-axo', 'pid=,command=']);
+    if (!inventory.ok) return { pids: [], error: inventory.error };
+    const marker = `JUNO_TASK_WORKSPACE_RUN_OWNER=${ownerToken}`;
+    const pids = inventory.output.split('\n').flatMap((line) => {
+      if (!line.includes(marker)) return [];
+      const match = line.match(/^\s*(\d+)\s/);
+      return match ? [Number(match[1])] : [];
+    }).filter((pid) => pid !== process.pid);
+    return { pids: [...new Set(pids)], error: null };
+  }
+
+  const inventory = await captureBounded('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress'], 2_000);
+  if (!inventory.ok) return { pids: [], error: inventory.error };
+  try {
+    const decoded = JSON.parse(inventory.output || '[]');
+    const rows = Array.isArray(decoded) ? decoded : [decoded];
+    const owned = new Set(knownPids);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const row of rows) {
+        const pid = Number(row.ProcessId);
+        if (owned.has(Number(row.ParentProcessId)) && !owned.has(pid)) {
+          owned.add(pid);
+          changed = true;
+        }
+      }
+    }
+    return { pids: [...owned].filter((pid) => rows.some((row) => Number(row.ProcessId) === pid)), error: null };
+  } catch (error) {
+    return { pids: [], error: `cannot parse Windows process inventory: ${error}` };
+  }
+}
+
+function signalOwnedPids(pids, signal) {
+  for (const pid of pids) {
+    if (pid === process.pid) continue;
+    try { process.kill(pid, signal); } catch (error) {
+      if (error?.code !== 'ESRCH') throw error;
+    }
+  }
+}
+
+async function reconcileOwnedProcesses(child, ownerToken, knownPids) {
+  const verify = async () => {
+    const discovered = await discoverOwnedProcesses(ownerToken, knownPids);
+    for (const pid of discovered.pids) knownPids.add(pid);
+    const group = processGroupAlive(child.pid);
+    return { ...discovered, group };
+  };
+  let state = await verify();
+  if (state.error) {
     child.stdout.destroy();
     child.stderr.destroy();
-    return { settled: child.exitCode !== null || child.signalCode !== null, surviving: [] };
+    return { settled: false, surviving: [`verification:${state.error}`] };
   }
-  if (processGroupAlive(child.pid)) signalOwnedGroup(child, 'SIGTERM');
-  let settled = await waitForGroupExit(child.pid, 300);
-  if (!settled) {
-    signalOwnedGroup(child, 'SIGKILL');
-    settled = await waitForGroupExit(child.pid, 1_000);
+  if (state.group) signalOwnedGroup(child, 'SIGTERM');
+  signalOwnedPids(state.pids, 'SIGTERM');
+  for (const [waitMs, signal] of [[300, 'SIGKILL'], [1_000, null]]) {
+    const deadline = performance.now() + waitMs;
+    do {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      state = await verify();
+      if (state.error || (!state.group && state.pids.length === 0)) break;
+    } while (performance.now() < deadline);
+    if (state.error || (!state.group && state.pids.length === 0) || signal === null) break;
+    if (state.group) signalOwnedGroup(child, signal);
+    signalOwnedPids(state.pids, signal);
   }
   child.stdout.destroy();
   child.stderr.destroy();
-  return { settled, surviving: settled ? [] : [`process_group:${child.pid}`] };
+  if (state.error) return { settled: false, surviving: [`verification:${state.error}`] };
+  const surviving = [
+    ...(state.group ? [`process_group:${child.pid}`] : []),
+    ...state.pids.map((pid) => `pid:${pid}`),
+  ];
+  return { settled: surviving.length === 0, surviving };
 }
 
 async function runOwned(command, args, timeoutMs, fixtureMode, outputLimit = 262_144) {
   const started = performance.now();
+  const ownerToken = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const knownPids = new Set();
   const child = spawn(command, args, {
     cwd: root,
     detached: process.platform !== 'win32',
@@ -91,6 +188,7 @@ async function runOwned(command, args, timeoutMs, fixtureMode, outputLimit = 262
     env: {
       ...process.env,
       JUNO_TASK_WORKSPACE_FIXTURE_MODE: fixtureMode,
+      JUNO_TASK_WORKSPACE_RUN_OWNER: ownerToken,
       PYTHONPYCACHEPREFIX: process.env.PYTHONPYCACHEPREFIX ?? path.join(os.tmpdir(), 'juno-task-workspace-runner-pycache'),
     },
   });
@@ -101,9 +199,17 @@ async function runOwned(command, args, timeoutMs, fixtureMode, outputLimit = 262
   };
   child.stdout.on('data', append);
   child.stderr.on('data', append);
+  knownPids.add(child.pid);
   let timedOut = false;
   let timer;
   let escalationTimer;
+  let inventoryInFlight = null;
+  const inventoryTimer = process.platform === 'win32' ? setInterval(() => {
+    if (inventoryInFlight) return;
+    inventoryInFlight = discoverOwnedProcesses(ownerToken, knownPids).then((inventory) => {
+      for (const pid of inventory.pids) knownPids.add(pid);
+    }).finally(() => { inventoryInFlight = null; });
+  }, 100) : null;
   const status = await new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('exit', (code, signal) => resolve({ code, signal }));
@@ -115,7 +221,9 @@ async function runOwned(command, args, timeoutMs, fixtureMode, outputLimit = 262
     }, timeoutMs);
   });
   clearTimeout(timer);
-  const reconciliation = await reconcileOwnedGroup(child);
+  if (inventoryTimer) clearInterval(inventoryTimer);
+  if (inventoryInFlight) await inventoryInFlight;
+  const reconciliation = await reconcileOwnedProcesses(child, ownerToken, knownPids);
   if (escalationTimer) clearTimeout(escalationTimer);
   return {
     ...status,
@@ -204,7 +312,7 @@ async function main() {
     })),
     timeout_ms: options.timeoutMs,
     timeout: run.timedOut,
-    exit_code: run.code ?? (run.timedOut ? 124 : 1),
+    exit_code: null,
     eligible: !run.timedOut && run.code === 0 && run.settled && profile?.success !== false && tests.every((test) => test.outcome === 'passed'),
     environment: { platform: os.platform(), release: os.release(), arch: os.arch(), node: process.version, cpu_count: cpuCount, initial_loadavg: initialLoad },
     comparability: { comparable, reason: comparable ? null : 'reference_load_exceeded', max_load_1m: cpuCount * 2 },
@@ -232,12 +340,13 @@ async function main() {
     reason: !testEligible ? 'run_failed' : !comparable ? 'incomparable_environment' : run.wallMs > targetMs ? 'target_exceeded' : null,
   };
   receipt.eligible = testEligible && (targetMs === null || receipt.performance_gate.eligible === true);
+  receipt.exit_code = receipt.eligible ? 0
+    : run.timedOut ? 124
+      : run.code && run.code !== 0 ? run.code : 1;
   atomicWrite(path.resolve(options.receipt), receipt);
   if (!receipt.eligible) process.stderr.write(run.output);
   process.stdout.write(`${JSON.stringify({ receipt: path.resolve(options.receipt), eligible: receipt.eligible, mode: options.mode, selected: receipt.selected.length })}\n`);
-  if (receipt.eligible) return 0;
-  if (run.timedOut) return 124;
-  return run.code && run.code !== 0 ? run.code : 1;
+  return receipt.exit_code;
 }
 
 main().then((code) => { process.exitCode = code; }).catch((error) => {
