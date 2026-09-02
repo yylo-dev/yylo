@@ -264,6 +264,8 @@ yy merge arbiter status
 yy merge arbiter run --through TASK_ID
 ```
 
+The guarded manual admission order is `yy task preflight ID -> yy task finish ID`; merge remains a separate queue-owned step.
+
 Safety invariants:
 
 1. `task start` freezes the protected target SHA, creates a dedicated branch/worktree, and completes configured dependency hydration before reporting `WORKING`.
