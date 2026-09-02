@@ -653,6 +653,18 @@ class MergeQueueTests(unittest.TestCase):
         self.task("finish", task_id)
         return tip
 
+    def bind_merge_validation_identity(self, task_id: str) -> None:
+        """Project standing results onto the merge queue's focused identity."""
+        state_path = self.controller / ".juno_task/state/tasks.json"
+        state = json.loads(state_path.read_text())
+        record = state["tasks"][task_id]
+        rows = task_runtime.selected_focused_rows(
+            task_runtime.load_config(self.controller), record["changed_paths"])
+        results = {result["id"]: result for result in record["validation"]}
+        self.assertTrue(all(row["id"] in results for row in rows))
+        record["validation"] = [results[row["id"]] for row in rows]
+        state_path.write_text(
+            json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
 
     def write_profiled_policy(self) -> Path:
         """Add one package-local validation profile rooted at pkg/."""
@@ -3201,6 +3213,11 @@ steps:
                     *args, **kwargs, findings=True)):
             finding = merge_runtime.merge_review(self.controller.resolve(), "X")
         self.assertEqual(finding["outcome"], "REVIEW_FINDINGS")
+        semantic_sidecars = list((
+            self.controller / ".juno_task/runtime/merge-queue/evidence/X"
+        ).glob(f"{findings_tip}.attempt-*.json.semantic.json"))
+        self.assertEqual(len(semantic_sidecars), 1)
+        semantic_sidecars[0].unlink()  # Preserve this scenario's legacy-evidence seam.
 
         worktree = self.workspaces / "X"
         (worktree / "src/security/auth.py").write_text("fixed\n")
@@ -4791,9 +4808,10 @@ steps:
         tip = self.commit_feature("X", "pkg/security/auth.py", "package change\n")
         standing = self.task("status", "X")["review_ready_closure"]["standing_validation"]
         self.assertEqual(standing["counters"], {
-            "executed": 0, "reused": 0, "invalidated": 0,
-            "skipped": 0, "not_applicable": 1,
+            "executed": 2, "reused": 0, "invalidated": 0,
+            "skipped": 0, "not_applicable": 0,
         })
+        self.bind_merge_validation_identity("X")
         waiting = self.queue_payload("next")
         self.assertEqual(waiting["outcome"], "AWAITING_RISK")
         self.assertFalse(self.full_counter.exists())
@@ -4810,7 +4828,8 @@ steps:
         self.assertEqual(claim["routing"]["mode"], "profile")
         self.assertEqual(claim["routing"]["profile_ids"], ["pkg-suite"])
         self.assertIn("validation_routing_sha256", claim["validation_identity"])
-        self.assertEqual(pkg_counter.read_text().splitlines(), ["run", "run"])
+        self.assertEqual(pkg_counter.read_text().splitlines(),
+                         ["run", "run", "run", "run"])
         self.assertFalse(self.full_counter.exists())
         merged = merge_runtime.merge_next(self.controller.resolve(), "X")
         self.assertEqual((merged["outcome"], merged["candidate_sha"]), ("MERGED", tip))
@@ -4826,6 +4845,12 @@ steps:
         git(worktree, "add", "pkg/security/auth.py", "src/one.txt")
         git(worktree, "commit", "-m", "mixed feature")
         self.task("finish", "X")
+        standing = self.task("status", "X")["review_ready_closure"]["standing_validation"]
+        self.assertEqual(standing["counters"], {
+            "executed": 3, "reused": 0, "invalidated": 0,
+            "skipped": 0, "not_applicable": 0,
+        })
+        self.bind_merge_validation_identity("X")
         waiting = self.queue_payload("next")
         self.assertEqual(waiting["outcome"], "AWAITING_RISK")
         with mock.patch.object(merge_runtime, "dispatch_reviewer", side_effect=self.fake_review):
@@ -4836,7 +4861,8 @@ steps:
         self.assertEqual(claim["routing"]["mode"], "union")
         self.assertEqual([row["id"] for row in claim["commands"]],
                          ["pkg-test", "pkg-build", "full-suite"])
-        self.assertEqual(pkg_counter.read_text().splitlines(), ["run", "run"])
+        self.assertEqual(pkg_counter.read_text().splitlines(),
+                         ["run", "run", "run", "run"])
         self.assertEqual(self.full_counter.read_text().splitlines(), ["run"])
 
     def test_plan_binds_validation_routing_identity(self) -> None:
