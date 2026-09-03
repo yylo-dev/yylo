@@ -97,7 +97,7 @@ describe('task-workspace supported profiler and runner', () => {
       applicable: true,
       eligible: false,
     }));
-    expect(['target_exceeded', 'incomparable_environment']).toContain(
+    expect(['target_exceeded', 'incomparable_environment', 'run_failed']).toContain(
       value.performance_gate.reason,
     );
   }, 15_000);
@@ -128,7 +128,7 @@ describe('task-workspace supported profiler and runner', () => {
     expect(missingValue.eligible).toBe(false);
   }, 45_000);
 
-  it('reconciles descendants after a normal leader exit before claiming settlement', () => {
+  it('reconciles descendants after a normal leader exit but refuses uncontained settlement', () => {
     const root = temporaryDirectory();
     const receipt = path.join(root, 'normal-exit.json');
     const probe = path.join(root, 'normal-exit.py');
@@ -144,15 +144,52 @@ describe('task-workspace supported profiler and runner', () => {
       cwd: path.join(repository, 'juno-code'), encoding: 'utf8', timeout: 5_000,
     });
     const elapsed = performance.now() - started;
-    expect(result.status, result.stderr).toBe(0);
+    expect(result.status).not.toBe(0);
     expect(elapsed).toBeLessThan(1_000);
     const value = JSON.parse(fs.readFileSync(receipt, 'utf8')) as Record<string, any>;
-    expect(value.processes).toEqual({ settled: true, surviving: [] });
+    expect(value.exit_code).toBe(result.status);
+    expect(value.processes).toEqual({
+      settled: false,
+      surviving: ['containment:unavailable_for_arbitrary_command'],
+    });
     const pid = Number(fs.readFileSync(childPid, 'utf8'));
     expect(() => process.kill(pid, 0)).toThrow();
   }, 10_000);
 
-  it.runIf(process.platform !== 'win32')('reconciles an env-scrubbing descendant that escapes into a new session', () => {
+  it.runIf(process.platform !== 'win32')('fails closed for a delayed env-scrubbing descendant outside enforceable containment', () => {
+    const root = temporaryDirectory();
+    const receipt = path.join(root, 'delayed-escaped-session.json');
+    const probe = path.join(root, 'delayed-escaped-session.py');
+    const childPid = path.join(root, 'delayed-escaped-child.pid');
+    fs.writeFileSync(probe, [
+      'import pathlib, subprocess, sys, time',
+      'time.sleep(0.25)',
+      `p=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True, env={}, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)`,
+      `pathlib.Path(${JSON.stringify(childPid)}).write_text(str(p.pid))`,
+    ].join('\n'));
+    let pid: number | undefined;
+    try {
+      const started = performance.now();
+      const result = spawnSync(process.execPath, [runner, '--mode', 'seeded', '--receipt', receipt,
+        '--command', 'python3', '--command-arg', probe], {
+        cwd: path.join(repository, 'juno-code'), encoding: 'utf8', timeout: 5_000,
+      });
+      expect(performance.now() - started).toBeLessThan(3_000);
+      expect(result.status).not.toBe(0);
+      const value = JSON.parse(fs.readFileSync(receipt, 'utf8')) as Record<string, any>;
+      expect(value.exit_code).toBe(result.status);
+      expect(value.eligible).toBe(false);
+      expect(value.processes.settled).toBe(false);
+      expect(value.processes.surviving).toContain('containment:unavailable_for_arbitrary_command');
+      pid = Number(fs.readFileSync(childPid, 'utf8'));
+    } finally {
+      if (pid) {
+        try { process.kill(pid, 'SIGKILL'); } catch { /* already reconciled */ }
+      }
+    }
+  }, 10_000);
+
+  it.runIf(process.platform !== 'win32')('reconciles an observed env-scrubbing descendant but refuses uncontained settlement', () => {
     const root = temporaryDirectory();
     const receipt = path.join(root, 'escaped-session.json');
     const probe = path.join(root, 'escaped-session.py');
@@ -168,10 +205,13 @@ describe('task-workspace supported profiler and runner', () => {
         '--command', 'python3', '--command-arg', probe], {
         cwd: path.join(repository, 'juno-code'), encoding: 'utf8', timeout: 5_000,
       });
-      expect(result.status, result.stderr).toBe(0);
+      expect(result.status).not.toBe(0);
       const value = JSON.parse(fs.readFileSync(receipt, 'utf8')) as Record<string, any>;
       expect(value.exit_code).toBe(result.status);
-      expect(value.processes).toEqual({ settled: true, surviving: [] });
+      expect(value.processes).toEqual({
+        settled: false,
+        surviving: ['containment:unavailable_for_arbitrary_command'],
+      });
       pid = Number(fs.readFileSync(childPid, 'utf8'));
       expect(() => process.kill(pid!, 0)).toThrow();
     } finally {
@@ -219,16 +259,23 @@ describe('task-workspace supported profiler and runner', () => {
     expect(value.output.truncated_tail).toContain('synthetic synchronous spawn failure');
   });
 
-  it('refuses a reused Windows PID whose creation identity no longer matches', async () => {
+  it('refuses a reused Windows PID on the actual stable-handle termination path', async () => {
     const module = await import(pathToFileURL(runner).href) as Record<string, any>;
-    const known = [{ pid: 4100, creation_id: '20260902220000.000000-000' }];
-    const replacement = [{
-      pid: 4100, parent_pid: 99, creation_id: '20260902220100.000000-000', command: 'foreign.exe',
-    }];
-    expect(module.selectVerifiedOwnedProcesses(known, replacement)).toEqual([]);
-    expect(module.selectVerifiedOwnedProcesses(known, [{
-      ...replacement[0], creation_id: known[0].creation_id,
-    }])).toEqual([{ ...replacement[0], creation_id: known[0].creation_id }]);
+    const signaled: string[] = [];
+    const closed: string[] = [];
+    const outcome = await module.terminateVerifiedWindowsProcess(
+      { pid: 4100, creation_id: 'owned-instance' },
+      'SIGKILL',
+      {
+        openProcess: async () => ({ id: 'foreign-handle' }),
+        creationIdForHandle: async () => 'replacement-instance',
+        terminateHandle: async (handle: { id: string }) => { signaled.push(handle.id); },
+        closeHandle: async (handle: { id: string }) => { closed.push(handle.id); },
+      },
+    );
+    expect(outcome).toEqual({ status: 'identity_mismatch', pid: 4100 });
+    expect(signaled).toEqual([]);
+    expect(closed).toEqual(['foreign-handle']);
   });
 
   it('returns nonzero and reports survivors when settlement cannot be verified', () => {
@@ -245,10 +292,11 @@ describe('task-workspace supported profiler and runner', () => {
     expect(value.processes.settled).toBe(false);
     expect(value.processes.surviving).toEqual([
       expect.stringMatching(/^verification:/),
+      'containment:unavailable_for_arbitrary_command',
     ]);
   });
 
-  it('task-workspace-wrapper-enforces-child-timeout-and-process-settlement', () => {
+  it('task-workspace-wrapper-enforces-child-timeout-and-refuses-uncontained-settlement', () => {
     const root = temporaryDirectory();
     const receipt = path.join(root, 'timeout.json');
     const probe = path.join(root, 'probe.py');
@@ -260,7 +308,7 @@ describe('task-workspace supported profiler and runner', () => {
       'time.sleep(60)',
     ].join('\n'));
     const result = spawnSync(process.execPath, [runner, '--mode', 'affected', '--receipt', receipt,
-      '--timeout-ms', '250', '--command', 'python3', '--command-arg', probe], {
+      '--timeout-ms', '750', '--command', 'python3', '--command-arg', probe], {
       cwd: path.join(repository, 'juno-code'), encoding: 'utf8', timeout: 10_000,
     });
     expect(result.status).not.toBe(0);
@@ -268,7 +316,10 @@ describe('task-workspace supported profiler and runner', () => {
     expect(value.timeout).toBe(true);
     expect(value.exit_code).toBe(result.status);
     expect(value.eligible).toBe(false);
-    expect(value.processes.settled).toBe(true);
+    expect(value.processes).toEqual({
+      settled: false,
+      surviving: ['containment:unavailable_for_arbitrary_command'],
+    });
     const pid = Number(fs.readFileSync(childPid, 'utf8'));
     expect(() => process.kill(pid, 0)).toThrow();
   });

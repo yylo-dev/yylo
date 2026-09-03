@@ -20,6 +20,16 @@ runner and representative real-Git contracts but does not launch `:complete`;
 the explicit complete command is the single task-owned 239-case performance
 gate, preventing duplicate expensive profiles and resource-lock races.
 
+Arbitrary `--command` probes are cleanup diagnostics, not eligible evidence:
+POSIX process groups cannot contain a descendant that creates a new session,
+and a sampled process inventory cannot prove that no short-lived parent launched
+such a descendant. The runner therefore records
+`containment:unavailable_for_arbitrary_command` and exits nonzero after bounded
+best-effort reconciliation instead of claiming settlement. Managed built-in
+profiles remain eligible under their closed test-runner contract. On Windows,
+cleanup opens a process handle, verifies creation identity on that handle, and
+terminates that same handle; it never signals a previously verified bare PID.
+
 The Python boundary extends the canonical `juno.test.fixture.base.v1` identity
 and gives every consumer a disposable private instance. Drift or corruption
 quarantines a published base and builds a new one; it is never repaired in

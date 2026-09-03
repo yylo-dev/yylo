@@ -104,14 +104,14 @@ async function processInventory() {
       : { rows: [], error: inventory.error };
   }
   const inventory = await captureBounded('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-    'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CreationDate,CommandLine | ConvertTo-Json -Compress'], 2_000);
+    "Get-CimInstance Win32_Process | ForEach-Object { [pscustomobject]@{ ProcessId=$_.ProcessId; ParentProcessId=$_.ParentProcessId; CreationId=$_.CreationDate.ToUniversalTime().Ticks.ToString(); CommandLine=$_.CommandLine } } | ConvertTo-Json -Compress"], 2_000);
   if (!inventory.ok) return { rows: [], error: inventory.error };
   try {
     const decoded = JSON.parse(inventory.output || '[]');
     return {
       rows: (Array.isArray(decoded) ? decoded : [decoded]).map((row) => ({
         pid: Number(row.ProcessId), parent_pid: Number(row.ParentProcessId), pgid: null,
-        creation_id: String(row.CreationDate ?? ''), command: String(row.CommandLine ?? ''),
+        creation_id: String(row.CreationId ?? ''), command: String(row.CommandLine ?? ''),
       })).filter((row) => Number.isInteger(row.pid) && row.pid > 0 && row.creation_id),
       error: null,
     };
@@ -223,11 +223,68 @@ function signalOwnedGroup(child, signal) {
   }
 }
 
+const WINDOWS_TERMINATE_SOURCE = String.raw`
+using System;
+using System.Runtime.InteropServices;
+public static class JunoStableProcess {
+  [StructLayout(LayoutKind.Sequential)] public struct FILETIME { public uint Low; public uint High; }
+  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetProcessTimes(IntPtr handle, out FILETIME created, out FILETIME exited, out FILETIME kernel, out FILETIME user);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateProcess(IntPtr handle, uint exitCode);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  public static string Terminate(uint pid, long expectedTicks, uint exitCode) {
+    IntPtr handle = OpenProcess(0x0400 | 0x0001, false, pid);
+    if (handle == IntPtr.Zero) return "gone";
+    try {
+      FILETIME created, exited, kernel, user;
+      if (!GetProcessTimes(handle, out created, out exited, out kernel, out user)) return "unverified";
+      long fileTime = ((long)created.High << 32) | created.Low;
+      if (DateTime.FromFileTimeUtc(fileTime).Ticks != expectedTicks) return "identity_mismatch";
+      return TerminateProcess(handle, exitCode) ? "terminated" : "terminate_failed";
+    } finally { CloseHandle(handle); }
+  }
+}`;
+
+async function atomicTerminateWindowsProcess(entry, signal) {
+  const exitCode = signal === 'SIGKILL' ? 137 : 143;
+  const script = `Add-Type -TypeDefinition $args[0]; [JunoStableProcess]::Terminate([uint32]$args[1], [long]$args[2], [uint32]$args[3])`;
+  const result = await captureBounded('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    script, WINDOWS_TERMINATE_SOURCE, String(entry.pid), String(entry.creation_id), String(exitCode)], 2_000);
+  if (!result.ok) return { status: 'error', pid: entry.pid, error: result.error };
+  return { status: result.output.trim(), pid: entry.pid };
+}
+
+/** Open an instance handle, verify its creation identity, then signal that same handle. */
+export async function terminateVerifiedWindowsProcess(entry, signal, dependencies = {}) {
+  if (dependencies.atomicTerminate) return dependencies.atomicTerminate(entry, signal);
+  if (!dependencies.openProcess) return atomicTerminateWindowsProcess(entry, signal);
+  let handle;
+  try {
+    handle = await dependencies.openProcess(entry.pid);
+    if (!handle) return { status: 'gone', pid: entry.pid };
+    const creationId = await dependencies.creationIdForHandle(handle);
+    if (String(creationId) !== String(entry.creation_id)) {
+      return { status: 'identity_mismatch', pid: entry.pid };
+    }
+    await dependencies.terminateHandle(handle, signal);
+    return { status: 'terminated', pid: entry.pid };
+  } finally {
+    if (handle) await dependencies.closeHandle(handle);
+  }
+}
+
 async function signalVerifiedOwned(ownerToken, known, signal) {
   const discovered = await discoverOwnedProcesses(ownerToken, known);
   if (discovered.error) return discovered;
   for (const row of discovered.rows) {
     if (row.pid === process.pid) continue;
+    if (process.platform === 'win32') {
+      const outcome = await terminateVerifiedWindowsProcess(row, signal);
+      if (['error', 'unverified', 'terminate_failed'].includes(outcome.status)) {
+        return { rows: discovered.rows, error: `Windows stable-handle termination failed for ${row.pid}: ${outcome.error ?? outcome.status}` };
+      }
+      continue;
+    }
     try { process.kill(row.pid, signal); } catch (error) {
       if (error?.code !== 'ESRCH') throw error;
     }
@@ -334,16 +391,22 @@ async function runOwned(command, args, timeoutMs, fixtureMode, outputLimit = 262
   if (Number.isInteger(child.pid) && child.pid > 0) {
     known.set(child.pid, { pid: child.pid, creation_id: '' });
     sampleInventory();
-    // A short overlapping burst closes the launch/instant-orphan race; after that,
-    // one bounded sampler is sufficient for long-running benchmark profiles.
-    const burstStarted = performance.now();
-    inventoryTimer = setInterval(() => {
-      sampleInventory();
-      if (performance.now() - burstStarted >= 100) {
-        clearInterval(inventoryTimer);
-        inventoryTimer = setInterval(sampleInventory, 10_000);
-      }
-    }, 3);
+    // Sampling is cleanup assistance only. It is never settlement proof for an
+    // arbitrary command because a detached child can close every inherited token.
+    // Keep that diagnostic monitor responsive; avoid imposing it on the closed,
+    // managed profile contract where process groups and final verification apply.
+    if (dependencies.arbitraryCommand === true) {
+      inventoryTimer = setInterval(sampleInventory, 20);
+    } else {
+      const burstStarted = performance.now();
+      inventoryTimer = setInterval(() => {
+        sampleInventory();
+        if (performance.now() - burstStarted >= 100) {
+          clearInterval(inventoryTimer);
+          inventoryTimer = setInterval(sampleInventory, 10_000);
+        }
+      }, 3);
+    }
   }
   let status;
   try {
@@ -373,6 +436,13 @@ async function runOwned(command, args, timeoutMs, fixtureMode, outputLimit = 262
   }
   const reconciliation = await reconcileOwnedProcesses(child, ownerToken, known, await pipeTokensPromise);
   if (escalationTimer) clearTimeout(escalationTimer);
+  const arbitraryCommandUncontained = dependencies.arbitraryCommand === true
+    && Number.isInteger(child?.pid) && child.pid > 0;
+  if (arbitraryCommandUncontained) {
+    reconciliation.settled = false;
+    reconciliation.surviving = [...reconciliation.surviving,
+      'containment:unavailable_for_arbitrary_command'];
+  }
   return {
     ...status,
     timedOut,
@@ -418,7 +488,10 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
   }
   const runs = await Promise.all(plans.map(async (plan) => ({
     ...plan,
-    run: await runOwned(plan.command, plan.args, options.timeoutMs, options.mode, 262_144, dependencies),
+    run: await runOwned(plan.command, plan.args, options.timeoutMs, options.mode, 262_144, {
+      ...dependencies,
+      arbitraryCommand: options.command !== null,
+    }),
   })));
   const profiles = runs.map(({ profilePath }) => {
     try { return profilePath ? JSON.parse(fs.readFileSync(profilePath, 'utf8')) : null; } catch { return null; }
