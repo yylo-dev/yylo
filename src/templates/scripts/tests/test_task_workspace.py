@@ -2377,6 +2377,29 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
         with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "differ from the frozen"):
             task_runtime.start(self.controller, "X", [])
 
+    def test_start_freezes_exact_tracked_files_without_legacy_baseline_roots(self) -> None:
+        started = task_runtime.start(self.controller, "X", ["src/base.txt"])
+        receipt = started["creation_receipt"]
+        self.assertEqual(receipt["requested_paths"], ["src/base.txt"])
+        self.assertEqual(receipt["allowed_paths"], ["src/base.txt"])
+        self.assertEqual(receipt["selected_entries"]["src/base.txt"]["type"], "blob")
+        self.assertNotIn("src", receipt["allowed_paths"])
+
+    def test_early_admission_projects_dirty_and_committed_authored_paths_read_only(self) -> None:
+        started = task_runtime.start(self.controller, "X", ["src/base.txt"])
+        worktree = Path(started["worktree"])
+        (worktree / "src/base.txt").write_text("changed\n")
+        dirty = task_runtime.task_admission_check(self.controller, "X")
+        self.assertEqual(dirty["dirty_paths"], ["src/base.txt"])
+        self.assertEqual(dirty["authored_paths"], [])
+        git(worktree, "add", "src/base.txt")
+        git(worktree, "commit", "-m", "exact authored file")
+        committed = task_runtime.task_admission_check(self.controller, "X")
+        self.assertEqual(committed["dirty_paths"], [])
+        self.assertEqual(committed["authored_paths"], ["src/base.txt"])
+        self.assertEqual(committed["origin_projection"]["schema_version"],
+                         "juno_path_origin_projection.v1")
+
     def test_exact_runtime_parity_paths_queue_with_their_package_templates(self) -> None:
         policy_path = self.controller / ".juno_task/config/task-workspace.json"
         policy = json.loads(policy_path.read_text())

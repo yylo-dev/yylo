@@ -1358,6 +1358,10 @@ class MergeQueueTests(unittest.TestCase):
         self.assertTrue(first["ready"])
         self.assertEqual(merge_runtime.canonical(first), merge_runtime.canonical(second))
         self.assertEqual(first["schema_version"], merge_runtime.PLAN_SCHEMA)
+        origin = first["composition"]["origin_projection"]
+        self.assertEqual(origin["schema_version"], "juno_path_origin_projection.v1")
+        self.assertEqual(origin["authored_paths"], ["docs/plan.txt"])
+        self.assertEqual(origin["ambiguous_paths"], [])
         self.assertEqual([row["id"] for row in first["validation_commands"]],
                          ["affected", "full-suite"])
         self.assertEqual(state_path.read_bytes(), before["state"])

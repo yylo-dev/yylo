@@ -1440,16 +1440,45 @@ def derived_output_admission(repository: Path, target_sha: str,
 MANAGED_ASSETS_TEMPLATE_ROOT = "juno-code/src/templates/"
 
 
+def path_origin_projection(repository: Path, base_sha: str, source_sha: str,
+                           target_sha: str, candidate_sha: Optional[str],
+                           admitted_paths: list[str], generated_admission: Any,
+                           conflict_paths: Optional[list[str]] = None) -> dict[str, Any]:
+    """Git adapter for the canonical pure blob-origin projection."""
+    candidate_sha = candidate_sha or source_sha
+    for label, sha in (("base", base_sha), ("source", source_sha),
+                       ("target", target_sha), ("candidate", candidate_sha)):
+        if (not isinstance(sha, str) or not SHA_RE.fullmatch(sha)
+                or run(["git", "-C", str(repository), "cat-file", "-e", f"{sha}^{{commit}}"],
+                       repository, check=False).returncode):
+            raise TaskWorkspaceError(f"path origin {label} object is missing or forged")
+    bindings = (generated_admission.get("bindings", [])
+                if isinstance(generated_admission, dict) else [])
+    return decisions.project_path_origins(
+        base_tree=_tip_tree_blobs(repository, base_sha),
+        source_tree=_tip_tree_blobs(repository, source_sha),
+        target_tree=_tip_tree_blobs(repository, target_sha),
+        candidate_tree=_tip_tree_blobs(repository, candidate_sha),
+        admitted_paths=admitted_paths, generated_bindings=bindings,
+        conflict_paths=conflict_paths or [])
+
+
 def _tip_tree_blobs(repository: Path, tip_sha: str) -> dict[str, str]:
-    """Map every tracked blob path to its object ID at one exact commit."""
-    output = git(repository, "ls-tree", "-r", tip_sha, check=False)
+    """Map every tracked blob path using NUL framing (never quoted path text)."""
+    result = run(["git", "-C", str(repository), "ls-tree", "-rz", tip_sha],
+                 repository, check=False)
+    if result.returncode:
+        raise TaskWorkspaceError("path origin tree object is unreadable")
+    output = result.stdout
     blobs: dict[str, str] = {}
-    for line in output.splitlines():
-        metadata, separator, path = line.partition("\t")
-        if not separator:
+    for entry in output.split("\0"):
+        if not entry:
             continue
+        metadata, separator, path = entry.partition("\t")
+        if not separator:
+            raise TaskWorkspaceError("path origin tree entry is malformed")
         mode, kind, object_id = metadata.split()
-        if kind == "blob":
+        if kind in {"blob", "commit"}:
             blobs[path] = object_id
     return blobs
 
@@ -1698,26 +1727,28 @@ def require_full_task_materialization(worktree: Path, target_sha: str,
 
 def selected_task_paths(config: dict[str, Any], repository: Path, target_sha: str,
                         requested: list[str]) -> tuple[list[str], dict[str, dict[str, str]]]:
+    """Resolve explicit roots or exact tracked files without implicit broadening."""
     normalized = [normalized_relative(item, "required task path") for item in requested]
     if len(set(normalized)) != len(normalized):
         raise TaskWorkspaceError("required task paths contain duplicates")
-    unknown = [item for item in normalized if item not in config["selectable_paths"]]
-    if unknown:
-        raise TaskWorkspaceError(
-            f"required task path is not admitted by policy: {', '.join(unknown)}"
-        )
     entries: dict[str, dict[str, str]] = {}
     for item in normalized:
+        selectable = item in config["selectable_paths"]
+        if not selectable and not path_within(item, config["allowed_paths"]):
+            raise TaskWorkspaceError(f"required task path is not admitted by policy: {item}")
         output = git(repository, "ls-tree", target_sha, "--", item, check=False)
         lines = [line for line in output.splitlines() if line]
         if len(lines) != 1:
             raise TaskWorkspaceError(f"required task path is absent or ambiguous at target: {item}")
         metadata, actual_path = lines[0].split("\t", 1)
         mode, kind, object_id = metadata.split()
-        if actual_path != item or mode not in {"040000", "160000"} or kind not in {"tree", "commit"}:
+        safe = ((selectable and mode in {"040000", "160000"} and kind in {"tree", "commit"})
+                or (not selectable and mode in {"100644", "100755"} and kind == "blob"))
+        if actual_path != item or not safe:
             raise TaskWorkspaceError(f"required task path has an unsafe target identity: {item}")
         entries[item] = {"mode": mode, "type": kind, "object": object_id}
-    return [*config["allowed_paths"], *normalized], entries
+    exact_mode = any(item not in config["selectable_paths"] for item in normalized)
+    return (normalized if exact_mode else [*config["allowed_paths"], *normalized]), entries
 
 
 def canonical_child_scope(controller: Path, repository: Path, base_sha: str, child_id: str,
@@ -2260,10 +2291,10 @@ def record_control_audit(controller: Path, surface: str, operation: str,
                          task_id: Optional[str] = None) -> dict[str, str]:
     routing = routing_identity(controller)
     forwarded_policy = routing.get("policy_operation")
-    expected_policy = ("kanban" if operation in {"status", "preflight", "recovery-plan", "contract", "handoff", "evidence-status", "doctor", "lease-status"}
+    expected_policy = ("kanban" if operation in {"status", "admission", "preflight", "recovery-plan", "contract", "handoff", "evidence-status", "doctor", "lease-status"}
                        else "orchestration")
     if surface == "task" and operation not in {
-            "start", "run", "recover-predispatch", "recover-wall-budget", "status", "hydrate", "preflight", "finish", "contract", "handoff",
+            "start", "run", "recover-predispatch", "recover-wall-budget", "status", "admission", "hydrate", "preflight", "finish", "contract", "handoff",
             "checkpoint", "child-checkpoint", "evidence-run", "evidence-status", "evidence-await",
             "recovery-plan", "recovery-authorize", "recovery-apply", "sync", "doctor",
             "lease-status", "lease-heartbeat", "lease-handoff", "lease-successor",
@@ -3751,6 +3782,39 @@ def observe_task_diff(record: dict[str, Any], configured_repository: Path,
     return recorded_repository, worktree, head, committed, uncommitted
 
 
+def task_admission_check(controller: Path, task_id: str) -> dict[str, Any]:
+    """Deterministic read-only dirty/committed exact admission check."""
+    config = load_config(controller)
+    repository = product_repository(controller, config)
+    with state_lock(controller):
+        record = json.loads(json.dumps(read_state(controller)["tasks"].get(task_id)))
+    if not isinstance(record, dict):
+        raise TaskWorkspaceError("task has not been started")
+    verify_hydration_evidence(record, Path(record["worktree"]))
+    _repo, _worktree, head, _committed, dirty = observe_task_diff(
+        record, repository, config, task_id)
+    allowed, generated, source = effective_admission(record)
+    projection = path_origin_projection(
+        repository, record["base_sha"], head,
+        ref_sha(repository, config["target_ref"]), head, [], generated)
+    authored = projection["authored_paths"]
+    refused = sorted({path for path in authored + dirty
+                      if path_within(path, config["controller_private_paths"])
+                      or not path_within(path, allowed)} | set(projection["ambiguous_paths"]))
+    result = {"schema_version": "juno_task_admission_check.v1", "task_id": task_id,
+              "base_sha": record["base_sha"], "tip_sha": head,
+              "admission_source": source, "authored_paths": authored,
+              "dirty_paths": dirty, "origin_projection": projection,
+              "refused_paths": refused,
+              "recovery": "explicitly replan exact paths, then start a supported successor"}
+    if refused:
+        raise TaskWorkspaceError(
+            f"early exact admission refused; disallowed paths: {', '.join(refused)}; "
+            f"origin=authored-or-ambiguous; admission_source={source}; "
+            "explicitly replan exact paths before continuing")
+    return {**result, "outcome": "admitted"}
+
+
 def review_ready_closure(controller: Path, config: dict[str, Any], record: dict[str, Any],
                          configured_repository: Path, task_id: str,
                          runtime: dict[str, Any]) -> tuple[
@@ -3759,6 +3823,8 @@ def review_ready_closure(controller: Path, config: dict[str, Any], record: dict[
     repository, worktree, head, changed = observe_working_task(
         record, configured_repository, config, task_id
     )
+    admission_check = task_admission_check(controller, task_id)
+    changed = admission_check["authored_paths"]
     if head == record["base_sha"]:
         raise TaskWorkspaceError("task has no committed changes")
     if not changed:
@@ -3813,6 +3879,7 @@ def review_ready_closure(controller: Path, config: dict[str, Any], record: dict[
         "risk_policy_sha256": policy_sha256,
         "runtime_sha256": runtime["running_sha256"],
         "unresolved_findings_candidate_sha": record.get("prior_findings_candidate_sha"),
+        "origin_projection": admission_check["origin_projection"],
     }
     closure = {**closure_body, "closure_sha256": stable_sha256(closure_body)}
     return repository, worktree, head, changed, closure
@@ -4118,6 +4185,8 @@ def standing_checkpoint(controller: Path, task_id: str,
     verify_hydration_evidence(frozen, Path(frozen["worktree"]))
     _repo, worktree, head, changed = observe_working_task(
         frozen, repository, config, task_id)
+    admission_check = task_admission_check(controller, task_id)
+    changed = admission_check["authored_paths"]
     if head == frozen["base_sha"] or not changed:
         raise TaskWorkspaceError("standing checkpoint requires a committed product diff")
     path_status = lifecycle_runtime.changed_path_status(
@@ -4261,6 +4330,7 @@ def standing_evidence_run(controller: Path, task_id: str,
     if not evidence_gate.admitted:
         raise TaskWorkspaceError(evidence_gate.finding.message)
     _repo, worktree, head, changed = observe_working_task(record, repository, config, task_id)
+    changed = task_admission_check(controller, task_id)["authored_paths"]
     if head != plan["tip_sha"] or changed != plan["changed_paths"]:
         raise TaskWorkspaceError("standing checkpoint is stale; create a new task checkpoint")
     runtime = require_current_runtime(repository, ref_sha(repository, config["target_ref"]), controller)
@@ -4605,6 +4675,7 @@ def _finish_once(controller: Path, task_id: str,
         post_repository, post_worktree, post_head, post_changed = observe_working_task(
             record, configured_repository, config, task_id
         )
+        post_changed = task_admission_check(controller, task_id)["authored_paths"]
     except TaskWorkspaceError as exc:
         raise TaskWorkspaceError("task tip or worktree changed during focused validation") from exc
     if ((post_repository, post_worktree, post_head, post_changed)
@@ -7726,7 +7797,7 @@ def lease_release(controller: Path, task_id: str, lease_token: Optional[str]) ->
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(description=__doc__)
     value.add_argument("operation", choices=(
-        "start", "run", "recover-predispatch", "recover-wall-budget", "status", "hydrate", "preflight", "finish", "contract", "handoff",
+        "start", "run", "recover-predispatch", "recover-wall-budget", "status", "admission", "hydrate", "preflight", "finish", "contract", "handoff",
         "checkpoint", "child-checkpoint", "evidence-run", "evidence-status", "evidence-await",
         "recovery-plan", "recovery-authorize", "recovery-apply", "runtime-bootstrap",
         "sync", "doctor", "lease-status", "lease-heartbeat", "lease-handoff",
@@ -7894,6 +7965,8 @@ def main(argv: list[str] | None = None) -> int:
                     result = kanban_sync_doctor(controller, args.task or None)
                 elif args.operation == "status":
                     result = status(controller, args.task)
+                elif args.operation == "admission":
+                    result = task_admission_check(controller, args.task)
                 elif args.operation == "preflight":
                     result = preflight(controller, args.task)
                 elif args.operation == "hydrate":
