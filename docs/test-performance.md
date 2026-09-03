@@ -12,8 +12,10 @@ warm/cold equivalence matrix) is documented in [test-daemon.md](./test-daemon.md
 ## Task-workspace fixture modes
 
 Use `npm run test:task-workspace:affected`, `:seeded`, `:hermetic`, or
-`:complete`. Complete is authoritative and always unions seeded and
-fresh-topology contracts. Receipts include inventory, tiers, shards,
+`:complete`. Complete is authoritative and always runs the full inventory;
+passing `--test-id` in complete mode is terminally ineligible with a truthful
+`complete_requires_full_inventory` receipt. Use seeded or hermetic mode for an
+explicit partial replay. Receipts include inventory, tiers, shards,
 Git-process counts, timeout/process settlement, and p50/p95 timing. Seeded
 failures include a hermetic replay command. The umbrella `npm test` suite checks
 runner and representative real-Git contracts but does not launch `:complete`;
@@ -27,18 +29,27 @@ POSIX process groups cannot contain a descendant that creates a new session,
 and a sampled process inventory cannot prove that no short-lived parent launched
 such a descendant. The runner therefore records
 `containment:unavailable_for_arbitrary_command` and exits nonzero after bounded
-best-effort reconciliation instead of claiming settlement. Managed built-in
-profiles remain eligible under their closed test-runner contract. On Windows,
-cleanup opens a process handle, verifies creation identity on that handle, and
-terminates that same handle; it never signals a previously verified bare PID.
+best-effort reconciliation instead of claiming settlement.
+
+Managed built-in profiles do not treat trusted code as containment. On Darwin
+the runner compiles a task-local helper and requires the kernel's kqueue
+`NOTE_TRACK` descendant tracking before releasing the child command. If the host
+returns `ENOTSUP` (as current Darwin does), the launch gate remains closed and
+the invocation exits nonzero with
+`containment:darwin_kqueue_unverified`; it cannot produce complete-profile
+evidence on that host. On Windows, cleanup opens a process handle, verifies
+creation identity on that handle, and terminates that same handle; it never
+signals a previously verified bare PID.
 
 The Python boundary extends the canonical `juno.test.fixture.base.v1` identity
 and gives every consumer a disposable private instance. Drift or corruption
 quarantines a published base and builds a new one; it is never repaired in
 place. Force the permanent cold fallback with
 `YYLO_TEST_DISABLE_FIXTURE_BASE_CACHE=1 npm run test:task-workspace:complete`.
-Failed, skipped, timed-out, inventory-drifted, or host-incomparable receipts are
-not performance evidence.
+Failed, skipped, timed-out, or inventory-drifted receipts are not performance
+evidence. Host load and comparability metadata remain in the receipt only as
+diagnostics: they never alter eligibility or exit status, and the runner never
+waits or polls for an idle host.
 
 ## Benchmark profile
 
