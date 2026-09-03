@@ -1735,6 +1735,243 @@ class MergeQueueTests(unittest.TestCase):
             str(prompt.relative_to(self.controller)))
         git(self.controller, "commit", "-m", "controller merge workflow")
 
+    def freeze_wxk4xy_stale_lifecycle_incident(self) -> dict[str, object]:
+        """Freeze the receipt identities from the canonical WxK4xy incident."""
+        if not (self.controller / ".juno_task/workflows/yy-merge-drive.yaml").is_file():
+            self.install_merge_drive_assets()
+        target_ref = "refs/heads/product"
+        state_path = self.controller / ".juno_task/state/tasks.json"
+        state = {"schema_version": task_runtime.STATE_SCHEMA, "tasks": {}, "queues": {}}
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state["tasks"] = {
+            "2jYk9e": {"task_id": "2jYk9e", "state": "QUEUED", "enqueue_sequence": 712,
+                       "tip_sha": "2" * 40, "target_ref": target_ref},
+            "5R1aY8": {"task_id": "5R1aY8", "state": "QUEUED", "enqueue_sequence": 713,
+                       "tip_sha": "5" * 40, "target_ref": target_ref},
+            "WxK4xy": {"task_id": "WxK4xy", "state": "QUEUED", "enqueue_sequence": 714,
+                       "tip_sha": "9" * 40, "target_ref": target_ref,
+                       "pre_cas_authority_drift_recovery": {
+                           "schema_version": "juno_merge_pre_cas_edit_recovery.v1"}},
+        }
+        state_path.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
+        run_id = "1788467754907264000-b5fa7b4da494425e"
+        run_dir = self.controller / merge_runtime.MERGE_DRIVE_ROOT / run_id
+        if run_dir.exists():
+            shutil.rmtree(run_dir)
+        arbiter_parent = self.controller / merge_runtime.TARGET_ARBITER_ROOT
+        if arbiter_parent.exists():
+            shutil.rmtree(arbiter_parent)
+        recovery_parent = self.controller / ".juno_task/runtime/merge-queue"
+        if recovery_parent.exists():
+            shutil.rmtree(recovery_parent)
+        run_dir.mkdir(parents=True)
+        scope = {
+            "schema_version": "juno_merge_drive_fifo_scope.v1",
+            "scope_sha256": "73db8ed6e054ec49291ca490d06930da1670a9625e2cf0be0b93158a379d33f8",
+            "target_ref": target_ref, "target_sha": self.base,
+            "tasks": [{"task_id": "WxK4xy", "enqueue_sequence": 711,
+                       "initial_state": "QUEUED", "initial_tip_sha": "7" * 40,
+                       "record_sha256": "f" * 64}],
+        }
+        scope_ref = merge_runtime.lifecycle_runtime.atomic_json(
+            run_dir / "fifo-scope.json", scope, exclusive=True)
+        plan = {"schema_version": "juno_compiled_lifecycle_plan.v1",
+                "compiled_plan_sha256": "6" * 64,
+                "template": {"id": "canonical-merge-drive", "revision": 1},
+                "budgets": {"total_wall_seconds": 14400}}
+        plan_ref = merge_runtime.lifecycle_runtime.atomic_json(
+            run_dir / "compiled-plan.json", plan, exclusive=True)
+        journal = {
+            "schema_version": "juno_managed_merge_drive_journal.v2", "run_id": run_id,
+            "selector_identity_sha256": "d" * 64, "execution_identity_sha256": "e" * 64,
+            "scope_sha256": scope["scope_sha256"], "initial_target_sha": self.base,
+            "compiled_plan": plan_ref, "fifo_scope": scope_ref,
+            "started_at_unix_ns": 1788467754908927000,
+            "deadline_unix_ns": 1788482154908927000,
+            "attempts": {"transitions": 1, "semantic_repairs": 0},
+            "events": [{"schema_version": "juno_lifecycle_phase_checkpoint.v1",
+                        "sequence": 1, "phase": "merge-drive", "boundary": "ERROR",
+                        "recorded_at_unix_ns": 1788473227982220000,
+                        "detail": {"error": "frozen FIFO scope no longer owns the next legal task",
+                                   "error_type": "MergeQueueError"}}],
+            "operations": [{"phase": "compose", "task_id": "WxK4xy",
+                            "pre_state": "QUEUED", "post_state": "QUEUED"}],
+            "repairs": [], "projections": [], "state": "CLAIMED", "terminal": False,
+            "blocker": None, "journal_revision": 7,
+            "updated_at_unix_ns": 1788473227982243000,
+        }
+        journal_path = run_dir / "journal.json"
+        merge_runtime.lifecycle_runtime.atomic_json(journal_path, journal)
+        pointer = {"schema_version": "juno_managed_merge_drive_latest.v2",
+                   "run_id": run_id, "scope_sha256": scope["scope_sha256"],
+                   "compiled_plan_sha256": plan["compiled_plan_sha256"],
+                   "execution_identity_sha256": journal["execution_identity_sha256"],
+                   "projection_path": None, "summary": None, "terminal": False}
+        merge_runtime.lifecycle_runtime.atomic_json(
+            run_dir.parent / "latest.json", pointer)
+        merge_runtime.lifecycle_runtime.atomic_json(
+            run_dir.parent / "scopes" / journal["selector_identity_sha256"] / "latest.json",
+            pointer)
+        recovery = {"schema_version": "juno_merge_pre_cas_edit_recovery.v1",
+                    "task_id": "WxK4xy", "target_ref": target_ref, "target_sha": self.base,
+                    "no_cas_proven": True, "arbiter_attempt": 225,
+                    "terminal_receipt": {"path": "fixture-attempt-225", "sha256": "a" * 64}}
+        recovery_path = self.controller / ".juno_task/runtime/merge-queue/pre-cas-edit-recovery/WxK4xy/recovery.json"
+        recovery_ref = merge_runtime.lifecycle_runtime.atomic_json(recovery_path, recovery)
+        state = json.loads(state_path.read_text())
+        state["tasks"]["WxK4xy"]["pre_cas_authority_drift_recovery"]["receipt"] = {
+            "receipt_path": recovery_ref["path"], "receipt_sha256": recovery_ref["sha256"]}
+        state_path.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
+        config = task_runtime.load_config(self.controller.resolve())
+        arbiter_root = merge_runtime._arbiter_root(
+            self.controller.resolve(), self.repository.resolve(), config["target_ref"])
+        terminal = {"schema_version": merge_runtime.TARGET_ARBITER_RECEIPT_SCHEMA,
+                    "attempt": 227, "target_ref": target_ref, "state": "FAILED",
+                    "outcome": "MergeQueueError",
+                    "producer": {"pid": 99999999, "lstart": "ended-producer"},
+                    "detail": {"error": "frozen FIFO scope no longer owns the next legal task"}}
+        terminal_ref = merge_runtime.lifecycle_runtime.atomic_json(
+            arbiter_root / "receipts/attempt-227-failed.json", terminal, exclusive=True)
+        arbiter = {"schema_version": merge_runtime.TARGET_ARBITER_SCHEMA,
+                   "attempt": 227, "state": "FAILED", "target_ref": target_ref,
+                   "target_sha_at_start": self.base, "producer": terminal["producer"],
+                   "terminal_receipt": terminal_ref, "detail": terminal["detail"]}
+        merge_runtime.lifecycle_runtime.atomic_json(arbiter_root / "state.json", arbiter)
+        return {"run_id": run_id, "journal_path": journal_path,
+                "journal_revision": 7,
+                "journal_sha256": hashlib.sha256(journal_path.read_bytes()).hexdigest(),
+                "scope_sha256": scope["scope_sha256"], "target_sha": self.base,
+                "terminal_ref": terminal_ref, "recovery_ref": recovery_ref,
+                "fifo_sha256": merge_runtime.current_fifo_identity(
+                    self.controller.resolve(), config, None)["sha256"]}
+
+    def test_supersede_wxk4xy_stale_journal_is_terminal_idempotent_and_queue_immutable(self) -> None:
+        incident = self.freeze_wxk4xy_stale_lifecycle_incident()
+        state_path = self.controller / ".juno_task/state/tasks.json"
+        queue_before = state_path.read_bytes()
+        result = merge_runtime.supersede_stale_lifecycle_journal(
+            self.controller.resolve(), incident["run_id"], incident["journal_revision"],
+            incident["journal_sha256"], incident["scope_sha256"], 227,
+            incident["terminal_ref"]["path"], incident["terminal_ref"]["sha256"],
+            "WxK4xy", incident["recovery_ref"]["path"],
+            incident["recovery_ref"]["sha256"], incident["target_sha"],
+            incident["fifo_sha256"])
+        self.assertEqual(result["state"], "SUPERSEDED")
+        self.assertEqual(state_path.read_bytes(), queue_before)
+        projection = json.loads(Path(result["projection"]["path"]).read_text())
+        self.assertEqual(projection["state"], "SUPERSEDED")
+        journal = json.loads(incident["journal_path"].read_text())
+        self.assertTrue(journal["terminal"])
+        self.assertEqual(journal["events"][:-1][0]["boundary"], "ERROR")
+        repeated = merge_runtime.supersede_stale_lifecycle_journal(
+            self.controller.resolve(), incident["run_id"], incident["journal_revision"],
+            incident["journal_sha256"], incident["scope_sha256"], 227,
+            incident["terminal_ref"]["path"], incident["terminal_ref"]["sha256"],
+            "WxK4xy", incident["recovery_ref"]["path"],
+            incident["recovery_ref"]["sha256"], incident["target_sha"],
+            incident["fifo_sha256"])
+        self.assertEqual(repeated["projection"], result["projection"])
+        self.assertEqual(state_path.read_bytes(), queue_before)
+        fresh = merge_runtime._drive_scope(
+            self.controller.resolve(), task_runtime.load_config(self.controller.resolve()), None)
+        self.assertEqual(fresh[0]["task_id"], "2jYk9e")
+
+    def test_stale_journal_supersession_typed_refusals_are_non_mutating(self) -> None:
+        cases = {
+            "live_producer": lambda i: mock.patch.object(
+                task_runtime, "_observe_producer",
+                return_value=task_runtime.decisions.LeaseObservation("alive", "fixture live")),
+            "current_valid_scope": lambda i: mock.patch.object(
+                merge_runtime, "current_fifo_identity",
+                return_value={"tasks": [{"task_id": "WxK4xy"}],
+                              "sha256": i["fifo_sha256"]}),
+        }
+        for code, patcher in cases.items():
+            with self.subTest(code=code):
+                incident = self.freeze_wxk4xy_stale_lifecycle_incident()
+                journal_before = incident["journal_path"].read_bytes()
+                state_before = (self.controller / ".juno_task/state/tasks.json").read_bytes()
+                with patcher(incident):
+                    with self.assertRaisesRegex(merge_runtime.MergeQueueError, code):
+                        merge_runtime.supersede_stale_lifecycle_journal(
+                            self.controller.resolve(), incident["run_id"],
+                            incident["journal_revision"], incident["journal_sha256"],
+                            incident["scope_sha256"], 227, incident["terminal_ref"]["path"],
+                            incident["terminal_ref"]["sha256"], "WxK4xy",
+                            incident["recovery_ref"]["path"], incident["recovery_ref"]["sha256"],
+                            incident["target_sha"], incident["fifo_sha256"])
+                self.assertEqual(incident["journal_path"].read_bytes(), journal_before)
+                self.assertEqual((self.controller / ".juno_task/state/tasks.json").read_bytes(), state_before)
+                shutil.rmtree(self.controller / merge_runtime.MERGE_DRIVE_ROOT)
+                shutil.rmtree(self.controller / merge_runtime.TARGET_ARBITER_ROOT)
+                shutil.rmtree(self.controller / ".juno_task/runtime/merge-queue")
+
+    def test_stale_journal_supersession_refuses_all_changed_or_missing_bindings(self) -> None:
+        def invoke(incident: dict[str, object], **changes: object) -> None:
+            values = {
+                "run_id": incident["run_id"], "revision": incident["journal_revision"],
+                "journal_sha": incident["journal_sha256"], "scope": incident["scope_sha256"],
+                "attempt": 227, "terminal_path": incident["terminal_ref"]["path"],
+                "terminal_sha": incident["terminal_ref"]["sha256"], "task": "WxK4xy",
+                "recovery_path": incident["recovery_ref"]["path"],
+                "recovery_sha": incident["recovery_ref"]["sha256"],
+                "target": incident["target_sha"], "fifo": incident["fifo_sha256"],
+            }
+            values.update(changes)
+            merge_runtime.supersede_stale_lifecycle_journal(
+                self.controller.resolve(), values["run_id"], values["revision"],
+                values["journal_sha"], values["scope"], values["attempt"],
+                values["terminal_path"], values["terminal_sha"], values["task"],
+                values["recovery_path"], values["recovery_sha"], values["target"],
+                values["fifo"])
+
+        scenarios = ("changed_revision", "missing_recovery_lineage", "post_cas",
+                     "failed_arbiter_mismatch", "current_fifo_changed", "malformed_evidence")
+        for code in scenarios:
+            with self.subTest(code=code):
+                incident = self.freeze_wxk4xy_stale_lifecycle_incident()
+                changes: dict[str, object] = {}
+                if code == "changed_revision":
+                    changes["revision"] = 8
+                elif code == "missing_recovery_lineage":
+                    state_path = self.controller / ".juno_task/state/tasks.json"
+                    state = json.loads(state_path.read_text())
+                    del state["tasks"]["WxK4xy"]["pre_cas_authority_drift_recovery"]
+                    state_path.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
+                elif code == "post_cas":
+                    journal = json.loads(incident["journal_path"].read_text())
+                    journal["operations"].append({"post_state": "MERGED"})
+                    incident["journal_path"].write_text(
+                        json.dumps(journal, sort_keys=True, separators=(",", ":")) + "\n")
+                    changes["journal_sha"] = hashlib.sha256(
+                        incident["journal_path"].read_bytes()).hexdigest()
+                elif code == "failed_arbiter_mismatch":
+                    changes["attempt"] = 226
+                elif code == "current_fifo_changed":
+                    changes["fifo"] = "0" * 64
+                else:
+                    changes["run_id"] = "unsafe"
+                with self.assertRaisesRegex(merge_runtime.MergeQueueError, code):
+                    invoke(incident, **changes)
+
+    def test_stale_journal_supersession_refuses_target_drift(self) -> None:
+        incident = self.freeze_wxk4xy_stale_lifecycle_incident()
+        (self.repository / "src/target-drift.txt").write_text("moved\n")
+        git(self.repository, "add", "src/target-drift.txt")
+        git(self.repository, "commit", "-m", "move fixture target")
+        moved = git(self.repository, "rev-parse", "HEAD")
+        git(self.repository, "update-ref", "refs/heads/product", moved, incident["target_sha"])
+        self.assertNotEqual(git(self.repository, "rev-parse", "refs/heads/product"),
+                            incident["target_sha"])
+        with self.assertRaisesRegex(merge_runtime.MergeQueueError, "target_drift"):
+            merge_runtime.supersede_stale_lifecycle_journal(
+                self.controller.resolve(), incident["run_id"], incident["journal_revision"],
+                incident["journal_sha256"], incident["scope_sha256"], 227,
+                incident["terminal_ref"]["path"], incident["terminal_ref"]["sha256"],
+                "WxK4xy", incident["recovery_ref"]["path"],
+                incident["recovery_ref"]["sha256"], incident["target_sha"],
+                incident["fifo_sha256"])
+
     def test_target_arbiter_stays_absent_for_idle_queue_and_status_is_read_only(self) -> None:
         observed = merge_runtime.target_arbiter_status(self.controller.resolve())
         self.assertEqual(observed["reason_code"], "queue_idle")

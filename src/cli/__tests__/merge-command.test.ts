@@ -76,6 +76,21 @@ describe('merge queue CLI', () => {
     expect(invoke).toHaveBeenCalledWith(...expected);
   });
 
+  it('forwards every exact stale-lifecycle supersession identity', async () => {
+    const invoke = vi.fn(async () => undefined);
+    const program = new Command().exitOverride();
+    configureMergeQueueCommand(program, invoke);
+    const options = ['--run-id', '1788467754907264000-b5fa7b4da494425e',
+      '--expected-journal-revision', '7', '--expected-journal-sha256', 'a'.repeat(64),
+      '--scope-sha256', 'b'.repeat(64), '--arbiter-attempt', '227',
+      '--terminal-receipt', '/terminal.json', '--terminal-receipt-sha256', 'c'.repeat(64),
+      '--recovered-task', 'WxK4xy', '--recovery-receipt', '/recovery.json',
+      '--recovery-receipt-sha256', 'd'.repeat(64), '--expected-target-sha', 'e'.repeat(40),
+      '--expected-current-fifo-sha256', 'f'.repeat(64)];
+    await program.parseAsync(['node', 'yy', 'merge', 'supersede-lifecycle-journal', ...options]);
+    expect(invoke).toHaveBeenCalledWith('supersede-lifecycle-journal', undefined, options);
+  });
+
   it('forwards merge drive with an optional frozen FIFO stop boundary', async () => {
     const invoke = vi.fn(async () => undefined);
     const program = new Command().exitOverride();
@@ -131,7 +146,7 @@ describe('merge queue CLI', () => {
     const program = new Command();
     configureMergeQueueCommand(program, async () => undefined);
     const merge = program.commands.find((command) => command.name() === 'merge');
-    expect(merge?.commands.map((command) => command.name())).toEqual(['status', 'drive', 'arbiter', 'plan', 'next', 'resolve', 'review', 'reopen', 'withdraw', 'reconcile', 'refresh']);
+    expect(merge?.commands.map((command) => command.name())).toEqual(['status', 'drive', 'arbiter', 'plan', 'next', 'resolve', 'review', 'reopen', 'supersede-lifecycle-journal', 'withdraw', 'reconcile', 'refresh']);
     expect(merge?.commands[0]?.registeredArguments).toHaveLength(0);
     expect(merge?.commands[1]?.registeredArguments).toHaveLength(0);
     expect(merge?.commands[3]?.registeredArguments[0]?.required).toBe(true);
