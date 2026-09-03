@@ -725,7 +725,7 @@ def merge_plan(controller: Path, task_id: str, against: Optional[str] = None,
         findings.append(_finding("queue.state_ineligible", "error", "task_queue_lifecycle",
                                  {"state": record.get("state"), "eligible_states": sorted(eligible)},
                                  f"yy merge status"))
-    blockers = record.get("blocked_by") or record.get("unmet_blockers") or []
+    blockers = _unmet_dependency_blockers(record)
     if blockers:
         findings.append(_finding("queue.dependencies_unmet", "error", "task_queue_lifecycle",
                                  {"task_ids": sorted(blockers)}, "yy merge status"))
@@ -2388,11 +2388,30 @@ def read_kanban_task(controller: Path, task_id: str) -> dict[str, Any]:
     return payload
 
 
+def _unmet_dependency_blockers(value: dict[str, Any]) -> list[str]:
+    """Project canonical unmet dependency IDs, retaining fail-closed legacy fallback."""
+    dependency_info = value.get("_dependency_info")
+    if isinstance(dependency_info, dict) and "unmet_blockers" in dependency_info:
+        rows = dependency_info.get("unmet_blockers")
+    elif "unmet_blockers" in value:
+        rows = value.get("unmet_blockers")
+    else:
+        fields = value.get("fields") if isinstance(value.get("fields"), dict) else {}
+        rows = value.get("blocked_by") or fields.get("blocked_by") or []
+    if not isinstance(rows, list):
+        return ["<malformed>"]
+    blockers: list[str] = []
+    for row in rows:
+        blocker = row.get("id") if isinstance(row, dict) else row
+        if not isinstance(blocker, str) or not blocker:
+            return ["<malformed>"]
+        blockers.append(blocker)
+    return sorted(set(blockers))
+
+
 def _authority_task_projection(task: dict[str, Any]) -> dict[str, Any]:
     fields = task.get("fields") if isinstance(task.get("fields"), dict) else {}
-    blockers = task.get("blocked_by") or fields.get("blocked_by") or []
-    if not isinstance(blockers, list):
-        blockers = ["<malformed>"]
+    blockers = _unmet_dependency_blockers(task)
     withdrawal = {
         key: value for key, value in {
             "status": task.get("status"),
@@ -2407,7 +2426,7 @@ def _authority_task_projection(task: dict[str, Any]) -> dict[str, Any]:
     return {"revision_sha256": digest(canonical_task),
             "status": task.get("status"),
             "withdrawal_supersession": withdrawal,
-            "blockers": sorted(str(value) for value in blockers)}
+            "blockers": blockers}
 
 
 def _authority_fifo(state: dict[str, Any], target_ref: str,
@@ -2464,14 +2483,14 @@ def compile_live_authority_snapshot(controller: Path, config: dict[str, Any],
         owner_authority = {"registered": False, "path": None, "ready": True}
     creation = record.get("creation_receipt") if isinstance(
         record.get("creation_receipt"), dict) else {}
-    record_blockers = record.get("blocked_by") or record.get("unmet_blockers") or []
+    record_blockers = _unmet_dependency_blockers(record)
     body = {
         "schema_version": AUTHORITY_SCHEMA, "task_id": task_id,
         "task": _authority_task_projection(task),
         "record": {"state": record.get("state"), "base_sha": record.get("base_sha"),
                    "tip_sha": record.get("tip_sha"), "branch_ref": record.get("branch_ref"),
                    "enqueue_sequence": record.get("enqueue_sequence"),
-                   "blockers": sorted(str(value) for value in record_blockers),
+                   "blockers": record_blockers,
                    "ownership_handoff_sha256": digest({
                        "fencing": record.get("fencing"),
                        "fencing_history": record.get("fencing_history"),
