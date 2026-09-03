@@ -48,15 +48,6 @@ function processGroupAlive(pid) {
   }
 }
 
-function signalOwnedGroup(child, signal) {
-  try {
-    if (process.platform === 'win32') child.kill(signal);
-    else process.kill(-child.pid, signal);
-  } catch (error) {
-    if (error?.code !== 'ESRCH') throw error;
-  }
-}
-
 function captureBounded(command, args, timeoutMs = 1_000, outputLimit = 16 * 1024 * 1024) {
   return new Promise((resolve) => {
     let output = Buffer.alloc(0);
@@ -95,135 +86,291 @@ function captureBounded(command, args, timeoutMs = 1_000, outputLimit = 16 * 102
   });
 }
 
-async function discoverOwnedProcesses(ownerToken, knownPids) {
-  if (process.platform !== 'win32') {
-    const inventory = await captureBounded('ps', ['eww', '-axo', 'pid=,command=']);
-    if (!inventory.ok) return { pids: [], error: inventory.error };
-    const marker = `JUNO_TASK_WORKSPACE_RUN_OWNER=${ownerToken}`;
-    const pids = inventory.output.split('\n').flatMap((line) => {
-      if (!line.includes(marker)) return [];
-      const match = line.match(/^\s*(\d+)\s/);
-      return match ? [Number(match[1])] : [];
-    }).filter((pid) => pid !== process.pid);
-    return { pids: [...new Set(pids)], error: null };
-  }
+function parsePosixProcessInventory(output) {
+  return output.split('\n').flatMap((line) => {
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.{24})\s+(.*)$/);
+    return match ? [{
+      pid: Number(match[1]), parent_pid: Number(match[2]),
+      creation_id: match[3].trim(), command: match[4],
+    }] : [];
+  });
+}
 
+async function processInventory() {
+  if (process.platform !== 'win32') {
+    const inventory = await captureBounded('ps', ['eww', '-axo', 'pid=,ppid=,lstart=,command=']);
+    return inventory.ok
+      ? { rows: parsePosixProcessInventory(inventory.output), error: null }
+      : { rows: [], error: inventory.error };
+  }
   const inventory = await captureBounded('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-    'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress'], 2_000);
-  if (!inventory.ok) return { pids: [], error: inventory.error };
+    'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CreationDate,CommandLine | ConvertTo-Json -Compress'], 2_000);
+  if (!inventory.ok) return { rows: [], error: inventory.error };
   try {
     const decoded = JSON.parse(inventory.output || '[]');
-    const rows = Array.isArray(decoded) ? decoded : [decoded];
-    const owned = new Set(knownPids);
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const row of rows) {
-        const pid = Number(row.ProcessId);
-        if (owned.has(Number(row.ParentProcessId)) && !owned.has(pid)) {
-          owned.add(pid);
-          changed = true;
-        }
-      }
-    }
-    return { pids: [...owned].filter((pid) => rows.some((row) => Number(row.ProcessId) === pid)), error: null };
+    return {
+      rows: (Array.isArray(decoded) ? decoded : [decoded]).map((row) => ({
+        pid: Number(row.ProcessId), parent_pid: Number(row.ParentProcessId),
+        creation_id: String(row.CreationDate ?? ''), command: String(row.CommandLine ?? ''),
+      })).filter((row) => Number.isInteger(row.pid) && row.pid > 0 && row.creation_id),
+      error: null,
+    };
   } catch (error) {
-    return { pids: [], error: `cannot parse Windows process inventory: ${error}` };
+    return { rows: [], error: `cannot parse Windows process inventory: ${error}` };
   }
 }
 
-function signalOwnedPids(pids, signal) {
-  for (const pid of pids) {
+/** Refuse historical bare PIDs: only the same OS process instance remains owned. */
+export function selectVerifiedOwnedProcesses(known, rows) {
+  const identities = new Map(Array.from(known, (entry) => [Number(entry.pid), String(entry.creation_id)]));
+  return rows.filter((row) => identities.get(Number(row.pid)) === String(row.creation_id));
+}
+
+function rememberOwnedDescendants(known, rows, ownerToken) {
+  const byPid = new Map(rows.map((row) => [row.pid, row]));
+  const verified = new Set(selectVerifiedOwnedProcesses(known.values(), rows).map((row) => row.pid));
+  for (const entry of known.values()) {
+    if (!entry.creation_id) {
+      const row = byPid.get(entry.pid);
+      if (row) {
+        entry.creation_id = row.creation_id;
+        verified.add(row.pid);
+      }
+    }
+  }
+  const marker = `JUNO_TASK_WORKSPACE_RUN_OWNER=${ownerToken}`;
+  for (const row of rows) {
+    if (row.command.includes(marker)) verified.add(row.pid);
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const row of rows) {
+      if (verified.has(row.parent_pid) && !verified.has(row.pid)) {
+        verified.add(row.pid);
+        changed = true;
+      }
+    }
+  }
+  for (const pid of verified) {
     if (pid === process.pid) continue;
-    try { process.kill(pid, signal); } catch (error) {
+    const row = byPid.get(pid);
+    if (row && !known.has(pid)) known.set(pid, { pid, creation_id: row.creation_id });
+  }
+  return selectVerifiedOwnedProcesses(known.values(), rows);
+}
+
+async function discoverOwnedProcesses(ownerToken, known) {
+  const inventory = await processInventory();
+  if (inventory.error) return { rows: [], error: inventory.error };
+  return { rows: rememberOwnedDescendants(known, inventory.rows, ownerToken), error: null };
+}
+
+async function inheritedPipeTokens(child) {
+  if (process.platform === 'win32') return [];
+  const fds = [child?.stdout?._handle?.fd, child?.stderr?._handle?.fd]
+    .filter((fd) => Number.isInteger(fd));
+  if (!fds.length) return [];
+  if (process.platform === 'linux') {
+    return [...new Set(fds.flatMap((fd) => {
+      try { return [fs.readlinkSync(`/proc/self/fd/${fd}`)]; } catch { return []; }
+    }).filter((token) => token.startsWith('pipe:') || token.startsWith('socket:')))];
+  }
+  const inventory = await captureBounded('lsof', ['-nP', '-a', '-p', String(process.pid),
+    '-d', fds.join(','), '-Fn']);
+  if (!inventory.ok) return [];
+  return [...new Set(inventory.output.match(/0x[0-9a-f]+/gi) ?? [])];
+}
+
+async function rememberInheritedPipeHolders(known, tokens) {
+  if (process.platform === 'win32' || !tokens.length) return;
+  const holderPids = new Set();
+  if (process.platform === 'linux') {
+    for (const name of fs.readdirSync('/proc')) {
+      if (!/^\d+$/.test(name)) continue;
+      try {
+        const descriptors = fs.readdirSync(`/proc/${name}/fd`);
+        if (descriptors.some((fd) => {
+          try { return tokens.includes(fs.readlinkSync(`/proc/${name}/fd/${fd}`)); } catch { return false; }
+        })) holderPids.add(Number(name));
+      } catch { /* process exited or is not inspectable */ }
+    }
+  } else {
+    const inventory = await captureBounded('lsof', ['-nP', '-U'], 2_000);
+    if (!inventory.ok) return;
+    for (const line of inventory.output.split('\n')) {
+      if (!tokens.some((token) => line.includes(token))) continue;
+      const pid = Number(line.trim().split(/\s+/)[1]);
+      if (Number.isInteger(pid)) holderPids.add(pid);
+    }
+  }
+  const processes = await processInventory();
+  if (processes.error) return;
+  for (const row of processes.rows) {
+    if (holderPids.has(row.pid) && row.pid !== process.pid) {
+      known.set(row.pid, { pid: row.pid, creation_id: row.creation_id });
+    }
+  }
+}
+
+function signalOwnedGroup(child, signal) {
+  if (!Number.isInteger(child?.pid) || child.pid <= 0) return;
+  try {
+    if (process.platform === 'win32') child.kill(signal);
+    else process.kill(-child.pid, signal);
+  } catch (error) {
+    if (error?.code !== 'ESRCH') throw error;
+  }
+}
+
+async function signalVerifiedOwned(ownerToken, known, signal) {
+  const discovered = await discoverOwnedProcesses(ownerToken, known);
+  if (discovered.error) return discovered;
+  for (const row of discovered.rows) {
+    if (row.pid === process.pid) continue;
+    try { process.kill(row.pid, signal); } catch (error) {
       if (error?.code !== 'ESRCH') throw error;
     }
   }
+  return discovered;
 }
 
-async function reconcileOwnedProcesses(child, ownerToken, knownPids) {
+async function reconcileOwnedProcesses(child, ownerToken, known, pipeTokens = []) {
+  const destroyPipes = () => {
+    child?.stdout?.destroy();
+    child?.stderr?.destroy();
+  };
+  if (!Number.isInteger(child?.pid) || child.pid <= 0) {
+    destroyPipes();
+    return { settled: true, surviving: [] };
+  }
+  await rememberInheritedPipeHolders(known, pipeTokens);
   const verify = async () => {
-    const discovered = await discoverOwnedProcesses(ownerToken, knownPids);
-    for (const pid of discovered.pids) knownPids.add(pid);
-    const group = processGroupAlive(child.pid);
-    return { ...discovered, group };
+    const discovered = await discoverOwnedProcesses(ownerToken, known);
+    return { ...discovered, group: processGroupAlive(child.pid) };
   };
   let state = await verify();
   if (state.error) {
-    child.stdout.destroy();
-    child.stderr.destroy();
+    destroyPipes();
     return { settled: false, surviving: [`verification:${state.error}`] };
   }
   if (state.group) signalOwnedGroup(child, 'SIGTERM');
-  signalOwnedPids(state.pids, 'SIGTERM');
+  await signalVerifiedOwned(ownerToken, known, 'SIGTERM');
   for (const [waitMs, signal] of [[300, 'SIGKILL'], [1_000, null]]) {
     const deadline = performance.now() + waitMs;
     do {
       await new Promise((resolve) => setTimeout(resolve, 20));
       state = await verify();
-      if (state.error || (!state.group && state.pids.length === 0)) break;
+      if (state.error || (!state.group && state.rows.length === 0)) break;
     } while (performance.now() < deadline);
-    if (state.error || (!state.group && state.pids.length === 0) || signal === null) break;
+    if (state.error || (!state.group && state.rows.length === 0) || signal === null) break;
     if (state.group) signalOwnedGroup(child, signal);
-    signalOwnedPids(state.pids, signal);
+    await signalVerifiedOwned(ownerToken, known, signal);
   }
-  child.stdout.destroy();
-  child.stderr.destroy();
+  destroyPipes();
   if (state.error) return { settled: false, surviving: [`verification:${state.error}`] };
   const surviving = [
     ...(state.group ? [`process_group:${child.pid}`] : []),
-    ...state.pids.map((pid) => `pid:${pid}`),
+    ...state.rows.map((row) => `pid:${row.pid}@${row.creation_id}`),
   ];
   return { settled: surviving.length === 0, surviving };
 }
 
-async function runOwned(command, args, timeoutMs, fixtureMode, outputLimit = 262_144) {
+function commandExists(command) {
+  if (path.isAbsolute(command) || command.includes(path.sep)) return fs.existsSync(command);
+  return (process.env.PATH ?? '').split(path.delimiter)
+    .some((directory) => fs.existsSync(path.join(directory, command)));
+}
+
+async function runOwned(command, args, timeoutMs, fixtureMode, outputLimit = 262_144, dependencies = {}) {
   const started = performance.now();
   const ownerToken = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const knownPids = new Set();
-  const child = spawn(command, args, {
-    cwd: root,
-    detached: process.platform !== 'win32',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-      JUNO_TASK_WORKSPACE_FIXTURE_MODE: fixtureMode,
-      JUNO_TASK_WORKSPACE_RUN_OWNER: ownerToken,
-      PYTHONPYCACHEPREFIX: process.env.PYTHONPYCACHEPREFIX ?? path.join(os.tmpdir(), 'juno-task-workspace-runner-pycache'),
-    },
-  });
+  const known = new Map();
+  let child;
   let output = Buffer.alloc(0);
+  let timedOut = false;
+  let timer = null;
+  let escalationTimer = null;
+  let inventoryTimer = null;
+  const inventoriesInFlight = new Set();
   const append = (chunk) => {
     output = Buffer.concat([output, Buffer.from(chunk)]);
     if (output.length > outputLimit) output = output.subarray(output.length - outputLimit);
   };
-  child.stdout.on('data', append);
-  child.stderr.on('data', append);
-  knownPids.add(child.pid);
-  let timedOut = false;
-  let timer;
-  let escalationTimer;
-  let inventoryInFlight = null;
-  const inventoryTimer = process.platform === 'win32' ? setInterval(() => {
-    if (inventoryInFlight) return;
-    inventoryInFlight = discoverOwnedProcesses(ownerToken, knownPids).then((inventory) => {
-      for (const pid of inventory.pids) knownPids.add(pid);
-    }).finally(() => { inventoryInFlight = null; });
-  }, 100) : null;
-  const status = await new Promise((resolve, reject) => {
-    child.once('error', reject);
-    child.once('exit', (code, signal) => resolve({ code, signal }));
-    timer = setTimeout(() => {
-      timedOut = true;
-      signalOwnedGroup(child, 'SIGTERM');
-      escalationTimer = setTimeout(() => signalOwnedGroup(child, 'SIGKILL'), 200);
-      escalationTimer.unref();
-    }, timeoutMs);
-  });
-  clearTimeout(timer);
-  if (inventoryTimer) clearInterval(inventoryTimer);
-  if (inventoryInFlight) await inventoryInFlight;
-  const reconciliation = await reconcileOwnedProcesses(child, ownerToken, knownPids);
+  const sampleInventory = () => {
+    if (!child?.pid || inventoriesInFlight.size >= 4) return;
+    const sample = discoverOwnedProcesses(ownerToken, known)
+      .finally(() => { inventoriesInFlight.delete(sample); });
+    inventoriesInFlight.add(sample);
+  };
+  try {
+    const warmOwnershipMonitor = !dependencies.spawnImpl && process.platform !== 'win32' && commandExists(command);
+    const launchCommand = warmOwnershipMonitor ? '/bin/sh' : command;
+    const launchArgs = warmOwnershipMonitor
+      ? ['-c', 'sleep 0.075; exec "$@"', 'task-workspace-owner', command, ...args]
+      : args;
+    child = (dependencies.spawnImpl ?? spawn)(launchCommand, launchArgs, {
+      cwd: root,
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        JUNO_TASK_WORKSPACE_FIXTURE_MODE: fixtureMode,
+        JUNO_TASK_WORKSPACE_RUN_OWNER: ownerToken,
+        PYTHONPYCACHEPREFIX: process.env.PYTHONPYCACHEPREFIX ?? path.join(os.tmpdir(), 'juno-task-workspace-runner-pycache'),
+      },
+    });
+  } catch (error) {
+    append(error?.stack ?? String(error));
+    return {
+      code: 2, signal: null, timedOut: false, wallMs: performance.now() - started,
+      output: output.toString('utf8'), settled: true, surviving: [],
+    };
+  }
+  child.stdout?.on('data', append);
+  child.stderr?.on('data', append);
+  const pipeTokensPromise = inheritedPipeTokens(child);
+  if (Number.isInteger(child.pid) && child.pid > 0) {
+    known.set(child.pid, { pid: child.pid, creation_id: '' });
+    sampleInventory();
+    // A short overlapping burst closes the launch/instant-orphan race; after that,
+    // one bounded sampler is sufficient for long-running benchmark profiles.
+    const burstStarted = performance.now();
+    inventoryTimer = setInterval(() => {
+      sampleInventory();
+      if (performance.now() - burstStarted >= 100) {
+        clearInterval(inventoryTimer);
+        inventoryTimer = setInterval(sampleInventory, 10_000);
+      }
+    }, 3);
+  }
+  let status;
+  try {
+    status = await new Promise((resolve) => {
+      let terminal = false;
+      const finish = (value) => {
+        if (terminal) return;
+        terminal = true;
+        resolve(value);
+      };
+      child.once('error', (error) => {
+        append(error?.stack ?? String(error));
+        finish({ code: 2, signal: null });
+      });
+      child.once('exit', (code, signal) => finish({ code: code ?? (signal ? 1 : 2), signal }));
+      timer = setTimeout(() => {
+        timedOut = true;
+        signalOwnedGroup(child, 'SIGTERM');
+        escalationTimer = setTimeout(() => signalOwnedGroup(child, 'SIGKILL'), 200);
+        escalationTimer.unref();
+      }, timeoutMs);
+    });
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (inventoryTimer) clearInterval(inventoryTimer);
+    if (inventoriesInFlight.size) await Promise.allSettled([...inventoriesInFlight]);
+  }
+  const reconciliation = await reconcileOwnedProcesses(child, ownerToken, known, await pipeTokensPromise);
   if (escalationTimer) clearTimeout(escalationTimer);
   return {
     ...status,
@@ -241,8 +388,8 @@ function atomicWrite(target, value) {
   fs.renameSync(temporary, target);
 }
 
-async function main() {
-  const options = parse(process.argv.slice(2));
+export async function main(argv = process.argv.slice(2), dependencies = {}) {
+  const options = parse(argv);
   const startedAt = new Date().toISOString();
   const cpuCount = os.cpus().length || 1;
   const initialLoad = os.loadavg();
@@ -270,7 +417,7 @@ async function main() {
   }
   const runs = await Promise.all(plans.map(async (plan) => ({
     ...plan,
-    run: await runOwned(plan.command, plan.args, options.timeoutMs, options.mode),
+    run: await runOwned(plan.command, plan.args, options.timeoutMs, options.mode, 262_144, dependencies),
   })));
   const profiles = runs.map(({ profilePath }) => {
     try { return profilePath ? JSON.parse(fs.readFileSync(profilePath, 'utf8')) : null; } catch { return null; }
@@ -349,7 +496,9 @@ async function main() {
   return receipt.exit_code;
 }
 
-main().then((code) => { process.exitCode = code; }).catch((error) => {
-  process.stderr.write(`${error.stack ?? error}\n`);
-  process.exitCode = 2;
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().then((code) => { process.exitCode = code; }).catch((error) => {
+    process.stderr.write(`${error.stack ?? error}\n`);
+    process.exitCode = 2;
+  });
+}

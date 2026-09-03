@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const repository = path.resolve(import.meta.dirname, '../../../..');
@@ -151,14 +152,14 @@ describe('task-workspace supported profiler and runner', () => {
     expect(() => process.kill(pid, 0)).toThrow();
   }, 10_000);
 
-  it.runIf(process.platform !== 'win32')('reconciles a descendant that escapes into a new session', () => {
+  it.runIf(process.platform !== 'win32')('reconciles an env-scrubbing descendant that escapes into a new session', () => {
     const root = temporaryDirectory();
     const receipt = path.join(root, 'escaped-session.json');
     const probe = path.join(root, 'escaped-session.py');
     const childPid = path.join(root, 'escaped-child.pid');
     fs.writeFileSync(probe, [
       'import pathlib, subprocess, sys',
-      `p=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)`,
+      `p=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True, env={})`,
       `pathlib.Path(${JSON.stringify(childPid)}).write_text(str(p.pid))`,
     ].join('\n'));
     let pid: number | undefined;
@@ -179,6 +180,56 @@ describe('task-workspace supported profiler and runner', () => {
       }
     }
   }, 10_000);
+
+  it('finalizes asynchronous launch failures promptly with an exact terminal receipt', () => {
+    const root = temporaryDirectory();
+    const receipt = path.join(root, 'async-spawn-failure.json');
+    const started = performance.now();
+    const result = spawnSync(process.execPath, [runner, '--mode', 'seeded', '--receipt', receipt,
+      '--timeout-ms', '100', '--command', path.join(root, 'does-not-exist')], {
+      cwd: path.join(repository, 'juno-code'), encoding: 'utf8', timeout: 5_000,
+    });
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(result.status).not.toBe(0);
+    expect(fs.existsSync(receipt)).toBe(true);
+    const value = JSON.parse(fs.readFileSync(receipt, 'utf8')) as Record<string, any>;
+    expect(value.exit_code).toBe(result.status);
+    expect(value.eligible).toBe(false);
+    expect(value.timeout).toBe(false);
+    expect(value.processes).toEqual({ settled: true, surviving: [] });
+    expect(value.output.truncated_tail).toMatch(/ENOENT|not found/i);
+  });
+
+  it('finalizes synchronous spawn exceptions through the same terminal receipt path', async () => {
+    const root = temporaryDirectory();
+    const receipt = path.join(root, 'sync-spawn-failure.json');
+    const module = await import(pathToFileURL(runner).href) as Record<string, any>;
+    const code = await module.main([
+      '--mode', 'seeded', '--receipt', receipt, '--timeout-ms', '100',
+      '--command', 'synthetic-command',
+    ], {
+      spawnImpl: () => { throw Object.assign(new Error('synthetic synchronous spawn failure'), { code: 'EINVAL' }); },
+    });
+    expect(code).not.toBe(0);
+    const value = JSON.parse(fs.readFileSync(receipt, 'utf8')) as Record<string, any>;
+    expect(value.exit_code).toBe(code);
+    expect(value.eligible).toBe(false);
+    expect(value.timeout).toBe(false);
+    expect(value.processes).toEqual({ settled: true, surviving: [] });
+    expect(value.output.truncated_tail).toContain('synthetic synchronous spawn failure');
+  });
+
+  it('refuses a reused Windows PID whose creation identity no longer matches', async () => {
+    const module = await import(pathToFileURL(runner).href) as Record<string, any>;
+    const known = [{ pid: 4100, creation_id: '20260902220000.000000-000' }];
+    const replacement = [{
+      pid: 4100, parent_pid: 99, creation_id: '20260902220100.000000-000', command: 'foreign.exe',
+    }];
+    expect(module.selectVerifiedOwnedProcesses(known, replacement)).toEqual([]);
+    expect(module.selectVerifiedOwnedProcesses(known, [{
+      ...replacement[0], creation_id: known[0].creation_id,
+    }])).toEqual([{ ...replacement[0], creation_id: known[0].creation_id }]);
+  });
 
   it('returns nonzero and reports survivors when settlement cannot be verified', () => {
     const root = temporaryDirectory();
