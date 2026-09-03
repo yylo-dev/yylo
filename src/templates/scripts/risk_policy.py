@@ -280,6 +280,12 @@ def _normalize_paths(paths: Any, maximum: int) -> tuple[list[str], bool]:
     return sorted(set(normalized)), ambiguous or not normalized
 
 
+LIFECYCLE_INFRASTRUCTURE_PREFIXES = (
+    ".juno_task/scripts/",
+    "juno-code/src/templates/scripts/",
+)
+
+
 def _classify_paths(policy: dict[str, Any], identity: dict[str, Any],
                     changed_paths: Any, flags: Any = None) -> dict[str, Any]:
     paths, ambiguous = _normalize_paths(changed_paths, policy["limits"]["max_changed_paths"])
@@ -291,8 +297,14 @@ def _classify_paths(policy: dict[str, Any], identity: dict[str, Any],
     known_flags = set(policy["high_risk_flags"]) | set(policy["release_flags"])
     unknown = sorted(set(flags) - known_flags)
     release = bool(set(flags) & set(policy["release_flags"]))
-    high_paths = [p for p in paths if _matches(p, policy["high_risk_paths"])]
-    shared_paths = [p for p in paths if _matches(p, policy["shared_infrastructure_paths"])]
+    lifecycle_paths = [p for p in paths
+                       if p.startswith(LIFECYCLE_INFRASTRUCTURE_PREFIXES)]
+    high_paths = sorted(set(
+        [p for p in paths if _matches(p, policy["high_risk_paths"])]
+        + lifecycle_paths))
+    shared_paths = sorted(set(
+        [p for p in paths if _matches(p, policy["shared_infrastructure_paths"])]
+        + lifecycle_paths))
     low_only = bool(paths) and all(_matches(p, policy["low_risk_paths"]) for p in paths)
     reasons: list[str] = []
     if ambiguous or unknown:
