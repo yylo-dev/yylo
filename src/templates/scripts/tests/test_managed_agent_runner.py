@@ -69,7 +69,9 @@ assert pathlib.Path(config['envFilePath']).is_absolute() and pathlib.Path(config
 macro=pathlib.Path(config['promptMacros']['global']['reflect']['path'])
 assert macro.is_absolute() and macro.read_text()=='controller reflect\\n'
 prompt=pathlib.Path(sys.argv[sys.argv.index('-f')+1]).read_text()
-print('out-before', flush=True); print('err-before', file=sys.stderr, flush=True)
+settled_recovery='settled-worker-recovery' in prompt
+if not settled_recovery:
+ print('out-before', flush=True); print('err-before', file=sys.stderr, flush=True)
 if 'orphan-wait:' in prompt:
  marker=pathlib.Path(prompt.split('orphan-wait:',1)[1].splitlines()[0].strip())
  grand_code=("import pathlib,signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); "
@@ -105,8 +107,17 @@ if 'typed-' in prompt:
  payload['terminal_outcome']={'schema_version':'juno_managed_agent_terminal_result.v1','state':prompt.split('typed-',1)[1].split()[0]}
 if 'semantic-fail' in prompt: payload['is_error']=True
 if 'empty' in prompt: payload['result']=''
-pathlib.Path(os.environ['JUNO_SUBAGENT_CAPTURE_PATH']).write_text(json.dumps(payload)+'\\n')
-print('out-after', flush=True)
+if settled_recovery:
+ root=pathlib.Path(os.environ['TASK_ROOT'])
+ (root/'allowed.txt').write_text('settled recovery result\\n')
+ subprocess.run(['git','-C',str(root),'add','allowed.txt'],check=True)
+ subprocess.run(['git','-C',str(root),'-c','user.name=T','-c','user.email=t@t','commit','-m','settled recovery'],check=True,stdout=subprocess.DEVNULL)
+ metadata=pathlib.Path(os.environ['YYLO_SESSION_METADATA_DIRECTORY']); metadata.mkdir(parents=True,exist_ok=True)
+ (metadata/'session_continuity.v2.json').write_text(json.dumps({'version':2,'scopes':{'S':{'active':'main','branches':{'main':{'session_id':'session-settled-run'}}}}})+'\\n')
+ print('completed\\n\\nsettled worker recovered',flush=True)
+else:
+ pathlib.Path(os.environ['JUNO_SUBAGENT_CAPTURE_PATH']).write_text(json.dumps(payload)+'\\n')
+ print('out-after', flush=True)
 """)
         fake.chmod(0o755)
         self.prompt = self.tmp / "input.md"; self.prompt.write_text("ok\n")
@@ -648,6 +659,103 @@ print(json.dumps({'path':str(pathlib.Path.cwd().resolve()),'role':'controller',
             runner.finalize_managed_capture(capture, stdout, metadata, binding, started_ns)
         with self.assertRaisesRegex(runner.RunnerError, "capture is missing"):
             runner.finalize_managed_capture(capture, stdout, metadata, None, started_ns)
+
+    def test_settled_worker_capture_recovery_is_exact_atomic_and_fail_closed(self):
+        root = self.tmp / "settled-worker"; root.mkdir()
+        capture = root / "capture.json"
+        stdout = root / "stdout.log"
+        metadata = root / "session_metadata"; metadata.mkdir()
+        continuity = metadata / "session_continuity.v2.json"
+        started_ns = time.time_ns()
+        stdout.write_text("completed\n\nworker finished exactly once\n")
+        continuity.write_text(json.dumps({"version": 2, "scopes": {"S": {
+            "active": "main", "branches": {"main": {
+                "session_id": "session-settled"}}}}}) + "\n")
+        before = runner.fingerprint(self.candidate)
+        (self.candidate / "allowed.txt").write_text("settled result\n")
+        subprocess.run(["git", "-C", str(self.candidate), "add", "allowed.txt"], check=True)
+        subprocess.run(["git", "-C", str(self.candidate), "-c", "user.name=T",
+                        "-c", "user.email=t@t", "commit", "-m", "settled result"],
+                       check=True, stdout=subprocess.DEVNULL)
+        after = runner.fingerprint(self.candidate)
+        identity = {"task_id": "T1", "expected_paths": ["allowed.txt"],
+                    "admission_kind": "historical_creation", "before": before,
+                    "worker_attempt": {"task_id": "T1", "tool_id": "yy_task_implementation",
+                    "out_dir": str(root.resolve()), "prompt_sha256": "1" * 64}}
+        source, payload = runner.recover_settled_worker_capture(
+            capture, stdout, metadata, identity, before, after, started_ns,
+            exit_code=0, timed_out=False, interrupted=0, termination_events=[],
+            process_settled=True)
+        self.assertEqual("settled_worker_recovery", source)
+        self.assertEqual("session-settled", payload["session_id"])
+        self.assertEqual("completed", payload["terminal_outcome"]["state"])
+        self.assertEqual(after["head"], payload["recovery_binding"]["commit_sha"])
+        original = capture.read_bytes()
+        repeated = runner.recover_settled_worker_capture(
+            capture, stdout, metadata, identity, before, after, started_ns,
+            exit_code=0, timed_out=False, interrupted=0, termination_events=[],
+            process_settled=True)
+        self.assertEqual((source, payload), repeated)
+        self.assertEqual(original, capture.read_bytes())
+
+        cases = (
+            ("nonzero", {"exit_code": 7}, "nonzero_exit"),
+            ("timeout", {"timed_out": True}, "incomplete_settlement"),
+            ("interrupted", {"interrupted": signal.SIGTERM}, "interrupted"),
+            ("descendants", {"termination_events": [{"reason": "live"}]}, "incomplete_settlement"),
+            ("live-process", {"process_settled": False}, "incomplete_settlement"),
+        )
+        capture.unlink()
+        defaults = {"exit_code": 0, "timed_out": False, "interrupted": 0,
+                    "termination_events": [], "process_settled": True}
+        for label, changed, reason in cases:
+            with self.subTest(label=label), self.assertRaisesRegex(runner.RunnerError, reason):
+                runner.recover_settled_worker_capture(
+                    capture, stdout, metadata, identity, before, after, started_ns,
+                    **{**defaults, **changed})
+            self.assertFalse(capture.exists())
+
+        with self.assertRaisesRegex(runner.RunnerError, "dirty_state"):
+            runner.recover_settled_worker_capture(
+                capture, stdout, metadata, identity, before,
+                {**after, "status": "? dirty.txt"}, started_ns, **defaults)
+        with self.assertRaisesRegex(runner.RunnerError, "mismatched_identity"):
+            runner.recover_settled_worker_capture(
+                capture, stdout, metadata,
+                {**identity, "worker_attempt": {**identity["worker_attempt"],
+                                                  "task_id": "WRONG"}},
+                before, after, started_ns, **defaults)
+        with self.assertRaisesRegex(runner.RunnerError, "incomplete_result"):
+            runner.recover_settled_worker_capture(
+                capture, stdout, metadata, identity, before, before, started_ns, **defaults)
+        old = started_ns - 1_000_000
+        os.utime(continuity, ns=(old, old))
+        with self.assertRaisesRegex(runner.RunnerError, "stale_capture"):
+            runner.recover_settled_worker_capture(
+                capture, stdout, metadata, identity, before, after, started_ns, **defaults)
+        os.utime(continuity, None)
+
+        provider = {key: value for key, value in payload.items()
+                    if key not in {"capture_source", "recovery_binding"}}
+        provider["capture_source"] = "provider_capture"
+        runner.atomic_json(capture, provider)
+        (root / "capture-terminal.json").unlink()
+        provider_bytes = capture.read_bytes()
+        accepted_source, accepted = runner.recover_settled_worker_capture(
+            capture, stdout, metadata, identity, before, after, started_ns, **defaults)
+        self.assertEqual("provider_capture_recovered_stale", accepted_source)
+        self.assertEqual(provider, accepted)
+        self.assertEqual(provider_bytes, capture.read_bytes())
+        capture.unlink(); (root / "capture-terminal.json").unlink()
+
+        stdout.write_text("completed\nfirst\n")
+        continuity.write_text(json.dumps({"version": 2, "scopes": {
+            "A": {"active": "main", "branches": {"main": {"session_id": "one"}}},
+            "B": {"active": "main", "branches": {"main": {"session_id": "two"}}}}}) + "\n")
+        with self.assertRaisesRegex(runner.RunnerError, "ambiguous_capture"):
+            runner.recover_settled_worker_capture(
+                capture, stdout, metadata, identity, before, after, started_ns, **defaults)
+        self.assertFalse(capture.exists())
 
     def prepare_receipt_bound_conflict(self):
         scripts = self.controller / ".juno_task/scripts"; scripts.mkdir(parents=True, exist_ok=True)
@@ -1236,6 +1344,46 @@ print(json.dumps({'path':str(pathlib.Path.cwd().resolve()),'role':'controller',
         environment = receipt["environment_contract"]
         self.assertEqual(environment["workspace_role"], "task")
         self.assertIsNone(environment["worker_admission_kind"])
+
+    def test_run_recovers_missing_worker_capture_after_exact_settlement(self):
+        common = str((self.candidate / git(
+            self.candidate, "rev-parse", "--git-common-dir")).resolve())
+        before = git(self.candidate, "rev-parse", "HEAD")
+        receipt_dir = self.tmp / "settled-run-receipts"; receipt_dir.mkdir()
+        create = {"task_id": "T1", "worktree": str(self.candidate),
+                  "branch_ref": "refs/heads/task", "git_common_dir": common,
+                  "expected_paths": ["allowed.txt"], "workspace_manifest_identity": "m"}
+        values = (("create.json", create),
+                  ("verify.json", {"passed": True, "task_id": "T1"}),
+                  ("edit.json", {"passed": True, "task_id": "T1"}))
+        paths = []
+        for name, value in values:
+            path = receipt_dir / name; runner.atomic_json(path, value); paths.append(path)
+        prompt = self.tmp / "settled-worker-recovery.md"
+        prompt.write_text("settled-worker-recovery\n")
+        out = self.tmp / "settled-run"
+        command = [sys.executable, str(RUNNER), "run", "--mode", "worker",
+                   "--controller-root", str(self.controller), "--controller-branch", "controller",
+                   "--agent-root", str(self.candidate), "--prompt-file", str(prompt),
+                   "--out-dir", str(out), "--tool-id", "yy_task_implementation",
+                   "--task-id", "T1", "--create-receipt", str(paths[0]),
+                   "--verify-receipt", str(paths[1]), "--edit-preflight-receipt", str(paths[2]),
+                   "--require-terminal-result", "--external-side-effects", "forbidden",
+                   "--lifecycle-hooks", "disabled"]
+        completed = subprocess.run(command, env=self.env(), capture_output=True, text=True)
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        receipt = json.loads((out / "receipt.json").read_text())
+        self.assertEqual("settled_worker_recovery", receipt["capture_source"])
+        self.assertEqual("completed", receipt["terminal_result"]["state"])
+        self.assertEqual("session-settled-run", receipt["session_id"])
+        self.assertEqual(1, int(git(self.candidate, "rev-list", "--count",
+                                    f"{before}..HEAD")))
+        self.assertFalse(git(self.candidate, "status", "--porcelain=v1"))
+        terminal = json.loads((out / "capture-terminal.json").read_text())
+        self.assertEqual(receipt["artifacts"]["capture"]["sha256"],
+                         terminal["capture_sha256"])
+        self.assertEqual(receipt["artifacts"]["capture_terminal"]["path"],
+                         str((out / "capture-terminal.json").resolve()))
 
     def test_historical_creation_worker_requires_exact_receipt_and_workspace_identity(self):
         subprocess.run(["git", "-C", str(self.candidate), "config", "extensions.worktreeConfig", "true"], check=True)

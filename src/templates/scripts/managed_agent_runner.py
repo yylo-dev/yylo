@@ -343,6 +343,28 @@ def atomic_json(path: Path, value: Any) -> None:
     atomic_bytes(path, canonical(value))
 
 
+def atomic_idempotent_bytes(path: Path, data: bytes, label: str) -> None:
+    """Publish immutable bytes once; concurrent exact publication is a no-op."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+            dir=path.parent, prefix="." + path.name + ".", delete=False) as out:
+        out.write(data); out.flush(); os.fsync(out.fileno()); temporary = Path(out.name)
+    try:
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            try: current = path.read_bytes()
+            except OSError as exc: raise RunnerError(f"{label} publication is ambiguous") from exc
+            if current != data:
+                raise RunnerError(f"{label} publication conflicts with existing bytes")
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def atomic_idempotent_json(path: Path, value: Any, label: str) -> None:
+    atomic_idempotent_bytes(path, canonical(value), label)
+
+
 def load_object(path: Path, label: str) -> dict[str, Any]:
     try:
         if path.stat().st_size > CAPTURE_LIMIT:
@@ -951,10 +973,18 @@ def validate_worker(args: argparse.Namespace, controller: dict[str, Any]) -> tup
                 or edit.get("verify_receipt_sha256") != verify_ref["sha256"]
                 or edit.get("allowed_paths_sha256") != expected_sha):
             raise RunnerError("historical task edit-preflight authority mismatch")
+    worker_attempt = {
+        "task_id": args.task_id,
+        "tool_id": getattr(args, "tool_id", None),
+        "out_dir": str(Path(args.out_dir).resolve()) if getattr(args, "out_dir", None) else None,
+        "prompt_sha256": (sha(Path(args.prompt_file).resolve().read_bytes())
+                          if getattr(args, "prompt_file", None) else None),
+    }
     admission = {"task_id": args.task_id, "expected_paths": expected_paths,
                  "admission_kind": admission_kind,
                  "create": create_ref, "verify": verify_ref, "edit_preflight": edit_ref,
-                 "manifest_identity": create.get("workspace_manifest_identity"), "before": mark}
+                 "manifest_identity": create.get("workspace_manifest_identity"), "before": mark,
+                 "worker_attempt": worker_attempt}
     return admission, mark
 
 
@@ -1185,6 +1215,136 @@ def finalize_managed_capture(capture: Path, stdout_path: Path, metadata: Path,
     atomic_json(capture, {"session_id": session.strip(), "result": response.decode("utf-8"),
                           "is_error": False, "capture_source": "managed_stdout_finalizer"})
     return "managed_stdout_finalizer"
+
+
+def _worker_capture_error(reason: str, detail: str) -> RunnerError:
+    return RunnerError(f"worker_capture_recovery_{reason}: {detail}")
+
+
+def _worker_terminal_state(response: bytes) -> str:
+    try: lines = response.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise _worker_capture_error("mismatched_capture", "worker response is not UTF-8") from exc
+    first = next((line.strip().lower() for line in lines if line.strip()), "")
+    if first not in {"completed", "blocked", "incomplete", "failed"}:
+        raise _worker_capture_error(
+            "ambiguous_capture", "worker response lacks one exact leading terminal state")
+    return first
+
+
+def _validate_recovered_worker_subject(identity: dict[str, Any], before: dict[str, Any],
+                                       after: dict[str, Any], state: str) -> list[str]:
+    attempt = identity.get("worker_attempt")
+    if (not isinstance(attempt, dict) or attempt.get("task_id") != identity.get("task_id")
+            or not isinstance(attempt.get("tool_id"), str) or not attempt["tool_id"]
+            or not isinstance(attempt.get("out_dir"), str) or not attempt["out_dir"]
+            or not isinstance(attempt.get("prompt_sha256"), str)
+            or not __import__("re").fullmatch(r"[0-9a-f]{64}", attempt["prompt_sha256"])):
+        raise _worker_capture_error("mismatched_identity", "task/attempt identity is incomplete")
+    if (after.get("root") != before.get("root")
+            or after.get("branch_ref") != before.get("branch_ref")
+            or after.get("git_common_dir") != before.get("git_common_dir")):
+        raise _worker_capture_error("mismatched_identity", "worktree identity changed: "
+                                    f"before={before.get('root')}@{before.get('branch_ref')}:{before.get('git_common_dir')} "
+                                    f"after={after.get('root')}@{after.get('branch_ref')}:{after.get('git_common_dir')}")
+    if after.get("status"):
+        raise _worker_capture_error("dirty_state", "worker worktree is not clean")
+    root = Path(str(after["root"]))
+    if state != "completed":
+        if after.get("head") != before.get("head"):
+            raise _worker_capture_error("incomplete_result", "non-completed worker changed commit")
+        return []
+    admission_kind = identity.get("admission_kind")
+    if admission_kind == "sealed_release_epoch_conflict":
+        ours, theirs = identity.get("ours_sha"), identity.get("theirs_sha")
+        parents = git(root, "show", "-s", "--format=%P", after["head"]).split()
+        if (len(parents) != 2 or ours not in parents or theirs not in parents):
+            raise _worker_capture_error("mismatched_identity", "conflict worker commit lacks exact parents")
+        comparison = str(ours)
+    else:
+        if git(root, "rev-list", "--count", f"{before['head']}..{after['head']}") != "1":
+            raise _worker_capture_error("incomplete_result", "worker did not produce exactly one commit")
+        comparison = before["head"]
+    changed = sorted(filter(None, git(root, "diff", "--name-only",
+                                      f"{comparison}..{after['head']}").splitlines()))
+    allowed = identity.get("expected_paths")
+    if not isinstance(allowed, list) or any(not isinstance(path, str) for path in allowed):
+        raise _worker_capture_error("mismatched_identity", "path admission is malformed")
+    unexpected = [path for path in changed if not any(
+        path == admitted or path.startswith(admitted.rstrip("/") + "/") for admitted in allowed)]
+    if unexpected:
+        raise _worker_capture_error("mismatched_identity", "worker changed paths outside admission")
+    return changed
+
+
+def recover_settled_worker_capture(
+        capture: Path, stdout_path: Path, metadata: Path, identity: dict[str, Any],
+        before: dict[str, Any], after: dict[str, Any], started_ns: int, *,
+        exit_code: int, timed_out: bool, interrupted: int,
+        termination_events: list[dict[str, Any]], process_settled: bool,
+) -> tuple[str, dict[str, Any]]:
+    """Recover one exact worker result only after process and Git settlement."""
+    if exit_code != 0:
+        raise _worker_capture_error("nonzero_exit", f"provider exited {exit_code}")
+    if interrupted:
+        raise _worker_capture_error("interrupted", f"provider was interrupted by signal {interrupted}")
+    if timed_out or termination_events or not process_settled:
+        raise _worker_capture_error("incomplete_settlement", "provider process group did not settle cleanly")
+    try: response = stdout_path.read_bytes()
+    except OSError as exc:
+        raise _worker_capture_error("missing_capture", "bounded worker stdout is missing") from exc
+    if not response or len(response) > CAPTURE_LIMIT:
+        raise _worker_capture_error("missing_capture", "bounded worker stdout is missing or unbounded")
+    continuity_path = metadata / "session_continuity.v2.json"
+    try:
+        if (continuity_path.is_symlink() or not continuity_path.is_file()
+                or continuity_path.stat().st_mtime_ns < started_ns):
+            raise OSError("continuity is absent, symbolic, or stale")
+        session = continuity_session(continuity_path)
+    except (OSError, RunnerError) as exc:
+        reason = "ambiguous_capture" if "malformed" in str(exc) else "stale_capture"
+        raise _worker_capture_error(reason, "session settlement identity is not exact") from exc
+    state = _worker_terminal_state(response)
+    if state == "failed":
+        raise _worker_capture_error("incomplete_result", "worker declared failed")
+    changed = _validate_recovered_worker_subject(identity, before, after, state)
+    attempt = identity["worker_attempt"]
+    binding = {
+        "schema_version": "juno_managed_worker_capture_binding.v1",
+        "task_id": identity["task_id"], "attempt": attempt,
+        "session_id": session, "worktree": after["root"],
+        "before_sha": before["head"], "commit_sha": after["head"],
+        "changed_paths": changed, "response_sha256": sha(response),
+    }
+    expected = {"session_id": session, "result": response.decode("utf-8"),
+                "is_error": state == "failed",
+                "terminal_outcome": {"schema_version": TERMINAL_RESULT_SCHEMA, "state": state},
+                "capture_source": "settled_worker_recovery", "recovery_binding": binding}
+    existed = capture.exists()
+    if existed:
+        current = load_object(capture, "worker capture")
+        required = {key: expected[key] for key in ("session_id", "result", "is_error",
+                                                    "terminal_outcome")}
+        if any(current.get(key) != value for key, value in required.items()):
+            raise _worker_capture_error("mismatched_capture", "existing capture disagrees with settled result")
+        payload = current
+        source = "provider_capture_recovered_stale"
+        if current.get("capture_source") == "settled_worker_recovery":
+            if current.get("recovery_binding") != binding:
+                raise _worker_capture_error("mismatched_capture", "recovery binding changed")
+            source = "settled_worker_recovery"
+    else:
+        atomic_idempotent_json(capture, expected, "worker capture")
+        payload = load_object(capture, "worker capture")
+        if payload != expected:
+            raise _worker_capture_error("mismatched_capture", "concurrent capture publication differed")
+        source = "settled_worker_recovery"
+    terminal = {"schema_version": "juno_managed_worker_capture_terminal.v1",
+                "state": "published", "capture_sha256": sha(capture.read_bytes()),
+                "capture_source": source, "recovery_binding": binding}
+    atomic_idempotent_json(capture.with_name("capture-terminal.json"), terminal,
+                           "worker capture terminal receipt")
+    return source, payload
 
 
 def verified_artifact(mark: Any, label: str, *, limit: int = CAPTURE_LIMIT) -> tuple[Path, bytes]:
@@ -1577,9 +1737,17 @@ def run(args: argparse.Namespace) -> int:
             raise RunnerError(f"managed child exited {code}")
         if prompt.read_bytes() != prompt_data:
             raise RunnerError("prompt drifted during launch")
-        capture_source = finalize_managed_capture(
-            capture, stdout_path, metadata, binding, started_ns)
-        payload = load_object(capture, "capture")
+        subject_after = fingerprint(Path(identity.get("candidate_root") or args.agent_root).resolve())
+        if args.mode == "worker" and (not capture.is_file()
+                or capture.stat().st_mtime_ns < started_ns):
+            capture_source, payload = recover_settled_worker_capture(
+                capture, stdout_path, metadata, identity, subject_before, subject_after,
+                started_ns, exit_code=code, timed_out=timed_out, interrupted=interrupted,
+                termination_events=termination_events, process_settled=not group_active(proc.pid))
+        else:
+            capture_source = finalize_managed_capture(
+                capture, stdout_path, metadata, binding, started_ns)
+            payload = load_object(capture, "capture")
         session = payload.get("session_id"); response = payload.get("result")
         if not isinstance(session, str) or not session.strip() or not isinstance(response, str) or not response.strip():
             raise RunnerError("capture session/response is empty or malformed")
@@ -1610,7 +1778,6 @@ def run(args: argparse.Namespace) -> int:
         }
         controller_after = controller_identity(controller_root)
         verify_compatible_config(compatible_config)
-        subject_after = fingerprint(Path(identity.get("candidate_root") or args.agent_root))
         if controller_after != controller_before:
             raise RunnerError("controller mutated during managed launch")
         if args.mode == "reviewer" and subject_after != subject_before:
@@ -1642,10 +1809,18 @@ def run(args: argparse.Namespace) -> int:
                     "terminal_result": terminal_result,
                     "compatible_config_sha256": compatible_config["sha256"],
                     "capture_source": capture_source,
+                    "capture_recovery": ({"decision": "recovered",
+                        "binding": payload.get("recovery_binding"),
+                        "terminal_receipt": evidence(out / "capture-terminal.json")}
+                        if (out / "capture-terminal.json").is_file()
+                        else {"decision": "not_applicable"}),
                     "safe_next_action": "consume_receipt"}
         artifacts = {name: evidence(path) for name, path in (("prompt", prompt), ("launch", out / "launch.json"),
                     ("stdout", stdout_path), ("stderr", stderr_path), ("combined", combined_path),
                     ("capture", capture), ("response", response_path))}
+        capture_terminal = out / "capture-terminal.json"
+        if capture_terminal.is_file():
+            artifacts["capture_terminal"] = evidence(capture_terminal)
         if binding is None:
             artifacts["prompt"]["echo"] = prompt_echo
         receipt = {**terminal, "mode": args.mode, "controller_before": controller_before, "controller_after": controller_after,
@@ -1675,6 +1850,9 @@ def run(args: argparse.Namespace) -> int:
         else:
             producer_completed_at = locals().get("producer_completed_at", now())
             producer_elapsed = locals().get("producer_elapsed", round(time.monotonic() - started, 3))
+        failure = str(cleanup_error or exc)[:512]
+        reason_code = (failure.split(":", 1)[0] if failure.startswith("worker_capture_recovery_")
+                       else "managed_agent_failure")
         terminal = {"schema_version": SCHEMA, "state": "interrupted" if interrupted else "failed", "completed_at": now(),
                     "exit_code": exit_code, "timed_out": timed_out,
                     "child_pid": proc.pid if proc else None,
@@ -1688,7 +1866,7 @@ def run(args: argparse.Namespace) -> int:
                     "elapsed_seconds": round(time.monotonic() - started, 3), "semantic_outcome": "failed",
                     "compatible_config_sha256": compatible_config["sha256"],
                     "failure_type": type(cleanup_error or exc).__name__,
-                    "failure": str(cleanup_error or exc)[:512],
+                    "failure": failure, "reason_code": reason_code,
                     "safe_next_action": "inspect_terminal_and_start_fresh_output_directory"}
         atomic_json(out / "terminal.json", terminal); atomic_json(out / "receipt.json", {
             **terminal, "mode": args.mode, "identity": identity, "tool_id": args.tool_id,
