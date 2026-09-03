@@ -768,6 +768,9 @@ export class ExecutionEngine extends EventEmitter {
         JUNO_WORKSPACE_ROLE: controller.role,
         JUNO_MODEL_SHORTCUTS: JSON.stringify(modelShortcuts),
         JUNO_SELECTED_SUBAGENT: request.subagent,
+        HEADLESS_UI_TURN_COST_DISPLAY_THRESHOLD_USD:
+          process.env.HEADLESS_UI_TURN_COST_DISPLAY_THRESHOLD_USD?.trim()
+          || String(this.engineConfig.config.headlessUi?.turnCostDisplayThresholdUsd ?? 0.5),
       }),
       sessionId: request.requestId,
     });

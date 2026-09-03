@@ -209,6 +209,17 @@ const EnvironmentBindingSchema = z.object({
   authorized: z.literal(true),
 }).strict().optional();
 
+const HeadlessUiSchema = z
+  .object({
+    turnCostDisplayThresholdUsd: z
+      .number()
+      .finite()
+      .nonnegative()
+      .default(0.5)
+      .describe('Show authoritative per-turn cost above this USD threshold'),
+  })
+  .strict();
+
 const AgentProfileSchema = z
   .object({
     version: z.literal(1),
@@ -227,7 +238,7 @@ export const METADATA_CONTROLLER_CONFIG_FIELD_OWNERSHIP = {
     'defaultModels', 'workflowModels', 'mainTask', 'logLevel', 'logFile', 'verbose',
     'quiet', 'mcpTimeout', 'mcpRetries', 'mcpServerPath', 'mcpServerName',
     'hookCommandTimeout', 'onHourlyLimit', 'interactive', 'headlessMode',
-    'kanbanRegistry', 'promptMacros', 'modelShortcuts',
+    'kanbanRegistry', 'promptMacros', 'modelShortcuts', 'headlessUi',
   ],
   productOnly: ['workingDirectory', 'sessionDirectory', 'gitFlow', 'autoDependencyUpdate', 'hooks', 'skipHooks'],
   secret: ['envFilePath', 'envFileCopied'],
@@ -307,6 +318,8 @@ export const JunoTaskConfigSchema = z
       .refine((values) => new Set(values).size === values.length, 'workflow model selectors must be unique')
       .optional()
       .describe('Exact provider/model selectors approved for explicit managed workflow use'),
+
+    headlessUi: HeadlessUiSchema.default({ turnCostDisplayThresholdUsd: 0.5 }),
 
     // Project metadata
     mainTask: z.string().optional().describe('Main task objective for the project'),
@@ -462,6 +475,7 @@ export function createPersistedProjectConfigDefaults(baseDir: string): Record<st
     defaultMaxIterations: 1,
     defaultModels: { ...SUBAGENT_DEFAULT_MODELS },
     workflowModels: [],
+    headlessUi: { turnCostDisplayThresholdUsd: 0.5 },
     logLevel: 'info',
     verbose: 1,
     quiet: false,

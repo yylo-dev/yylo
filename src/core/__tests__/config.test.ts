@@ -150,6 +150,7 @@ describe('Configuration Module', () => {
         mcpRetries: 5,
         interactive: false,
         headlessMode: true,
+        headlessUi: { turnCostDisplayThresholdUsd: 0.5 },
         workingDirectory: '/test/path',
         sessionDirectory: '/test/sessions',
         envFilePath: '.env.yylo',
@@ -169,6 +170,17 @@ describe('Configuration Module', () => {
       };
 
       expect(() => validateConfig(invalidConfig)).toThrow(/defaultSubagent/);
+    });
+
+    it('validates provider-neutral headless UI settings', () => {
+      expect(validateConfig({
+        ...DEFAULT_CONFIG,
+        headlessUi: { turnCostDisplayThresholdUsd: 0.75 },
+      }).headlessUi.turnCostDisplayThresholdUsd).toBe(0.75);
+      expect(() => validateConfig({
+        ...DEFAULT_CONFIG,
+        headlessUi: { turnCostDisplayThresholdUsd: -0.01 },
+      })).toThrow(/greater than or equal to 0/);
     });
 
     it('should accept per-subagent defaultModels overrides', () => {

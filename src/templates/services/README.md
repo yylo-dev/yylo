@@ -241,7 +241,8 @@ npm install -g @mariozechner/pi-coding-agent
 - Multi-provider support (Anthropic, OpenAI, Google, Groq, xAI, etc.)
 - Model shorthand aliases (`:pi`, `:sonnet`, `:opus`, `:luna`, `:sol`, `:gpt`, `:gpt5.5`, `:mini`, `:gpt-5`, `:api-codex`, `:gemini-pro`, etc.)
 - Support for inline prompts or prompt files
-- Headless JSON mode (default) for structured automation output
+- Headless JSON mode with one line-oriented human formatter: jq-colored compact headers on TTYs, dim italic thinking, bold assistant text, cyan tool calls, and green/red tool results
+- Tool progress after 500 ms and bounded results (first 15 lines, omitted-middle count, final 2 lines); pipes keep the same layout without ANSI and `PI_PRETTY=false` preserves raw NDJSON
 - Live interactive mode via `--live` (Pi TUI + auto-exit on non-aborted `agent_end`)
 - Temporary live extension capture (`JUNO_SUBAGENT_CAPTURE_PATH`) for iteration summaries/cost
 - Verbose mode for debugging
@@ -285,6 +286,8 @@ npm install -g @mariozechner/pi-coding-agent
 - `--live`: Run Pi in interactive mode (no `--mode json`, prompt passed positionally)
 - `--no-extensions`: Disable Pi extensions (incompatible with `--live`)
 - `--verbose`: Enable verbose output
+
+Headless turn cost display is provider-neutral. Set `headlessUi.turnCostDisplayThresholdUsd` in `.juno_task/config.json` (default `0.5`), or override it with `HEADLESS_UI_TURN_COST_DISPLAY_THRESHOLD_USD`. Authoritative per-turn cost is shown only when it is strictly above the threshold; unavailable cost is omitted.
 
 #### Via yylo
 

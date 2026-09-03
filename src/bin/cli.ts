@@ -1645,6 +1645,8 @@ ${chalk.blue('Environment Variables:')}
   PI_AUTO_INSTRUCTION       Auto-instruction text
   PI_NO_SESSION             Disable sessions (true/false)
   PI_PRETTY                 Pretty-print JSON output (true/false)
+  HEADLESS_UI_TURN_COST_DISPLAY_THRESHOLD_USD
+                            Show authoritative per-turn cost above this threshold (default: 0.5)
   PI_VERBOSE                Verbose mode (true/false)
 
 ${chalk.blue('Examples:')}

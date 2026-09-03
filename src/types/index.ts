@@ -73,6 +73,10 @@ export interface JunoTaskConfig {
   defaultModels?: Partial<Record<SubagentType, string>>;
   /** Exact selectors approved for explicit yy pi use in managed workflows. */
   workflowModels?: string[];
+  /** Provider-neutral presentation settings for headless subagents. */
+  headlessUi: {
+    turnCostDisplayThresholdUsd: number;
+  };
   defaultBackend: BackendType;
 
   // Project metadata
