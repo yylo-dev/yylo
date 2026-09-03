@@ -7515,15 +7515,40 @@ class FixtureModeContractTests(unittest.TestCase):
     def test_seed_is_immutable_and_tamper_rebuilds_without_repairing_in_place(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cache = Path(temporary) / "bases"
-            first = fixture_runtime.ensure_seed(self._seed_inputs(), self._seed_builder,
+            inputs = self._seed_inputs()
+            first = fixture_runtime.ensure_seed(inputs, self._seed_builder,
                                                 cache_root=cache)
             target = first.root / "topology/runtime/task.json"
             target.chmod(0o644); target.write_text("tampered\n"); target.chmod(0o444)
-            second = fixture_runtime.ensure_seed(self._seed_inputs(), self._seed_builder,
+            second = fixture_runtime.ensure_seed(inputs, self._seed_builder,
                                                  cache_root=cache)
             self.assertFalse(second.hit)
             self.assertEqual((second.root / "topology/runtime/task.json").read_text(), "{}\n")
-            self.assertTrue(any(".corrupt-" in item.name for item in cache.iterdir()))
+            manifest_path = second.root / "yylo-fixture-base.json"
+            for field, bad_value in (("immutable", False), ("key", "0" * 64)):
+                manifest_path.chmod(0o644)
+                manifest = json.loads(manifest_path.read_text())
+                manifest[field] = bad_value
+                manifest_path.write_text(json.dumps(manifest) + "\n")
+                manifest_path.chmod(0o444)
+                second = fixture_runtime.ensure_seed(inputs, self._seed_builder,
+                                                     cache_root=cache)
+                self.assertFalse(second.hit)
+                manifest_path = second.root / "yylo-fixture-base.json"
+            manifest_path.chmod(0o644)
+            manifest = json.loads(manifest_path.read_text())
+            manifest["inputs"][fixture_runtime.BOUND_INPUTS[0]] = "wrong"
+            manifest_path.write_text(json.dumps(manifest) + "\n")
+            manifest_path.chmod(0o444)
+            second = fixture_runtime.ensure_seed(inputs, self._seed_builder,
+                                                 cache_root=cache)
+            self.assertFalse(second.hit)
+            quarantined = [item for item in cache.iterdir() if ".corrupt-" in item.name]
+            self.assertGreaterEqual(len(quarantined), 4)
+            second.root.rename(cache / f"{second.key}.corrupt-manual")
+            self.assertIsNone(fixture_runtime.find_seed(
+                {fixture_runtime.BOUND_INPUTS[0]: inputs[fixture_runtime.BOUND_INPUTS[0]]},
+                cache_root=cache))
 
     def test_disposable_instances_cannot_observe_each_other(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

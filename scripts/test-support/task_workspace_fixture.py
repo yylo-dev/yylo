@@ -187,6 +187,24 @@ def default_root() -> Path:
     return Path(os.environ.get(ROOT_ENV, Path(tempfile.gettempdir()).resolve() / "yylo-fixture-bases"))
 
 
+def _verified_manifest(candidate: Path, *, expected_inputs: Optional[Mapping[str, str]] = None) -> dict:
+    if candidate.is_symlink() or not candidate.is_dir():
+        raise RuntimeError("identity")
+    value = json.loads((candidate / "yylo-fixture-base.json").read_text())
+    inputs = value.get("inputs")
+    if (value.get("schema_version") != SCHEMA or value.get("contract") != CONTRACT
+            or value.get("immutable") is not True or not isinstance(inputs, dict)):
+        raise RuntimeError("identity")
+    key = seed_key(inputs)
+    if value.get("key") != key or candidate.name != key:
+        raise RuntimeError("identity")
+    if expected_inputs is not None and inputs != dict(expected_inputs):
+        raise RuntimeError("identity")
+    if value.get("content_sha256") != manifest_digest(candidate / "topology"):
+        raise RuntimeError("corrupt")
+    return value
+
+
 def ensure_seed(inputs: Mapping[str, str], builder: Callable[[Path], None], *, cache_root: Optional[Path] = None) -> Seed:
     key = seed_key(inputs)
     bases = (cache_root or default_root()).resolve()
@@ -194,11 +212,7 @@ def ensure_seed(inputs: Mapping[str, str], builder: Callable[[Path], None], *, c
     target = bases / key
 
     def verify() -> None:
-        value = json.loads((target / "yylo-fixture-base.json").read_text())
-        if value.get("schema_version") != SCHEMA or value.get("contract") != CONTRACT or value.get("key") != key:
-            raise RuntimeError("identity")
-        if value.get("content_sha256") != manifest_digest(target / "topology"):
-            raise RuntimeError("corrupt")
+        _verified_manifest(target, expected_inputs=inputs)
 
     try:
         verify(); return Seed(target, key, True)
@@ -249,15 +263,12 @@ def find_seed(bound_inputs: Mapping[str, str], *, cache_root: Optional[Path] = N
     if not bases.is_dir(): return None
     for candidate in sorted(bases.iterdir(), key=lambda path: path.name, reverse=True):
         try:
-            value = json.loads((candidate / "yylo-fixture-base.json").read_text())
-            inputs = value.get("inputs")
-            if (value.get("schema_version") != SCHEMA or value.get("contract") != CONTRACT
-                    or not isinstance(inputs, dict)
-                    or any(inputs.get(name) != expected for name, expected in bound_inputs.items())
-                    or value.get("content_sha256") != manifest_digest(candidate / "topology")):
+            value = _verified_manifest(candidate)
+            if any(value["inputs"].get(name) != expected
+                   for name, expected in bound_inputs.items()):
                 continue
             return Seed(candidate, str(value["key"]), True)
-        except (OSError, ValueError, TypeError, KeyError):
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
             continue
     return None
 
