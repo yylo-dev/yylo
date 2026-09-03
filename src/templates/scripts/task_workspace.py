@@ -347,10 +347,7 @@ def load_package_bound_test_fixture(test_file: str, fixture_name: str) -> Any:
                 raise TaskWorkspaceError(
                     f"package-bound test fixture unavailable: {fixture_name}; run `yy scripts update --force` "
                     "from the controller's bound yylo installation, then retry")
-            package_fixture = (package_root / "scripts/test-support" / fixture_name
-                               if fixture_name == "task_workspace_fixture.py"
-                               else package_root / "dist/templates/scripts/tests" / fixture_name)
-            return load(package_fixture)
+            return load(package_root / "dist/templates/scripts/tests" / fixture_name)
 
     # Development execution is the only fallback. Its identity is an actual
     # Git worktree plus exact tracked yylo paths, never a guessed sibling.
@@ -358,9 +355,7 @@ def load_package_bound_test_fixture(test_file: str, fixture_name: str) -> Any:
                      test_path.parent, check=False)
     if discovered.returncode == 0:
         source_root = Path(discovered.stdout.strip()).resolve()
-        canonical = (source_root / "juno-code/scripts/test-support" / fixture_name
-                     if fixture_name == "task_workspace_fixture.py"
-                     else source_root / "juno-code/src/templates/scripts/tests" / fixture_name)
+        canonical = source_root / "juno-code/src/templates/scripts/tests" / fixture_name
         allowed_tests = {
             source_root / ".juno_task/scripts/tests" / test_path.name,
             source_root / "juno-code/src/templates/scripts/tests" / test_path.name}
@@ -1175,10 +1170,7 @@ def run_validation(row: dict[str, Any], cwd: Path, *,
                 timed_out = True
                 try: os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError: pass
-            # Keep timeout enforcement comfortably inside the public bound;
-            # a 50ms selector quantum made the one-second contract flaky on a
-            # loaded host even though the process group was killed correctly.
-            for key, _ in selector.select(0.01):
+            for key, _ in selector.select(0.05 if not timed_out else 0.01):
                 stream = key.fileobj
                 data = os.read(stream.fileno(), 65536)
                 if not data:
@@ -1190,7 +1182,7 @@ def run_validation(row: dict[str, Any], cwd: Path, *,
                     except OSError as exc:
                         log_write_error = str(exc)
                         try: os.killpg(process.pid, signal.SIGKILL)
-                        except (ProcessLookupError, PermissionError): pass
+                        except ProcessLookupError: pass
                 sys.stderr.write(data.decode("utf-8", errors="replace")); sys.stderr.flush()
     except KeyboardInterrupt:
         interrupted = True

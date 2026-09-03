@@ -43,12 +43,12 @@ describe('Bolt task workspace managed runtime', () => {
         'integration-workspace', 'script-installer', 'root-scripts-telemetry',
       ]);
       const [pure, adapter, integration, installer, telemetry] = policy.focused_validation;
-      expect(adapter?.resource).toBeUndefined();
-      expect(installer?.resource).toMatchObject({
+      expect(adapter?.resource).toEqual(installer?.resource);
+      expect(adapter?.resource).toMatchObject({
         id: 'yylo-real-git-managed-install',
         lock_path: '/tmp/yylo-focused-real-git-managed-install.lock',
       });
-      expect(installer!.resource!.wait_timeout_seconds).toBe(1200);
+      expect(adapter!.resource!.wait_timeout_seconds).toBe(1200);
       expect(pure?.resource).toBeUndefined();
       expect(integration?.resource).toBeUndefined();
       expect(telemetry?.resource).toBeUndefined();
@@ -234,10 +234,6 @@ describe('Bolt task workspace managed runtime', () => {
         destination: '.juno_task/scripts/controller_checkpoint.py',
       },
       {
-        source: 'scripts/controller_resolver.py',
-        destination: '.juno_task/scripts/controller_resolver.py',
-      },
-      {
         source: 'scripts/juno-toolchain-policy.sh',
         destination: '.juno_task/scripts/juno-toolchain-policy.sh',
       },
@@ -288,21 +284,12 @@ describe('Bolt task workspace managed runtime', () => {
     expect(testSource).toContain('test_sparse_metadata_controller_runtime_bootstrap');
     expect(testSource).toContain('test_orphan_metadata_only_controller_runtime_bootstrap_without_sparse_checkout');
     expect(testSource).toContain('test_runtime_bootstrap_refuses_product_bearing_metadata_controller');
-    const runner = resolve(repository, 'juno-code/scripts/test-task-workspace.mjs');
-    const receipt = resolve(repository, 'juno-code/test-results/task-workspace/vitest-complete.json');
-    execFileSync(process.execPath, [runner, '--mode', 'complete', '--shards', '8',
-      '--timeout-ms', '180000', '--receipt', receipt], {
-      cwd: resolve(repository, 'juno-code'),
+    execFileSync('python3', [tests], {
+      cwd: repository,
       env: { ...process.env, PYTHONPYCACHEPREFIX: '/tmp/juno-task-workspace-test-pycache' },
       stdio: 'pipe',
-      timeout: 210_000,
     });
-    const profile = JSON.parse(readFileSync(receipt, 'utf8')) as {
-      eligible: boolean; inventory: string[]; selected: string[];
-    };
-    expect(profile.eligible).toBe(true);
-    expect(profile.selected).toEqual(profile.inventory.slice().sort());
-  }, 220_000);
+  }, 120_000);
 
   it('runs the pure task-workspace decision tables inside the Wave 3 budget', () => {
     const decisionsTests = resolve(
