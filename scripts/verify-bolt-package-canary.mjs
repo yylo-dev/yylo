@@ -107,6 +107,17 @@ try {
       { JUNO_TASK_ROOT: installed });
   }
 
+  const profilerReceipt = path.join(temporary, 'task-workspace-profile.json');
+  run(process.execPath, [
+    path.join(installed, 'scripts/test-task-workspace.mjs'),
+    '--mode', 'seeded',
+    '--test-id', 'SemVerValidationTests.test_rejects_malformed_versions',
+    '--receipt', profilerReceipt,
+  ], installed);
+  const profiler = JSON.parse(readFileSync(profilerReceipt, 'utf8'));
+  assert.equal(profiler.eligible, true, 'packed task-workspace profiler must be eligible');
+  assert.equal(profiler.counts.selected, 1, 'packed task-workspace profiler selected count');
+
   const dependencies = path.resolve('node_modules');
   assert.ok(existsSync(dependencies), 'build dependencies are required for the packed CLI canary');
   await symlink(dependencies, path.join(installed, 'node_modules'));
@@ -137,6 +148,7 @@ try {
       expected_refusals: 7,
       metadata_prepare_verify_cutover_rollback: true,
       retired_entrypoints_refused: 2,
+      packed_task_workspace_profiler: true,
     },
     orchestration: {
       model_calls: 0,

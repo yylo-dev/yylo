@@ -112,6 +112,8 @@ export default defineConfig({
 
     // Performance
     pool: 'threads',
+    // Real-Git/process tests share OS-level state and must not overlap files.
+    fileParallelism: false,
     poolMatchGlobs: MANAGED_INSTALL_POOL_MATCH_GLOBS,
     poolOptions: {
       threads: {

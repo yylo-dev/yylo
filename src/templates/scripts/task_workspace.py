@@ -305,6 +305,25 @@ def load_package_bound_test_fixture(test_file: str, fixture_name: str) -> Any:
         spec.loader.exec_module(module)
         return module
 
+    # A packed release may run the supported profiler directly, without an
+    # installed controller. Bind that case to the package containing this
+    # exact dist test module; never search neighboring directories.
+    packaged_root = test_path.parents[4] if len(test_path.parents) > 4 else None
+    packaged_test_root = (packaged_root / "dist/templates/scripts/tests"
+                          if packaged_root is not None else None)
+    if packaged_test_root is not None and test_path.parent == packaged_test_root:
+        try:
+            packaged = json.loads((packaged_root / "package.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            packaged = None
+        if (not isinstance(packaged, dict) or packaged.get("name") != "@yylo/cli"
+                or not is_valid_semver(packaged.get("version"))):
+            raise TaskWorkspaceError("package-bound test fixture has invalid package identity")
+        package_fixture = (packaged_root / "scripts/test-support" / fixture_name
+                           if fixture_name == "task_workspace_fixture.py"
+                           else packaged_test_root / fixture_name)
+        return load(package_fixture)
+
     # Installed execution has exactly one authority: the controller's bound,
     # hash-identified package. Never inspect an adjacent tests directory.
     explicit = os.environ.get("JUNO_TASK_ROOT", "").strip()
@@ -347,7 +366,10 @@ def load_package_bound_test_fixture(test_file: str, fixture_name: str) -> Any:
                 raise TaskWorkspaceError(
                     f"package-bound test fixture unavailable: {fixture_name}; run `yy scripts update --force` "
                     "from the controller's bound yylo installation, then retry")
-            return load(package_root / "dist/templates/scripts/tests" / fixture_name)
+            package_fixture = (package_root / "scripts/test-support" / fixture_name
+                               if fixture_name == "task_workspace_fixture.py"
+                               else package_root / "dist/templates/scripts/tests" / fixture_name)
+            return load(package_fixture)
 
     # Development execution is the only fallback. Its identity is an actual
     # Git worktree plus exact tracked yylo paths, never a guessed sibling.
@@ -355,7 +377,9 @@ def load_package_bound_test_fixture(test_file: str, fixture_name: str) -> Any:
                      test_path.parent, check=False)
     if discovered.returncode == 0:
         source_root = Path(discovered.stdout.strip()).resolve()
-        canonical = source_root / "juno-code/src/templates/scripts/tests" / fixture_name
+        canonical = (source_root / "juno-code/scripts/test-support" / fixture_name
+                     if fixture_name == "task_workspace_fixture.py"
+                     else source_root / "juno-code/src/templates/scripts/tests" / fixture_name)
         allowed_tests = {
             source_root / ".juno_task/scripts/tests" / test_path.name,
             source_root / "juno-code/src/templates/scripts/tests" / test_path.name}
@@ -1170,7 +1194,10 @@ def run_validation(row: dict[str, Any], cwd: Path, *,
                 timed_out = True
                 try: os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError: pass
-            for key, _ in selector.select(0.05 if not timed_out else 0.01):
+            # Keep timeout enforcement comfortably inside the public bound;
+            # a 50ms selector quantum made the one-second contract flaky on a
+            # loaded host even though the process group was killed correctly.
+            for key, _ in selector.select(0.01):
                 stream = key.fileobj
                 data = os.read(stream.fileno(), 65536)
                 if not data:
@@ -1182,7 +1209,7 @@ def run_validation(row: dict[str, Any], cwd: Path, *,
                     except OSError as exc:
                         log_write_error = str(exc)
                         try: os.killpg(process.pid, signal.SIGKILL)
-                        except ProcessLookupError: pass
+                        except (ProcessLookupError, PermissionError): pass
                 sys.stderr.write(data.decode("utf-8", errors="replace")); sys.stderr.flush()
     except KeyboardInterrupt:
         interrupted = True

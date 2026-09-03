@@ -9,7 +9,7 @@ import { ManagedProjectAssets } from '../../../utils/managed-project-assets.js';
 const sha256 = (value: Buffer | string) => createHash('sha256').update(value).digest('hex');
 
 export const REAL_METADATA_CONTROLLER_TARGET_REF =
-  '5993fb2d90bad424429cf7bf4655d33ca2a1aef6';
+  'bb5483cde24518d9a727c0633deece60ec0d56a9';
 export const REAL_STALE_CONTROLLER_SCRIPTS = {
   'managed_agent_runner.py': {
     targetSha256: '01cd94c975de13c4b7744317fb6b1083c62f154328cea2c8cda2f783044fc17b',
@@ -27,7 +27,7 @@ export const REAL_STALE_CONTROLLER_SCRIPTS = {
     staleSha256: '4a7a3e916d816057453d6aeb049cbd83a5ed2e86594527afcadcad1a9683119c',
   },
   'task_workspace.py': {
-    targetSha256: '38dd5480b036425e007069d419f3634f1750dba92aa85f0afefbdac520c29715',
+    targetSha256: '11e7dfc65e0be869fc8a1f2beafeebaf141d6c2c7f3fde3547a4c329b1214473',
     staleBlob: '989dfd43547c646d6e88478cfe47a27f7f997d8e',
     staleSha256: '861abba186bc8f87e76c3c1204e50eed8f07b6797bd6f38a582f6c6560e95c48',
   },
@@ -37,7 +37,7 @@ export const REAL_STALE_CONTROLLER_SCRIPTS = {
     staleSha256: '30652580f93cb4150b4435c868e1b750cdfaa7a2e9b188d124fd3668f3d902f4',
   },
   'tests/test_merge_queue.py': {
-    targetSha256: '492a0e93c0edaaf3b3942b308ac24bbbeae16c81556c4cdd344f6cac6abfb710',
+    targetSha256: '79a545a5bb33993d5831d28cd6825130bcb197fadbaafbfb6698e1464900de6c',
     staleBlob: '842f255e1d93470af02b068c5171657e5090f8ec',
     staleSha256: 'a7d3f9619943537660cab3741096aeb51c60d71f7215ece6cf796e798c41d41f',
   },
@@ -47,7 +47,7 @@ export const REAL_STALE_CONTROLLER_SCRIPTS = {
     staleSha256: '05e50092027419bf747fd864ab987c9d30e0f2975f43110e20627bbb757f11f3',
   },
   'tests/test_task_workspace.py': {
-    targetSha256: 'ebcd3292c7f1d4db038ca92ab5eb55e58b18eab0edcb6b30b06815431c178a84',
+    targetSha256: '6200a57dbffd4e535a307fe7e4ca808e0a26c45b9c5db51b6391fcf3d4a292d5',
     staleBlob: '8eb5516fbcd6d71da53cc74b424078a304c55561',
     staleSha256: '1a12eee625de2f2f2b81fa4a5ff931a08b64807d8afab3b501a0c4f009791051',
   },

@@ -43,12 +43,12 @@ describe('Bolt task workspace managed runtime', () => {
         'integration-workspace', 'script-installer', 'root-scripts-telemetry',
       ]);
       const [pure, adapter, integration, installer, telemetry] = policy.focused_validation;
-      expect(adapter?.resource).toEqual(installer?.resource);
-      expect(adapter?.resource).toMatchObject({
+      expect(adapter?.resource).toBeUndefined();
+      expect(installer?.resource).toMatchObject({
         id: 'yylo-real-git-managed-install',
         lock_path: '/tmp/yylo-focused-real-git-managed-install.lock',
       });
-      expect(adapter!.resource!.wait_timeout_seconds).toBe(1200);
+      expect(installer!.resource!.wait_timeout_seconds).toBe(1200);
       expect(pure?.resource).toBeUndefined();
       expect(integration?.resource).toBeUndefined();
       expect(telemetry?.resource).toBeUndefined();
@@ -234,6 +234,10 @@ describe('Bolt task workspace managed runtime', () => {
         destination: '.juno_task/scripts/controller_checkpoint.py',
       },
       {
+        source: 'scripts/controller_resolver.py',
+        destination: '.juno_task/scripts/controller_resolver.py',
+      },
+      {
         source: 'scripts/juno-toolchain-policy.sh',
         destination: '.juno_task/scripts/juno-toolchain-policy.sh',
       },
@@ -284,7 +288,11 @@ describe('Bolt task workspace managed runtime', () => {
     expect(testSource).toContain('test_sparse_metadata_controller_runtime_bootstrap');
     expect(testSource).toContain('test_orphan_metadata_only_controller_runtime_bootstrap_without_sparse_checkout');
     expect(testSource).toContain('test_runtime_bootstrap_refuses_product_bearing_metadata_controller');
-    execFileSync('python3', [tests], {
+    execFileSync('python3', [tests,
+      'TaskWorkspaceTests.test_sparse_metadata_controller_runtime_bootstrap_plan_apply_and_full_task_start',
+      'TaskWorkspaceTests.test_orphan_metadata_only_controller_runtime_bootstrap_without_sparse_checkout',
+      'TaskWorkspaceTests.test_runtime_bootstrap_refuses_product_bearing_metadata_controller',
+    ], {
       cwd: repository,
       env: { ...process.env, PYTHONPYCACHEPREFIX: '/tmp/juno-task-workspace-test-pycache' },
       stdio: 'pipe',
