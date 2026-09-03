@@ -88,17 +88,17 @@ function captureBounded(command, args, timeoutMs = 1_000, outputLimit = 16 * 102
 
 function parsePosixProcessInventory(output) {
   return output.split('\n').flatMap((line) => {
-    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.{24})\s+(.*)$/);
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.{24})\s+(.*)$/);
     return match ? [{
-      pid: Number(match[1]), parent_pid: Number(match[2]),
-      creation_id: match[3].trim(), command: match[4],
+      pid: Number(match[1]), parent_pid: Number(match[2]), pgid: Number(match[3]),
+      creation_id: match[4].trim(), command: match[5],
     }] : [];
   });
 }
 
 async function processInventory() {
   if (process.platform !== 'win32') {
-    const inventory = await captureBounded('ps', ['eww', '-axo', 'pid=,ppid=,lstart=,command=']);
+    const inventory = await captureBounded('ps', ['eww', '-axo', 'pid=,ppid=,pgid=,lstart=,command=']);
     return inventory.ok
       ? { rows: parsePosixProcessInventory(inventory.output), error: null }
       : { rows: [], error: inventory.error };
@@ -110,7 +110,7 @@ async function processInventory() {
     const decoded = JSON.parse(inventory.output || '[]');
     return {
       rows: (Array.isArray(decoded) ? decoded : [decoded]).map((row) => ({
-        pid: Number(row.ProcessId), parent_pid: Number(row.ParentProcessId),
+        pid: Number(row.ProcessId), parent_pid: Number(row.ParentProcessId), pgid: null,
         creation_id: String(row.CreationDate ?? ''), command: String(row.CommandLine ?? ''),
       })).filter((row) => Number.isInteger(row.pid) && row.pid > 0 && row.creation_id),
       error: null,
@@ -247,7 +247,8 @@ async function reconcileOwnedProcesses(child, ownerToken, known, pipeTokens = []
   await rememberInheritedPipeHolders(known, pipeTokens);
   const verify = async () => {
     const discovered = await discoverOwnedProcesses(ownerToken, known);
-    return { ...discovered, group: processGroupAlive(child.pid) };
+    const groupIdentityVerified = discovered.rows.some((row) => row.pgid === child.pid);
+    return { ...discovered, group: groupIdentityVerified && processGroupAlive(child.pid) };
   };
   let state = await verify();
   if (state.error) {
