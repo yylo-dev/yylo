@@ -67,6 +67,7 @@ describe('cross-language heavy test resource lock', () => {
     }).sort();
     const indirectLockSharers = [
       'src/cli/__tests__/benchmark-command.test.ts',
+      'src/utils/__tests__/task-workspace-fixture-modes.test.ts',
       'src/utils/__tests__/task-workspace.test.ts',
     ];
 

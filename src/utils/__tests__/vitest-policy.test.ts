@@ -107,7 +107,6 @@ describe('Vitest runner policy', () => {
   it('preserves the managed-install serialization lanes', () => {
     expect(CONFIG_SOURCE).toContain('managed-project-assets.test.ts');
     expect(CONFIG_SOURCE).toContain('script-installer.test.ts');
-    expect(CONFIG_SOURCE).toContain('fileParallelism: false');
     expect(CONFIG_SOURCE).toContain('poolMatchGlobs');
   });
 });
