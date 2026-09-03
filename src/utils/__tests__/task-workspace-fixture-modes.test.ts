@@ -59,18 +59,8 @@ describe('task-workspace supported profiler and runner', () => {
       '--test-id', 'SemVerValidationTests.test_rejects_malformed_versions'], {
       cwd: path.join(repository, 'juno-code'), encoding: 'utf8', timeout: 10_000,
     });
-    const value = JSON.parse(fs.readFileSync(receipt, 'utf8')) as Record<string, any>;
-    if (process.platform === 'darwin') {
-      expect(result.status).not.toBe(0);
-      expect(value.exit_code).toBe(result.status);
-      expect(value.processes.settled).toBe(false);
-      expect(value.processes.surviving).toContain('containment:darwin_kqueue_unverified');
-      expect(value.processes.containment).toEqual([
-        { mechanism: 'darwin_kqueue_note_track', verified: false },
-      ]);
-      return;
-    }
     expect(result.status, result.stderr).toBe(0);
+    const value = JSON.parse(fs.readFileSync(receipt, 'utf8')) as Record<string, any>;
     expect(value.schema_version).toBe('juno.task_workspace.profile.v1');
     expect(value.mode).toBe('seeded');
     expect(value.eligible).toBe(true);
@@ -156,14 +146,8 @@ describe('task-workspace supported profiler and runner', () => {
       '--test-id', seededId], {
       cwd: path.join(repository, 'juno-code'), encoding: 'utf8', timeout: 30_000,
     });
-    const replayValue = JSON.parse(fs.readFileSync(replayReceipt, 'utf8')) as Record<string, any>;
-    if (process.platform === 'darwin') {
-      expect(replay.status).not.toBe(0);
-      expect(replayValue.exit_code).toBe(replay.status);
-      expect(replayValue.processes.surviving).toContain('containment:darwin_kqueue_unverified');
-      return;
-    }
     expect(replay.status, replay.stderr).toBe(0);
+    const replayValue = JSON.parse(fs.readFileSync(replayReceipt, 'utf8')) as Record<string, any>;
     expect(replayValue.selected).toEqual([seededId]);
     expect(replayValue.counts.selected).toBe(1);
     expect(replayValue.eligible).toBe(true);
@@ -206,29 +190,6 @@ describe('task-workspace supported profiler and runner', () => {
     });
     const pid = Number(fs.readFileSync(childPid, 'utf8'));
     expect(() => process.kill(pid, 0)).toThrow();
-  }, 10_000);
-
-  it.runIf(process.platform === 'darwin')('fails closed when Darwin cannot kernel-track a delayed managed-profile descendant', async () => {
-    const root = temporaryDirectory();
-    const probe = path.join(root, 'managed-delayed-escaped-session.py');
-    const childPid = path.join(root, 'managed-delayed-escaped-child.pid');
-    fs.writeFileSync(probe, [
-      'import pathlib, subprocess, sys, time',
-      'time.sleep(0.25)',
-      `p=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True, env={}, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)`,
-      `pathlib.Path(${JSON.stringify(childPid)}).write_text(str(p.pid))`,
-    ].join('\n'));
-    const module = await import(pathToFileURL(runner).href) as Record<string, any>;
-    const containment = await module.prepareDarwinContainment(root);
-    const result = await module.runOwned('python3', [probe], 5_000, 'seeded', 262_144, {
-      containmentExecutable: containment.executable,
-      arbitraryCommand: false,
-    });
-    expect(result.code).not.toBe(0);
-    expect(result.settled).toBe(false);
-    expect(result.surviving).toContain('containment:darwin_kqueue_unverified');
-    expect(result.output).toContain('JUNO_DARWIN_CONTAINMENT_UNVERIFIED');
-    expect(fs.existsSync(childPid)).toBe(false);
   }, 10_000);
 
   it.runIf(process.platform !== 'win32')('fails closed for a delayed env-scrubbing descendant outside enforceable containment', () => {

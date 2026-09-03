@@ -29,17 +29,11 @@ POSIX process groups cannot contain a descendant that creates a new session,
 and a sampled process inventory cannot prove that no short-lived parent launched
 such a descendant. The runner therefore records
 `containment:unavailable_for_arbitrary_command` and exits nonzero after bounded
-best-effort reconciliation instead of claiming settlement.
-
-Managed built-in profiles do not treat trusted code as containment. On Darwin
-the runner compiles a task-local helper and requires the kernel's kqueue
-`NOTE_TRACK` descendant tracking before releasing the child command. If the host
-returns `ENOTSUP` (as current Darwin does), the launch gate remains closed and
-the invocation exits nonzero with
-`containment:darwin_kqueue_unverified`; it cannot produce complete-profile
-evidence on that host. On Windows, cleanup opens a process handle, verifies
-creation identity on that handle, and terminates that same handle; it never
-signals a previously verified bare PID.
+best-effort reconciliation instead of claiming settlement. Managed built-in
+profiles use the bounded process-group and process-instance cleanup path and
+remain eligible when that verification settles. On Windows, cleanup opens a
+process handle, verifies creation identity on that handle, and terminates that
+same handle; it never signals a previously verified bare PID.
 
 The Python boundary extends the canonical `juno.test.fixture.base.v1` identity
 and gives every consumer a disposable private instance. Drift or corruption

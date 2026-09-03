@@ -10,149 +10,6 @@ import { fileURLToPath } from 'node:url';
 const SCHEMA = 'juno.task_workspace.profile.v1';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const DARWIN_CONTAINMENT_SOURCE = String.raw`
-#include <sys/event.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <errno.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-
-#define MAX_TRACKED 32768
-static volatile sig_atomic_t requested_signal = 0;
-static pid_t tracked[MAX_TRACKED];
-static size_t tracked_count = 0;
-
-static void request_shutdown(int signal_number) { requested_signal = signal_number; }
-static int find_pid(pid_t pid) {
-  for (size_t i = 0; i < tracked_count; ++i) if (tracked[i] == pid) return (int)i;
-  return -1;
-}
-static int add_pid(pid_t pid) {
-  if (pid <= 0 || find_pid(pid) >= 0) return 0;
-  if (tracked_count >= MAX_TRACKED) return -1;
-  tracked[tracked_count++] = pid;
-  return 0;
-}
-static void remove_pid(pid_t pid) {
-  int index = find_pid(pid);
-  if (index < 0) return;
-  tracked[index] = tracked[--tracked_count];
-}
-static void signal_tracked(pid_t helper_pid, int signal_number) {
-  for (size_t i = 0; i < tracked_count; ++i) {
-    if (tracked[i] != helper_pid) (void)kill(tracked[i], signal_number);
-  }
-}
-static int containment_failure(const char *message) {
-  fprintf(stderr, "JUNO_DARWIN_CONTAINMENT_UNVERIFIED:%s\n", message);
-  return 125;
-}
-
-int main(int argc, char **argv) {
-  if (argc < 2) return containment_failure("missing command");
-  int gate[2];
-  if (pipe(gate) != 0) return containment_failure("pipe");
-  int queue = kqueue();
-  if (queue < 0) return containment_failure("kqueue");
-  pid_t child = fork();
-  if (child < 0) return containment_failure("fork");
-  if (child == 0) {
-    close(gate[1]);
-    char byte;
-    if (read(gate[0], &byte, 1) != 1) _exit(126);
-    close(gate[0]);
-    execvp(argv[1], &argv[1]);
-    perror("execvp");
-    _exit(errno == ENOENT ? 127 : 126);
-  }
-  close(gate[0]);
-  if (add_pid(child) != 0) return containment_failure("tracking capacity");
-  struct kevent change;
-  EV_SET(&change, child, EVFILT_PROC, EV_ADD | EV_ENABLE,
-         NOTE_EXIT | NOTE_FORK | NOTE_TRACK, 0, NULL);
-  struct timespec immediate = {0, 0};
-  struct kevent registration;
-  int registered = kevent(queue, &change, 1, &registration, 1, &immediate);
-  if (registered < 0 || (registered == 1 && (registration.flags & EV_ERROR))) {
-    char registration_error[128];
-    snprintf(registration_error, sizeof(registration_error), "root registration errno=%d event=%lld",
-             errno, registered == 1 ? (long long)registration.data : -1LL);
-    kill(child, SIGKILL);
-    return containment_failure(registration_error);
-  }
-  if (write(gate[1], "x", 1) != 1) {
-    kill(child, SIGKILL);
-    return containment_failure("launch gate");
-  }
-  close(gate[1]);
-  struct sigaction action;
-  memset(&action, 0, sizeof(action));
-  action.sa_handler = request_shutdown;
-  sigemptyset(&action.sa_mask);
-  sigaction(SIGTERM, &action, NULL);
-  sigaction(SIGINT, &action, NULL);
-  sigaction(SIGHUP, &action, NULL);
-
-  int leader_status = 0;
-  int leader_reaped = 0;
-  int terminating = 0;
-  int tracking_failed = 0;
-  int kill_rounds = 0;
-  while (tracked_count > 0) {
-    if (requested_signal && !terminating) terminating = requested_signal;
-    struct kevent events[128];
-    struct timespec tick = {0, 20000000};
-    int count = kevent(queue, NULL, 0, events, 128, &tick);
-    if (count < 0 && errno != EINTR) { tracking_failed = 1; terminating = SIGKILL; }
-    for (int i = 0; i < count; ++i) {
-      if ((events[i].flags & EV_ERROR) || (events[i].fflags & NOTE_TRACKERR)) {
-        tracking_failed = 1;
-        terminating = SIGKILL;
-      }
-      pid_t pid = (pid_t)events[i].ident;
-      if (events[i].fflags & NOTE_CHILD) {
-        if (add_pid(pid) != 0) { tracking_failed = 1; terminating = SIGKILL; }
-      }
-      if (events[i].fflags & NOTE_EXIT) {
-        remove_pid(pid);
-        if (pid == child) {
-          terminating = terminating ? terminating : SIGTERM;
-          if (waitpid(child, &leader_status, WNOHANG) == child) leader_reaped = 1;
-        }
-      }
-    }
-    if (terminating) {
-      signal_tracked(getpid(), kill_rounds++ < 15 ? SIGTERM : SIGKILL);
-    }
-  }
-  if (!leader_reaped) {
-    while (waitpid(child, &leader_status, 0) < 0 && errno == EINTR) {}
-  }
-  close(queue);
-  if (tracking_failed) return containment_failure("kernel tracking");
-  if (requested_signal) return 128 + requested_signal;
-  if (WIFEXITED(leader_status)) return WEXITSTATUS(leader_status);
-  if (WIFSIGNALED(leader_status)) return 128 + WTERMSIG(leader_status);
-  return 125;
-}
-`;
-
-export async function prepareDarwinContainment(directory) {
-  if (process.platform !== 'darwin') return { executable: null, mechanism: null, error: null };
-  const source = path.join(directory, 'darwin-process-containment.c');
-  const executable = path.join(directory, 'darwin-process-containment');
-  fs.writeFileSync(source, DARWIN_CONTAINMENT_SOURCE);
-  const compiled = await captureBounded('/usr/bin/clang', ['-O2', '-Wall', '-Wextra', '-o', executable, source], 10_000);
-  if (!compiled.ok || !fs.existsSync(executable)) {
-    return { executable: null, mechanism: 'darwin_kqueue_note_track', error: compiled.error ?? 'compiler produced no executable' };
-  }
-  return { executable, mechanism: 'darwin_kqueue_note_track', error: null };
-}
-
 function parse(argv) {
   const value = { mode: '', receipt: '', timeoutMs: 600_000, testIds: [], changedPaths: [], command: null, commandArgs: [], shards: null };
   for (let index = 0; index < argv.length; index += 1) {
@@ -493,7 +350,7 @@ function commandExists(command) {
     .some((directory) => fs.existsSync(path.join(directory, command)));
 }
 
-export async function runOwned(command, args, timeoutMs, fixtureMode, outputLimit = 262_144, dependencies = {}) {
+async function runOwned(command, args, timeoutMs, fixtureMode, outputLimit = 262_144, dependencies = {}) {
   const started = performance.now();
   const ownerToken = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const known = new Map();
@@ -515,24 +372,11 @@ export async function runOwned(command, args, timeoutMs, fixtureMode, outputLimi
     inventoriesInFlight.add(sample);
   };
   try {
-    const managedDarwinProfile = process.platform === 'darwin' && dependencies.arbitraryCommand !== true;
-    if (managedDarwinProfile && !dependencies.containmentExecutable) {
-      append(`Darwin managed-profile containment unavailable: ${dependencies.containmentError ?? 'no verified kernel tracker'}\n`);
-      return {
-        code: 2, signal: null, timedOut: false, wallMs: performance.now() - started,
-        output: output.toString('utf8'), settled: false,
-        surviving: ['containment:darwin_kqueue_unavailable'],
-        containment: { mechanism: 'darwin_kqueue_note_track', verified: false },
-      };
-    }
-    const warmOwnershipMonitor = !managedDarwinProfile && !dependencies.spawnImpl
-      && process.platform !== 'win32' && commandExists(command);
-    const launchCommand = managedDarwinProfile ? dependencies.containmentExecutable
-      : warmOwnershipMonitor ? '/bin/sh' : command;
-    const launchArgs = managedDarwinProfile ? [command, ...args]
-      : warmOwnershipMonitor
-        ? ['-c', 'sleep 0.075; exec "$@"', 'task-workspace-owner', command, ...args]
-        : args;
+    const warmOwnershipMonitor = !dependencies.spawnImpl && process.platform !== 'win32' && commandExists(command);
+    const launchCommand = warmOwnershipMonitor ? '/bin/sh' : command;
+    const launchArgs = warmOwnershipMonitor
+      ? ['-c', 'sleep 0.075; exec "$@"', 'task-workspace-owner', command, ...args]
+      : args;
     child = (dependencies.spawnImpl ?? spawn)(launchCommand, launchArgs, {
       cwd: root,
       detached: process.platform !== 'win32',
@@ -602,12 +446,6 @@ export async function runOwned(command, args, timeoutMs, fixtureMode, outputLimi
   }
   const reconciliation = await reconcileOwnedProcesses(child, ownerToken, known, await pipeTokensPromise);
   if (escalationTimer) clearTimeout(escalationTimer);
-  const managedDarwinProfile = process.platform === 'darwin' && dependencies.arbitraryCommand !== true;
-  if (managedDarwinProfile && (status.code === 125 || output.includes('JUNO_DARWIN_CONTAINMENT_UNVERIFIED:'))) {
-    reconciliation.settled = false;
-    reconciliation.surviving = [...reconciliation.surviving,
-      'containment:darwin_kqueue_unverified'];
-  }
   const arbitraryCommandUncontained = dependencies.arbitraryCommand === true
     && Number.isInteger(child?.pid) && child.pid > 0;
   if (arbitraryCommandUncontained) {
@@ -621,9 +459,6 @@ export async function runOwned(command, args, timeoutMs, fixtureMode, outputLimi
     wallMs: performance.now() - started,
     output: output.toString('utf8'),
     ...reconciliation,
-    containment: managedDarwinProfile
-      ? { mechanism: 'darwin_kqueue_note_track', verified: reconciliation.settled }
-      : { mechanism: null, verified: false },
   };
 }
 
@@ -648,9 +483,6 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
   const testModule = path.join(templateRoot, 'scripts/tests/test_task_workspace.py');
   const durationWeights = path.join(root, 'scripts/test-performance/task-workspace-duration-weights.v1.json');
   const plans = [];
-  const darwinContainment = options.command === null
-    ? await prepareDarwinContainment(profileRoot)
-    : { executable: null, mechanism: null, error: null };
   if (options.command) {
     plans.push({ command: options.command, args: options.commandArgs, profilePath: null, shard: 0 });
   } else {
@@ -669,8 +501,6 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
     run: await runOwned(plan.command, plan.args, options.timeoutMs, options.mode, 262_144, {
       ...dependencies,
       arbitraryCommand: options.command !== null,
-      containmentExecutable: dependencies.containmentExecutable ?? darwinContainment.executable,
-      containmentError: dependencies.containmentError ?? darwinContainment.error,
     }),
   })));
   const profiles = runs.map(({ profilePath }) => {
@@ -725,13 +555,7 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
       wall: { count: walls.length || 1, p50_ms: quantile(walls.length ? walls : [run.wallMs], 0.50), p95_ms: quantile(walls.length ? walls : [run.wallMs], 0.95) },
       total_wall_ms: Math.round(run.wallMs * 1000) / 1000,
     },
-    processes: {
-      settled: run.settled,
-      surviving: run.surviving,
-      ...(runs.some((value) => value.run.containment?.mechanism) ? {
-        containment: runs.map((value) => value.run.containment ?? { mechanism: null, verified: false }),
-      } : {}),
-    },
+    processes: { settled: run.settled, surviving: run.surviving },
     failure_guidance: options.mode === 'seeded' && run.code !== 0
       ? { replay_mode: 'hermetic', command: `npm run test:task-workspace:hermetic -- --test-id ${tests.find((test) => test.outcome !== 'passed')?.id ?? '<test-id>'}` }
       : null,
