@@ -39,6 +39,8 @@ RECONCILE_ID_SCHEMA = "juno_merge_terminal_reconciliation_identity.v1"
 RECONCILE_REFERENCE_SCHEMA = "juno_merge_terminal_reconciliation_reference.v1"
 WITHDRAW_SCHEMA = "juno_merge_queue_withdraw_receipt.v1"
 AUTHORITY_SCHEMA = "juno_merge_live_authority.v1"
+PRE_CAS_EDIT_RECOVERY_SCHEMA = "juno_merge_pre_cas_edit_recovery.v1"
+PRE_CAS_EDIT_RECOVERY_ROOT = ".juno_task/runtime/merge-queue/pre-cas-edit-recovery"
 WITHDRAWABLE_STATES = {"QUEUED", "AWAITING_RISK", "AWAITING_RELEASE", "REVIEW_FINDINGS",
                        "REVIEW_FINDINGS_EXHAUSTED", "CONFLICT", "CONFLICT_RESOLVED",
                        "REOPENING", "REQUEUING_STALE"}
@@ -6210,6 +6212,7 @@ def status(controller: Path) -> dict[str, Any]:
         tasks = state["tasks"]
         entry = target_entry(state, repository, config["target_ref"])
         rows = [{"task_id": task_id, "state": row.get("state"), "tip_sha": row.get("tip_sha"),
+                 "record_revision": digest(row),
                  "candidate_sha": ((row.get("queue_attempt") or {}).get("candidate_sha")
                                    if isinstance(row.get("queue_attempt"), dict) else None),
                  "candidate_checkout": ((row.get("queue_attempt") or {}).get("candidate_checkout")
@@ -6810,6 +6813,236 @@ def _target_arbiter_claim(root: Path) -> Iterator[Optional[Any]]:
         stream.close()
 
 
+def _pre_cas_recovery_refuse(code: str, detail: str) -> None:
+    raise MergeQueueError(f"pre-CAS edit recovery refused ({code}): {detail}")
+
+
+def recover_pre_cas_authority_drift(controller: Path, task_id: str, arbiter_attempt: int,
+                                     terminal_receipt_path: str,
+                                     terminal_receipt_sha256: str,
+                                     expected_record_revision: str) -> dict[str, Any]:
+    """Return one receipt-proven pre-CAS authority failure to fenced WORKING.
+
+    This operation is deliberately narrower than reopen: it performs no
+    composition, validation, review, worker dispatch, cleanup, or ref mutation.
+    The failed candidate and complete queue attempt remain immutable evidence.
+    """
+    if not task_runtime.TASK_RE.fullmatch(task_id):
+        _pre_cas_recovery_refuse("task_mismatch", "task id is unsafe")
+    if (not isinstance(arbiter_attempt, int) or isinstance(arbiter_attempt, bool)
+            or arbiter_attempt < 1):
+        _pre_cas_recovery_refuse("attempt_mismatch", "arbiter attempt is malformed")
+    if not re.fullmatch(r"[0-9a-f]{64}", terminal_receipt_sha256 or ""):
+        _pre_cas_recovery_refuse("receipt_malformed", "terminal receipt digest is malformed")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_record_revision or ""):
+        _pre_cas_recovery_refuse("revision_mismatch", "lifecycle revision is malformed")
+
+    config = task_runtime.load_config(controller)
+    repository = task_runtime.product_repository(controller, config)
+    arbiter_root = _arbiter_root(controller, repository, config["target_ref"])
+    expected_receipt_path = (arbiter_root / "receipts"
+                             / f"attempt-{arbiter_attempt}-failed.json").resolve()
+    supplied_receipt_path = Path(terminal_receipt_path).expanduser().resolve()
+    try:
+        supplied_receipt_path.relative_to((arbiter_root / "receipts").resolve())
+    except ValueError:
+        _pre_cas_recovery_refuse("receipt_malformed", "terminal receipt escaped arbiter evidence")
+    if not supplied_receipt_path.is_file():
+        _pre_cas_recovery_refuse("receipt_malformed", "terminal receipt path is absent")
+    terminal_bytes = supplied_receipt_path.read_bytes()
+    if hashlib.sha256(terminal_bytes).hexdigest() != terminal_receipt_sha256:
+        _pre_cas_recovery_refuse("receipt_malformed", "terminal receipt bytes do not match")
+    try:
+        terminal = json.loads(terminal_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        _pre_cas_recovery_refuse("receipt_malformed", "terminal receipt is not valid JSON")
+
+    with _target_arbiter_claim(arbiter_root) as arbiter_claim:
+        if arbiter_claim is None:
+            _pre_cas_recovery_refuse("live_arbiter", "target arbiter ownership is active")
+        with target_lock(controller, repository, config["target_ref"]):
+            arbiter = _arbiter_state(arbiter_root)
+            if (not isinstance(arbiter, dict) or arbiter.get("attempt") != arbiter_attempt
+                    or terminal.get("attempt") != arbiter_attempt):
+                _pre_cas_recovery_refuse("attempt_mismatch", "terminal arbiter attempt moved")
+            if supplied_receipt_path != expected_receipt_path:
+                _pre_cas_recovery_refuse("receipt_malformed", "terminal receipt path is not canonical")
+            if (arbiter.get("state") != "FAILED" or terminal.get("state") != "FAILED"
+                    or terminal.get("schema_version") != TARGET_ARBITER_RECEIPT_SCHEMA):
+                _pre_cas_recovery_refuse("receipt_malformed", "arbiter is not terminal FAILED")
+            if (arbiter.get("terminal_receipt") != {
+                    "path": str(supplied_receipt_path), "sha256": terminal_receipt_sha256}):
+                _pre_cas_recovery_refuse("receipt_malformed", "arbiter receipt reference mismatched")
+            if (terminal.get("target_ref") != config["target_ref"]
+                    or arbiter.get("target_ref") != config["target_ref"]
+                    or terminal.get("producer") != arbiter.get("producer")
+                    or terminal.get("detail") != arbiter.get("detail")):
+                _pre_cas_recovery_refuse("identity_mismatch", "terminal arbiter identity drifted")
+            producer = task_runtime._observe_producer(arbiter.get("producer"))
+            if producer.status != "dead":
+                _pre_cas_recovery_refuse(
+                    "live_producer", f"failed arbiter producer is {producer.status}: {producer.detail}")
+            error = terminal.get("detail", {}).get("error") \
+                if isinstance(terminal.get("detail"), dict) else None
+            prefix = "live authority drift at before_target_cas: "
+            if not isinstance(error, str) or not error.startswith(prefix):
+                _pre_cas_recovery_refuse(
+                    "not_pre_cas_authority_drift", "terminal failure is not the supported boundary")
+            reason_codes = sorted(set(part.strip() for part in error[len(prefix):].split(",")
+                                      if part.strip()))
+            supported = {"BLOCKERS_PRESENT", "BLOCKERS_DRIFT", "TASK_REVISION_DRIFT",
+                         "QUEUE_RECORD_DRIFT", "ADMITTED_PATHS_DRIFT",
+                         "FIFO_DRIFT", "QUEUE_AUTHORITY_DRIFT"}
+            if not reason_codes or any(code not in supported for code in reason_codes):
+                _pre_cas_recovery_refuse(
+                    "not_deterministic_policy_drift", "authority reason is outside the narrow policy set")
+
+            with task_runtime.state_lock(controller):
+                state = task_runtime.read_state(controller)
+                record = state.get("tasks", {}).get(task_id)
+                if isinstance(record, dict) and record.get("state") == "WORKING" \
+                        and isinstance(record.get("pre_cas_authority_drift_recovery"), dict):
+                    _pre_cas_recovery_refuse(
+                        "already_recovered", "the failed attempt already issued editable authority")
+                if not isinstance(record, dict):
+                    _pre_cas_recovery_refuse("task_mismatch", "task lifecycle record is missing")
+                source_state = record.get("state")
+                if source_state in {"REVIEW_FINDINGS", "REVIEW_FINDINGS_EXHAUSTED"}:
+                    _pre_cas_recovery_refuse("review_findings", "review findings cannot use this recovery")
+                if source_state in {"CONFLICT", "CONFLICT_RESOLVED"}:
+                    _pre_cas_recovery_refuse("conflict_state", "conflict recovery remains separately owned")
+                if source_state != "MERGING":
+                    _pre_cas_recovery_refuse("state_mismatch", "task is not in MERGING")
+                if digest(record) != expected_record_revision:
+                    _pre_cas_recovery_refuse("revision_mismatch", "lifecycle record changed")
+                attempt = record.get("queue_attempt")
+                if (not isinstance(attempt, dict) or attempt.get("schema_version") != ATTEMPT_SCHEMA
+                        or attempt.get("task_id") != task_id):
+                    _pre_cas_recovery_refuse("task_mismatch", "queue attempt identity is malformed")
+                if attempt.get("outcome") != "MERGING":
+                    _pre_cas_recovery_refuse("state_mismatch", "queue attempt is not pre-CAS MERGING")
+                if attempt.get("target_ref") != config["target_ref"]:
+                    _pre_cas_recovery_refuse("identity_mismatch", "target ref identity drifted")
+                if (attempt.get("review", {}).get("reviews")
+                        or attempt.get("risk", {}).get("reviews")
+                        or attempt.get("blocking_findings")):
+                    _pre_cas_recovery_refuse("review_findings", "review evidence is not empty")
+
+                target_sha = task_runtime.ref_sha(repository, config["target_ref"])
+                expected_target = attempt.get("expected_target_sha")
+                candidate_sha = attempt.get("candidate_sha")
+                source_tip = attempt.get("feature_sha")
+                if (target_sha != expected_target or arbiter.get("target_sha_at_start") != target_sha
+                        or candidate_sha == target_sha):
+                    _pre_cas_recovery_refuse(
+                        "post_cas_or_target_moved", "no-CAS target identity cannot be proven")
+                if (not isinstance(candidate_sha, str)
+                        or optional_revision(repository, candidate_sha) != candidate_sha
+                        or task_runtime.git(repository, "rev-parse", f"{candidate_sha}^{{tree}}",
+                                            check=False) != attempt.get("candidate_tree")):
+                    _pre_cas_recovery_refuse("candidate_mismatch", "candidate commit/tree drifted")
+                if (source_tip != record.get("tip_sha")
+                        or optional_revision(repository, source_tip) != source_tip
+                        or task_runtime.git(repository, "rev-parse", record.get("branch_ref", ""),
+                                            check=False) != source_tip):
+                    _pre_cas_recovery_refuse("source_mismatch", "source branch/tip drifted")
+
+                worktree_value = record.get("worktree")
+                checkout_value = attempt.get("candidate_checkout")
+                try:
+                    worktree = task_runtime.exact_root(Path(worktree_value), "feature worktree")
+                    checkout = task_runtime.exact_root(Path(checkout_value), "candidate checkout")
+                except (TypeError, task_runtime.TaskWorkspaceError):
+                    _pre_cas_recovery_refuse("ambiguous_worktree", "worktree identity is absent or ambiguous")
+                if (task_runtime.git(worktree, "symbolic-ref", "-q", "HEAD", check=False)
+                        != record.get("branch_ref")
+                        or task_runtime.git(worktree, "rev-parse", "HEAD", check=False) != source_tip):
+                    _pre_cas_recovery_refuse("source_mismatch", "feature worktree identity drifted")
+                if task_runtime.git(worktree, "status", "--porcelain=v1", "--untracked-files=all",
+                                    check=False):
+                    _pre_cas_recovery_refuse("dirty_worktree", "feature worktree is dirty")
+                registered = [Path(row.get("worktree", "")).resolve()
+                              for row in registered_worktrees(repository)
+                              if row.get("worktree")]
+                if registered.count(checkout.resolve()) != 1:
+                    _pre_cas_recovery_refuse("ambiguous_worktree", "candidate worktree registration drifted")
+                if (task_runtime.git(checkout, "rev-parse", "HEAD", check=False) != candidate_sha
+                        or task_runtime.git(checkout, "symbolic-ref", "-q", "HEAD", check=False)
+                        or task_runtime.git(checkout, "status", "--porcelain=v1", "--untracked-files=all",
+                                            check=False)):
+                    _pre_cas_recovery_refuse("dirty_worktree", "candidate worktree is not exact and clean")
+                if task_runtime.git(checkout, "show", "-s", "--format=%P", candidate_sha).split() \
+                        != [expected_target, source_tip]:
+                    _pre_cas_recovery_refuse("candidate_mismatch", "candidate parents drifted")
+                token = attempt.get("candidate_token")
+                try:
+                    verify_candidate_owner(controller, repository, checkout, token)
+                except (MergeQueueError, TypeError):
+                    _pre_cas_recovery_refuse("candidate_mismatch", "candidate ownership drifted")
+                lease = task_runtime._lease_view(record)
+                if not isinstance(lease, dict) or lease.get("state") != "RELEASED":
+                    _pre_cas_recovery_refuse("live_producer", "task edit producer is not terminally released")
+
+                receipt_body = {
+                    "schema_version": PRE_CAS_EDIT_RECOVERY_SCHEMA,
+                    "task_id": task_id, "source_tip": source_tip,
+                    "source_tree": task_runtime.git(repository, "rev-parse", f"{source_tip}^{{tree}}"),
+                    "candidate_sha": candidate_sha, "candidate_tree": attempt["candidate_tree"],
+                    "target_ref": config["target_ref"], "target_sha": target_sha,
+                    "arbiter_attempt": arbiter_attempt,
+                    "terminal_receipt": {"path": str(supplied_receipt_path),
+                                         "sha256": terminal_receipt_sha256},
+                    "terminal_reason_codes": reason_codes, "no_cas_proven": True,
+                    "producer_observation": {"status": producer.status,
+                                             "detail": producer.detail},
+                    "feature_worktree": str(worktree), "candidate_worktree": str(checkout),
+                    "worktrees_clean": True,
+                    "expected_record_revision": expected_record_revision,
+                    "preserved_queue_attempt_sha256": digest(attempt),
+                }
+                recovery_path = (controller / PRE_CAS_EDIT_RECOVERY_ROOT / task_id
+                                 / f"attempt-{arbiter_attempt}-{candidate_sha}.json")
+                data = (canonical(receipt_body) + "\n").encode()
+                if recovery_path.is_file():
+                    if recovery_path.read_bytes() != data:
+                        _pre_cas_recovery_refuse("receipt_collision", "recovery evidence path collided")
+                else:
+                    write_canonical_exclusive(recovery_path, receipt_body, 65536)
+                recovery_receipt = evidence_reference(recovery_path)
+                lease_authority_receipt = {
+                    "path": recovery_receipt["receipt_path"],
+                    "sha256": recovery_receipt["receipt_sha256"],
+                }
+                lease_next, lease_token = task_runtime._new_lease(
+                    task_id, int(lease.get("attempt") or 0) + 1, "process",
+                    "pre_cas_authority_drift_recovery", lease_authority_receipt,
+                    reason="receipt-proven pre-CAS authority drift", producer_pid=os.getpid(),
+                    recovery={"classification": "clean_resume",
+                              "preserved_candidate_sha": candidate_sha})
+                recovered = {key: value for key, value in record.items()
+                             if key not in {"queue_attempt", "last_queue_outcome",
+                                            "enqueue_sequence", "review_ready_closure"}}
+                recovered.update({
+                    "state": "WORKING",
+                    "pre_cas_authority_drift_recovery": {
+                        "schema_version": PRE_CAS_EDIT_RECOVERY_SCHEMA,
+                        "receipt": recovery_receipt,
+                        "preserved_queue_attempt": attempt,
+                        "safe_next_command": f"append one repair commit, then yy task preflight {task_id}",
+                    },
+                })
+                recovered = task_runtime._apply_lease(recovered, lease_next)
+                state["tasks"][task_id] = recovered
+                task_runtime.write_state(controller, state)
+            _project_queue_board_state(controller, task_id, "WORKING")
+            return {"schema_version": PRE_CAS_EDIT_RECOVERY_SCHEMA, "task_id": task_id,
+                    "outcome": "PRE_CAS_AUTHORITY_DRIFT_RECOVERED",
+                    "source_tip": source_tip, "candidate_sha": candidate_sha,
+                    "target_sha": target_sha, "arbiter_attempt": arbiter_attempt,
+                    "receipt": recovery_receipt, "lease_token": lease_token,
+                    "safe_next_command": f"append one repair commit, then yy task preflight {task_id}"}
+
+
 def merge_drive(controller: Path, through: Optional[str] = None) -> dict[str, Any]:
     """Run the on-demand per-target arbiter until idle or one typed blocker."""
     config = task_runtime.load_config(controller)
@@ -6910,6 +7143,12 @@ def parser() -> argparse.ArgumentParser:
     reopen = sub.add_parser("reopen")
     reopen.add_argument("task_id")
     reopen.add_argument("--plan-id")
+    recover_drift = sub.add_parser("recover-authority-drift")
+    recover_drift.add_argument("task_id")
+    recover_drift.add_argument("--attempt", required=True, type=int)
+    recover_drift.add_argument("--terminal-receipt", required=True)
+    recover_drift.add_argument("--terminal-receipt-sha256", required=True)
+    recover_drift.add_argument("--expected-revision", required=True)
     withdraw = sub.add_parser("withdraw")
     withdraw.add_argument("task_id")
     withdraw.add_argument("--reason")
@@ -6986,6 +7225,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             result = merge_review(controller, args.task_id)
         elif args.operation == "reopen":
             result = merge_reopen(controller, args.task_id, args.plan_id)
+        elif args.operation == "recover-authority-drift":
+            result = recover_pre_cas_authority_drift(
+                controller, args.task_id, args.attempt, args.terminal_receipt,
+                args.terminal_receipt_sha256, args.expected_revision)
         elif args.operation == "withdraw":
             result = merge_withdraw(controller, args.task_id, args.reason)
         elif args.operation == "reconcile":
