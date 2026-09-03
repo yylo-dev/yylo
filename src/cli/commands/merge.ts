@@ -5,7 +5,7 @@ import { Command } from 'commander';
 import { routeControlPlane } from '../../utils/control-plane-router.js';
 import { checkpointControllerAfterFinalization } from '../../utils/controller-checkpoint.js';
 
-export type MergeQueueOperation = 'status' | 'drive' | 'arbiter-status' | 'arbiter-run' | 'plan' | 'next' | 'resolve' | 'review' | 'reopen' | 'reconcile' | 'refresh' | 'withdraw';
+export type MergeQueueOperation = 'status' | 'drive' | 'arbiter-status' | 'arbiter-run' | 'plan' | 'next' | 'resolve' | 'review' | 'reopen' | 'recover-authority-drift' | 'reconcile' | 'refresh' | 'withdraw';
 export type MergeQueueInvoker = (
   operation: MergeQueueOperation,
   taskId?: string,
@@ -201,6 +201,21 @@ export function configureMergeQueueCommand(
     .action((taskId: string, options: { planId?: string }) => options.planId
       ? invoke('reopen', taskId, ['--plan-id', options.planId])
       : invoke('reopen', taskId));
+  merge.command('recover-authority-drift')
+    .description('Explicit receipt-bound recovery from terminal pre-CAS authority drift to fenced editable WORKING')
+    .argument('<task-id>', 'MERGING task bound by the failed arbiter receipt')
+    .requiredOption('--attempt <number>', 'Exact terminal target-arbiter attempt')
+    .requiredOption('--terminal-receipt <path>', 'Canonical terminal failed-arbiter receipt')
+    .requiredOption('--terminal-receipt-sha256 <sha256>', 'Exact terminal receipt byte identity')
+    .requiredOption('--expected-revision <sha256>', 'Exact current lifecycle record revision')
+    .action((taskId: string, options: {
+      attempt: string; terminalReceipt: string; terminalReceiptSha256: string; expectedRevision: string;
+    }) => invoke('recover-authority-drift', taskId, [
+      '--attempt', options.attempt,
+      '--terminal-receipt', options.terminalReceipt,
+      '--terminal-receipt-sha256', options.terminalReceiptSha256,
+      '--expected-revision', options.expectedRevision,
+    ]));
   merge
     .command('withdraw')
     .description('Withdraw one queued task after proving no live producer owns its claims')

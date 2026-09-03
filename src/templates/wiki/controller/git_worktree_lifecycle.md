@@ -1,6 +1,6 @@
 ---
 wiki_contract:
-  line_limit: 260
+  line_limit: 280
   purpose: "Run exact-base task worktrees and one fenced per-target delivery owner."
   failure_mode_prevented: "Controller edits, stale-worker takeover, model polling, and unsafe target movement."
   runtime_contract_enforced: "yy task owns feature worktrees; one yy merge arbiter owns composition and expected-old-SHA CAS."
@@ -53,7 +53,25 @@ yy merge arbiter run            # explicit fenced on-demand mutation
 yy merge drive --through TASK_ID # explicit typed mutation
 yy merge next                   # explicit single-step recovery
 yy merge resolve TASK_ID        # explicit preserved-conflict recovery
+yy merge recover-authority-drift TASK_ID --attempt N \
+  --terminal-receipt /canonical/attempt-N-failed.json \
+  --terminal-receipt-sha256 SHA256 --expected-revision RECORD_SHA256
 ```
+
+`recover-authority-drift` is the only editable recovery for a preserved `MERGING`
+incident that failed deterministically at `before_target_cas`. Read `record_revision`
+from `yy merge status` and the exact attempt/terminal receipt identity from
+`yy merge arbiter status`, then run the command once. It requires a dead producer,
+exact clean source and candidate worktrees, unchanged source/candidate/target
+identities, and positive no-CAS proof. It atomically retains the failed queue
+attempt and candidate as evidence while issuing a fresh fenced `WORKING` lease.
+The safe next step is one descendant repair commit followed by
+`yy task preflight TASK_ID`, using the returned lease token for later fenced
+mutations. It distinctly refuses reviews, conflicts, post-CAS state, live
+ownership, dirty or ambiguous worktrees, identity/revision drift, malformed
+evidence, and repeated recovery. It never validates, reviews, composes, launches
+a worker, cleans a candidate, or changes the protected target. Do not use
+`yy merge next` to repeat the unchanged deterministic attempt.
 
 Task start always admits the policy's baseline/default paths and freezes the
 exact configured product target SHA. Omit `--path` for ordinary Juno Code work;

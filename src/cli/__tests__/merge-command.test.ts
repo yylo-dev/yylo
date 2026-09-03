@@ -125,13 +125,20 @@ describe('merge queue CLI', () => {
       '--receipt', '/receipt.json', '--receipt-sha256', 'abc']);
     expect(invoke).toHaveBeenCalledWith('refresh', undefined,
       ['apply', 'T123', '--receipt', '/receipt.json', '--receipt-sha256', 'abc']);
+    invoke.mockClear();
+    await program.parseAsync(['node', 'yy', 'merge', 'recover-authority-drift', 'T123',
+      '--attempt', '225', '--terminal-receipt', '/attempt-225-failed.json',
+      '--terminal-receipt-sha256', 'abc', '--expected-revision', 'def']);
+    expect(invoke).toHaveBeenCalledWith('recover-authority-drift', 'T123', [
+      '--attempt', '225', '--terminal-receipt', '/attempt-225-failed.json',
+      '--terminal-receipt-sha256', 'abc', '--expected-revision', 'def']);
   });
 
-  it('keeps next TASK_ID optional and requires it for plan, resolve, review, and reopen', () => {
+  it('keeps next TASK_ID optional and requires task identity for recovery mutations', () => {
     const program = new Command();
     configureMergeQueueCommand(program, async () => undefined);
     const merge = program.commands.find((command) => command.name() === 'merge');
-    expect(merge?.commands.map((command) => command.name())).toEqual(['status', 'drive', 'arbiter', 'plan', 'next', 'resolve', 'review', 'reopen', 'withdraw', 'reconcile', 'refresh']);
+    expect(merge?.commands.map((command) => command.name())).toEqual(['status', 'drive', 'arbiter', 'plan', 'next', 'resolve', 'review', 'reopen', 'recover-authority-drift', 'withdraw', 'reconcile', 'refresh']);
     expect(merge?.commands[0]?.registeredArguments).toHaveLength(0);
     expect(merge?.commands[1]?.registeredArguments).toHaveLength(0);
     expect(merge?.commands[3]?.registeredArguments[0]?.required).toBe(true);
@@ -171,6 +178,8 @@ describe('merge queue CLI', () => {
     expect(command('next')?.description()).toContain('continue paused evidence');
     expect(command('next')?.registeredArguments[0]?.description).toContain('evidence/review');
     expect(command('resolve')?.description()).toContain('Explicit recovery mutation');
+    expect(command('recover-authority-drift')?.description()).toContain('receipt-bound recovery');
+    expect(command('recover-authority-drift')?.description()).toContain('pre-CAS');
   });
 
   it('checkpoints only after successful terminal merge and Kanban finalization truth', async () => {
