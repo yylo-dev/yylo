@@ -305,6 +305,25 @@ def load_package_bound_test_fixture(test_file: str, fixture_name: str) -> Any:
         spec.loader.exec_module(module)
         return module
 
+    # A packed release may run the supported profiler directly, without an
+    # installed controller. Bind that case to the package containing this
+    # exact dist test module; never search neighboring directories.
+    packaged_root = test_path.parents[4] if len(test_path.parents) > 4 else None
+    packaged_test_root = (packaged_root / "dist/templates/scripts/tests"
+                          if packaged_root is not None else None)
+    if packaged_test_root is not None and test_path.parent == packaged_test_root:
+        try:
+            packaged = json.loads((packaged_root / "package.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            packaged = None
+        if (not isinstance(packaged, dict) or packaged.get("name") != "@yylo/cli"
+                or not is_valid_semver(packaged.get("version"))):
+            raise TaskWorkspaceError("package-bound test fixture has invalid package identity")
+        package_fixture = (packaged_root / "scripts/test-support" / fixture_name
+                           if fixture_name == "task_workspace_fixture.py"
+                           else packaged_test_root / fixture_name)
+        return load(package_fixture)
+
     # Installed execution has exactly one authority: the controller's bound,
     # hash-identified package. Never inspect an adjacent tests directory.
     explicit = os.environ.get("JUNO_TASK_ROOT", "").strip()

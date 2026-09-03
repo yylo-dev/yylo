@@ -56,7 +56,7 @@
     "build:copy-extensions": "node -e \"const fs = require('fs-extra'); const src = 'src/templates/extensions'; const dest = 'dist/templates/extensions'; if (fs.existsSync(src)) { fs.copySync(src, dest, { recursive: true }); }\"",
     "build:copy-wrapper": "node -e \"const fs = require('fs-extra'); fs.copySync('src/bin/yylo.sh', 'dist/bin/yylo.sh'); fs.copySync('src/bin/ypl.sh', 'dist/bin/ypl.sh'); fs.chmodSync('dist/bin/yylo.sh', 0o755); fs.chmodSync('dist/bin/ypl.sh', 0o755);\"",
     "build:watch": "tsup --watch",
-    "test": "vitest run -c ./vitest.fast.config.ts --reporter=dot",
+    "test": "vitest run -c ./vitest.fast.config.ts --reporter=dot --silent",
     "test:full": "vitest run",
     "test:task-workspace:affected": "node scripts/test-task-workspace.mjs --mode affected",
     "test:task-workspace:seeded": "node scripts/test-task-workspace.mjs --mode seeded",

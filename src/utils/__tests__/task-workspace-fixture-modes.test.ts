@@ -27,6 +27,7 @@ describe('task-workspace supported profiler and runner', () => {
     expect(scripts['test:task-workspace:seeded']).toContain('test-task-workspace.mjs');
     expect(scripts['test:task-workspace:hermetic']).toContain('test-task-workspace.mjs');
     expect(scripts['test:task-workspace:complete']).toContain('test-task-workspace.mjs');
+    expect(scripts.test).toContain('--reporter=dot --silent');
     expect(fs.existsSync(runner)).toBe(true);
   });
 
