@@ -1,6 +1,6 @@
 ---
 wiki_contract:
-  line_limit: 260
+  line_limit: 320
   purpose: "Run exact-base task worktrees and one fenced per-target delivery owner."
   failure_mode_prevented: "Controller edits, stale-worker takeover, model polling, and unsafe target movement."
   runtime_contract_enforced: "yy task owns feature worktrees; one yy merge arbiter owns composition and expected-old-SHA CAS."
@@ -201,6 +201,37 @@ the receipt under the target lock, advances only the bound owner and role base,
 hydrates with `--no-fetch`, and requires an exact clean final readback. Any other
 finding, dirt, topology change, unavailable object, authority mismatch, or ref
 drift refuses; this is not a generic blocker bypass.
+
+## Receipt-bound stale lifecycle supersession
+
+A managed merge-drive journal that remains nonterminal after its in-flight task
+was receipt-recovered and requeued must not be deleted or have its prior events
+rewritten. Use `yy merge supersede-lifecycle-journal` only with the exact run,
+journal revision and byte digest, frozen scope, terminal failed-arbiter receipt,
+recovered task receipt, unchanged target SHA, and current actionable FIFO digest.
+The operation requires a dead producer, a proven pre-CAS lineage, and a current
+FIFO that differs from the frozen one. It appends one immutable `SUPERSEDED`
+projection and deterministic summary, preserves queue rows byte-for-byte, and is
+idempotent for the same complete binding. Live producers, valid current scopes,
+missing recovery lineage, target drift, post-CAS evidence, malformed artifacts,
+and changed revisions refuse with distinct reason codes.
+
+The command output names `yy merge arbiter run` as the only safe next action. A
+fresh compiler then selects current FIFO normally; supersession grants no queue
+reorder, candidate deletion, target CAS, release, push, deploy, or cleanup
+authority. Obtain `current_fifo.sha256` from the candidate runtime's read-only
+`arbiter status` projection and never improvise identities or edit evidence:
+
+```bash
+python3 "$CANDIDATE/.juno_task/scripts/merge_queue.py" --controller "$CONTROLLER" arbiter status
+python3 "$CANDIDATE/.juno_task/scripts/merge_queue.py" --controller "$CONTROLLER" supersede-lifecycle-journal \
+  --run-id "$RUN_ID" --expected-journal-revision "$REVISION" \
+  --expected-journal-sha256 "$JOURNAL_SHA256" --scope-sha256 "$SCOPE_SHA256" \
+  --arbiter-attempt "$ARBITER_ATTEMPT" --terminal-receipt "$FAILED_RECEIPT" \
+  --terminal-receipt-sha256 "$FAILED_RECEIPT_SHA256" --recovered-task "$TASK_ID" \
+  --recovery-receipt "$RECOVERY_RECEIPT" --recovery-receipt-sha256 "$RECOVERY_SHA256" \
+  --expected-target-sha "$TARGET_SHA" --expected-current-fifo-sha256 "$FIFO_SHA256"
+```
 
 ## Integration owner lifecycle
 
