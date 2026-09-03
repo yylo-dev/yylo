@@ -18,7 +18,9 @@ Git-process counts, timeout/process settlement, and p50/p95 timing. Seeded
 failures include a hermetic replay command. The umbrella `npm test` suite checks
 runner and representative real-Git contracts but does not launch `:complete`;
 the explicit complete command is the single task-owned 239-case performance
-gate, preventing duplicate expensive profiles and resource-lock races.
+gate, preventing duplicate expensive profiles and resource-lock races. The
+complete gate is strict: a settled, otherwise eligible 239/239 profile must
+finish in less than 150 seconds; 150.000 seconds is ineligible.
 
 Arbitrary `--command` probes are cleanup diagnostics, not eligible evidence:
 POSIX process groups cannot contain a descendant that creates a new session,

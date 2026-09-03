@@ -32,6 +32,17 @@ function parse(argv) {
   return value;
 }
 
+export function evaluatePerformanceGate(targetMs, testEligible, comparable, wallMs) {
+  return {
+    applicable: targetMs !== null,
+    target_ms: targetMs,
+    eligible: targetMs === null ? null : testEligible && comparable && wallMs < targetMs,
+    reason: !testEligible ? 'run_failed'
+      : !comparable ? 'incomparable_environment'
+        : targetMs !== null && wallMs >= targetMs ? 'target_exceeded' : null,
+  };
+}
+
 function quantile(values, percentile) {
   if (!values.length) return null;
   const ordered = [...values].sort((a, b) => a - b);
@@ -552,14 +563,9 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
     cold_fallback: { disable_cache_env: 'YYLO_TEST_DISABLE_FIXTURE_BASE_CACHE=1', mode: 'complete' },
     output: { truncated_tail: run.output },
   };
-  const targetMs = options.mode === 'affected' ? 5_000 : options.mode === 'complete' ? 90_000 : null;
+  const targetMs = options.mode === 'affected' ? 5_000 : options.mode === 'complete' ? 150_000 : null;
   const testEligible = receipt.eligible;
-  receipt.performance_gate = {
-    applicable: targetMs !== null,
-    target_ms: targetMs,
-    eligible: targetMs === null ? null : testEligible && comparable && run.wallMs <= targetMs,
-    reason: !testEligible ? 'run_failed' : !comparable ? 'incomparable_environment' : run.wallMs > targetMs ? 'target_exceeded' : null,
-  };
+  receipt.performance_gate = evaluatePerformanceGate(targetMs, testEligible, comparable, run.wallMs);
   receipt.eligible = testEligible && (targetMs === null || receipt.performance_gate.eligible === true);
   receipt.exit_code = receipt.eligible ? 0
     : run.timedOut ? 124

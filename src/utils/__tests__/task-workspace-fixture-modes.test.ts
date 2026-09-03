@@ -80,6 +80,27 @@ describe('task-workspace supported profiler and runner', () => {
     expect(value.processes).toEqual(expect.objectContaining({ settled: true }));
   });
 
+  it('binds the complete profile to the explicit strict 150-second performance contract', async () => {
+    const root = temporaryDirectory();
+    const receipt = path.join(root, 'complete-contract.json');
+    const result = spawnSync(process.execPath, [runner, '--mode', 'complete', '--receipt', receipt,
+      '--test-id', 'SemVerValidationTests.test_rejects_malformed_versions'], {
+      cwd: path.join(repository, 'juno-code'), encoding: 'utf8', timeout: 10_000,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const value = JSON.parse(fs.readFileSync(receipt, 'utf8')) as Record<string, any>;
+    expect(value.performance_gate).toEqual(expect.objectContaining({
+      applicable: true,
+      target_ms: 150_000,
+      eligible: true,
+    }));
+    expect(value.summary.total_wall_ms).toBeLessThan(value.performance_gate.target_ms);
+    const module = await import(pathToFileURL(runner).href) as Record<string, any>;
+    expect(module.evaluatePerformanceGate(150_000, true, true, 149_999.999).eligible).toBe(true);
+    expect(module.evaluatePerformanceGate(150_000, true, true, 150_000).eligible).toBe(false);
+    expect(module.evaluatePerformanceGate(150_000, true, true, 150_000).reason).toBe('target_exceeded');
+  });
+
   it('rejects an ineligible applicable performance gate with a truthful nonzero result', () => {
     const root = temporaryDirectory();
     const receipt = path.join(root, 'performance.json');
