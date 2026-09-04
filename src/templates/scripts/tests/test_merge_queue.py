@@ -3640,6 +3640,239 @@ steps:
         self.assertEqual(admission["full_suite_admission"]["state"], "FAILED")
         self.assertEqual(git(self.repository, "rev-parse", "refs/heads/product"), self.base)
 
+    def prepare_deterministic_full_suite_repair(self) -> dict[str, object]:
+        """Freeze the attempt-230/231 incident shape without touching a live queue."""
+        self.write_policy(full_code="raise SystemExit(23)")
+        policy_path = self.controller / ".juno_task/config/task-workspace.json"
+        policy = json.loads(policy_path.read_text())
+        policy["full_suite_validation"]["cwd"] = "juno-code"
+        policy_path.write_text(json.dumps(policy, sort_keys=True) + "\n")
+        git(self.controller, "add", str(policy_path.relative_to(self.controller)))
+        git(self.controller, "commit", "-m", "canonical full-suite cwd")
+        self.commit_feature("X", "src/security/auth.py", "broken\n")
+        self.queue_payload("next")
+        with self.assertRaises(merge_runtime.MergeValidationError):
+            merge_runtime.merge_review(self.controller.resolve(), "X")
+        state_path = self.controller / ".juno_task/state/tasks.json"
+        state = json.loads(state_path.read_text())
+        record = state["tasks"]["X"]
+        record["creation_receipt"]["allowed_paths"].append("juno-code")
+        admission = record["queue_attempt"]["risk"]["review_progress"]["full_suite_admission"]
+        receipt_ref = admission["receipts"][-1]
+        receipt_path = Path(receipt_ref["receipt_path"])
+        receipt = json.loads(receipt_path.read_text())
+        receipt["result"]["retries"] = {
+            "absorbed": False,
+            "policy": {"max_attempts_per_file": 2, "max_files": 4},
+            "files": [{
+                "file": "src/bin/__tests__/router-allowlist.test.ts",
+                "passed": False,
+                "attempts": [{"exit_code": 1, "timed_out": False},
+                             {"exit_code": 1, "timed_out": False}],
+                "final_tail": ("route_registered_product_control must allowlist every registered "
+                               "CLI subcommand: ['merge:recover-authority-drift']"),
+            }],
+        }
+        receipt_path.write_text(merge_runtime.canonical(receipt) + "\n")
+        receipt_ref["receipt_sha256"] = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+        state_path.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
+
+        run_id = "1788481850518348000-e36d9830ea1a078f"
+        scope_sha = "2" * 64
+        run_dir = self.controller / merge_runtime.MERGE_DRIVE_ROOT / run_id
+        run_dir.mkdir(parents=True)
+        journal = {
+            "schema_version": "juno_managed_merge_drive_journal.v2", "run_id": run_id,
+            "scope_sha256": scope_sha, "initial_target_sha": self.base,
+            "attempts": {"semantic_repairs": 0, "transitions": 3},
+            "operations": [{"phase": "review", "task_id": "X",
+                            "pre_state": "AWAITING_RISK", "post_state": None}],
+            "repairs": [], "state": "CLAIMED", "terminal": False,
+        }
+        journal_path = run_dir / "journal.json"
+        journal_path.write_text(merge_runtime.canonical(journal) + "\n")
+        (self.controller / merge_runtime.MERGE_DRIVE_ROOT / "latest.json").write_text(
+            merge_runtime.canonical({"schema_version": "juno_managed_merge_drive_latest.v2",
+                                     "run_id": run_id, "scope_sha256": scope_sha,
+                                     "terminal": False}) + "\n")
+
+        arbiter_root = merge_runtime._arbiter_root(
+            self.controller.resolve(), self.repository.resolve(), "refs/heads/product")
+        receipts = arbiter_root / "receipts"; receipts.mkdir(parents=True)
+        predecessor_path = receipts / "attempt-230-failed.json"
+        predecessor_path.write_text(merge_runtime.canonical({
+            "schema_version": merge_runtime.TARGET_ARBITER_RECEIPT_SCHEMA,
+            "attempt": 230, "target_ref": "refs/heads/product", "state": "FAILED",
+            "outcome": "MergeQueueError", "producer": {"pid": 999999, "lstart": "dead"},
+            "detail": {"error": "full-suite validation failed"},
+        }) + "\n")
+        predecessor = {"path": str(predecessor_path.resolve()),
+                       "sha256": hashlib.sha256(predecessor_path.read_bytes()).hexdigest()}
+        terminal_path = receipts / "attempt-231-failed.json"
+        terminal_path.write_text(merge_runtime.canonical({
+            "schema_version": merge_runtime.TARGET_ARBITER_RECEIPT_SCHEMA,
+            "attempt": 231, "target_ref": "refs/heads/product", "state": "FAILED",
+            "outcome": "MergeQueueError", "producer": {"pid": 999998, "lstart": "dead"},
+            "detail": {"error": "full-suite validation failed"},
+        }) + "\n")
+        terminal_ref = {"path": str(terminal_path.resolve()),
+                        "sha256": hashlib.sha256(terminal_path.read_bytes()).hexdigest()}
+        (arbiter_root / "state.json").write_text(merge_runtime.canonical({
+            "schema_version": merge_runtime.TARGET_ARBITER_SCHEMA,
+            "attempt": 231, "state": "FAILED", "target_ref": "refs/heads/product",
+            "target_sha_at_start": self.base, "producer": {"pid": 999998, "lstart": "dead"},
+            "successor_of": predecessor, "terminal_receipt": terminal_ref,
+            "detail": {"error": "full-suite validation failed"},
+        }) + "\n")
+        record = json.loads(state_path.read_text())["tasks"]["X"]
+        return {"run_id": run_id, "scope_sha256": scope_sha,
+                "journal_sha256": hashlib.sha256(journal_path.read_bytes()).hexdigest(),
+                "terminal": terminal_ref, "record_revision": merge_runtime.digest(record)}
+
+    def test_deterministic_full_suite_failure_routes_once_to_existing_repair(self) -> None:
+        frozen = self.prepare_deterministic_full_suite_repair()
+        before_target = git(self.repository, "rev-parse", "refs/heads/product")
+        result = merge_runtime.recover_deterministic_full_suite_failure(
+            self.controller.resolve(), "X", 231,
+            frozen["terminal"]["path"], frozen["terminal"]["sha256"],
+            frozen["record_revision"], frozen["run_id"], frozen["scope_sha256"],
+            frozen["journal_sha256"])
+        self.assertEqual((result["state"], result["outcome"]),
+                         ("REVIEW_FINDINGS", "FULL_SUITE_REPAIR_AUTHORIZED"))
+        repair = result["full_suite_repair"]
+        self.assertEqual((repair["repair_count"], repair["delta_review_groups"], repair["status"]),
+                         (0, 0, "READY"))
+        self.assertEqual(repair["finding"]["identities"],
+                         ["merge:recover-authority-drift"])
+        self.assertEqual(repair["allowed_paths"], [
+            "juno-code/src/bin/__tests__/router-allowlist.test.ts",
+            "juno-code/src/bin/yylo.sh",
+            "juno-code/src/cli/__tests__/merge-command.test.ts",
+            "juno-code/src/cli/commands/merge.ts",
+        ])
+        self.assertEqual(git(self.repository, "rev-parse", "refs/heads/product"), before_target)
+        current = task_runtime.read_state(self.controller.resolve())["tasks"]["X"]
+        with self.assertRaisesRegex(merge_runtime.MergeQueueError, "already authorized|budget"):
+            merge_runtime.recover_deterministic_full_suite_failure(
+                self.controller.resolve(), "X", 231,
+                frozen["terminal"]["path"], frozen["terminal"]["sha256"],
+                merge_runtime.digest(current), frozen["run_id"], frozen["scope_sha256"],
+                frozen["journal_sha256"])
+
+    def test_deterministic_full_suite_recovery_status_names_exact_safe_next(self) -> None:
+        frozen = self.prepare_deterministic_full_suite_repair()
+        row = next(row for row in merge_runtime.status(self.controller.resolve())["tasks"]
+                   if row["task_id"] == "X")
+        self.assertEqual(row["reason_code"], "deterministic_full_suite_repair_available")
+        command = row["safe_next_command"]
+        self.assertIn("yy merge recover-full-suite-failure X", command)
+        for value in ("231", frozen["terminal"]["sha256"], frozen["record_revision"],
+                      frozen["run_id"], frozen["scope_sha256"], frozen["journal_sha256"]):
+            self.assertIn(str(value), command)
+        with mock.patch.object(merge_runtime, "full_suite_validation") as suite:
+            with self.assertRaisesRegex(merge_runtime.MergeQueueError,
+                                        "unchanged deterministic full-suite failure"):
+                merge_runtime.merge_review(self.controller.resolve(), "X")
+        suite.assert_not_called()
+
+    def test_deterministic_full_suite_recovery_refusals_are_nonmutating(self) -> None:
+        frozen = self.prepare_deterministic_full_suite_repair()
+        state_path = self.controller / ".juno_task/state/tasks.json"
+        original_state = state_path.read_bytes()
+        record = json.loads(original_state)["tasks"]["X"]
+        receipt_path = Path(record["queue_attempt"]["risk"]["review_progress"]
+                            ["full_suite_admission"]["receipts"][-1]["receipt_path"])
+        original_receipt = receipt_path.read_bytes()
+        root = merge_runtime._arbiter_root(
+            self.controller.resolve(), self.repository.resolve(), "refs/heads/product")
+
+        def call(values: dict[str, object]) -> None:
+            merge_runtime.recover_deterministic_full_suite_failure(
+                self.controller.resolve(), "X", 231,
+                values["terminal"]["path"], values["terminal"]["sha256"],
+                values["record_revision"], values["run_id"], values["scope_sha256"],
+                values["journal_sha256"])
+
+        for case in ("environmental", "stale_revision", "spent_budget",
+                     "malformed_receipt", "live_producer", "unrelated_edit"):
+            with self.subTest(case=case):
+                state_path.write_bytes(original_state); receipt_path.write_bytes(original_receipt)
+                values = json.loads(json.dumps(frozen))
+                if case == "environmental":
+                    receipt = json.loads(original_receipt)
+                    receipt["result"]["retries"]["files"] = []
+                    receipt_path.write_text(merge_runtime.canonical(receipt) + "\n")
+                    state = json.loads(original_state)
+                    state["tasks"]["X"]["queue_attempt"]["risk"]["review_progress"] \
+                        ["full_suite_admission"]["receipts"][-1]["receipt_sha256"] = \
+                        hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+                    state_path.write_text(json.dumps(state, sort_keys=True,
+                                                     separators=(",", ":")) + "\n")
+                    values["record_revision"] = merge_runtime.digest(state["tasks"]["X"])
+                elif case == "stale_revision":
+                    values["record_revision"] = "f" * 64
+                elif case == "spent_budget":
+                    state = json.loads(original_state); state["tasks"]["X"]["review_round"] = 2
+                    state_path.write_text(json.dumps(state, sort_keys=True,
+                                                     separators=(",", ":")) + "\n")
+                    values["record_revision"] = merge_runtime.digest(state["tasks"]["X"])
+                elif case == "malformed_receipt":
+                    values["terminal"]["sha256"] = "f" * 64
+                elif case == "unrelated_edit":
+                    state = json.loads(original_state)
+                    state["tasks"]["X"]["changed_paths"].append("docs/unrelated.txt")
+                    state_path.write_text(json.dumps(state, sort_keys=True,
+                                                     separators=(",", ":")) + "\n")
+                    values["record_revision"] = merge_runtime.digest(state["tasks"]["X"])
+                before = state_path.read_bytes()
+                if case == "live_producer":
+                    with (root / "owner.lock").open("a+b") as handle:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        with self.assertRaises(merge_runtime.MergeQueueError): call(values)
+                else:
+                    with self.assertRaises(merge_runtime.MergeQueueError): call(values)
+                self.assertEqual(state_path.read_bytes(), before)
+        state_path.write_bytes(original_state); receipt_path.write_bytes(original_receipt)
+        self.advance_target("docs/moved.txt")
+        before = state_path.read_bytes()
+        with self.assertRaises(merge_runtime.MergeQueueError): call(frozen)
+        self.assertEqual(state_path.read_bytes(), before)
+
+    def test_full_suite_repair_delta_consumes_absolute_review_budget(self) -> None:
+        frozen = self.prepare_deterministic_full_suite_repair()
+        authorized = merge_runtime.recover_deterministic_full_suite_failure(
+            self.controller.resolve(), "X", 231,
+            frozen["terminal"]["path"], frozen["terminal"]["sha256"],
+            frozen["record_revision"], frozen["run_id"], frozen["scope_sha256"],
+            frozen["journal_sha256"])
+        state_path = self.controller / ".juno_task/state/tasks.json"
+        state = json.loads(state_path.read_text())
+        repair = state["tasks"]["X"]["full_suite_repair"]
+        repair.update({"status": "DISPATCHED", "repair_count": 1,
+                       "allowed_paths": ["src/security/auth.py"]})
+        state["tasks"]["X"]["queue_attempt"]["risk"]["full_suite_repair"] = repair
+        state["tasks"]["X"]["queue_attempt"]["review"]["full_suite_repair"] = repair
+        state_path.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
+        self.write_policy()
+        worktree = self.workspaces / "X"
+        (worktree / "src/security/auth.py").write_text("fixed\n")
+        git(worktree, "add", "src/security/auth.py")
+        git(worktree, "commit", "-m", "bounded repair")
+
+        reopened = merge_runtime.merge_reopen(self.controller.resolve(), "X")
+        self.assertEqual((reopened["state"], reopened["review_round"]), ("QUEUED", 2))
+        self.assertEqual((reopened["full_suite_repair"]["repair_count"],
+                          reopened["full_suite_repair"]["delta_review_groups"],
+                          reopened["full_suite_repair"]["status"]),
+                         (1, 1, "DELTA_REVIEW_PENDING"))
+        (worktree / "src/security/auth.py").write_text("second repair\n")
+        git(worktree, "add", "src/security/auth.py")
+        git(worktree, "commit", "-m", "forbidden second repair")
+        with self.assertRaisesRegex(merge_runtime.MergeQueueError, "absolute budget"):
+            merge_runtime.merge_reopen(self.controller.resolve(), "X")
+        self.assertEqual(authorized["queue_attempt"]["candidate_sha"],
+                         reopened["reopened_from_candidate_sha"])
+
     def test_failed_suite_then_success_uses_fresh_attempt_and_reaches_reviewers(self) -> None:
         flaky = (f"from pathlib import Path; import sys; p=Path({str(self.full_counter)!r}); "
                  "n=len(p.read_text().splitlines()) if p.exists() else 0; "
