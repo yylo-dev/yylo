@@ -241,8 +241,10 @@ npm install -g @mariozechner/pi-coding-agent
 - Multi-provider support (Anthropic, OpenAI, Google, Groq, xAI, etc.)
 - Model shorthand aliases (`:pi`, `:sonnet`, `:opus`, `:luna`, `:sol`, `:gpt`, `:gpt5.5`, `:mini`, `:gpt-5`, `:api-codex`, `:gemini-pro`, etc.)
 - Support for inline prompts or prompt files
-- Headless JSON mode with one line-oriented human formatter: jq-colored compact headers on TTYs, dim italic thinking, bold assistant text, cyan tool calls, and green/red tool results
-- Tool progress after 500 ms and bounded results (first 15 lines, omitted-middle count, final 2 lines); pipes keep the same layout without ANSI and `PI_PRETTY=false` preserves raw NDJSON
+- Non-live headless mode emits ordered `[THINKING]`, `[TOOL]`, `[INPUT]`, `[TOOL_RESPONSE]`, `[ANSWER]`, and notable `[STATUS]` blocks; ordinary lifecycle noise is hidden
+- Fast tools emit one complete block; tools still running after 500 ms emit an append-only running block followed by a correlated completion block without repeated input
+- Tool responses retain the first 15 lines, an exact omitted-middle marker, and the final 2 lines; long input uses an explicit truncation marker
+- TTYs use subtle semantic color, `NO_COLOR` and pipes preserve the same plain layout, and `PI_PRETTY=false` preserves untouched raw Pi NDJSON
 - Live interactive mode via `--live` (Pi TUI + auto-exit on non-aborted `agent_end`)
 - Temporary live extension capture (`JUNO_SUBAGENT_CAPTURE_PATH`) for iteration summaries/cost
 - Verbose mode for debugging
@@ -287,7 +289,7 @@ npm install -g @mariozechner/pi-coding-agent
 - `--no-extensions`: Disable Pi extensions (incompatible with `--live`)
 - `--verbose`: Enable verbose output
 
-Headless turn cost display is provider-neutral. Set `headlessUi.turnCostDisplayThresholdUsd` in `.juno_task/config.json` (default `0.5`), or override it with `HEADLESS_UI_TURN_COST_DISPLAY_THRESHOLD_USD`. Authoritative per-turn cost is shown only when it is strictly above the threshold; unavailable cost is omitted.
+Headless turn cost display is provider-neutral. Set `headlessUi.turnCostDisplayThresholdUsd` in `.juno_task/config.json` (default `0.5`), or override it with `HEADLESS_UI_TURN_COST_DISPLAY_THRESHOLD_USD`. Authoritative per-turn cost is shown as a `[STATUS]` block only when it is strictly above the threshold; unavailable cost and ordinary `turn_end` events are omitted. Tool failures are colored red only when Pi supplies structured `isError:true`; words such as `error`, `failed`, or `blocked` in successful output do not alter styling.
 
 #### Via yylo
 
