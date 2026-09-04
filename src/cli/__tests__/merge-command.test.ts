@@ -151,20 +151,18 @@ describe('merge queue CLI', () => {
     expect(invoke).toHaveBeenCalledWith('arbiter-run', undefined, ['--through', 'T123']);
   });
 
-  it('forwards stable plan projection and stale-plan execution options', async () => {
+  it('forwards stable plan projection and ordinary execution options', async () => {
     const invoke = vi.fn(async () => undefined);
     const program = new Command().exitOverride();
     configureMergeQueueCommand(program, invoke);
     await program.parseAsync(['node', 'yy', 'merge', 'plan', 'T123', '--against', 'HEAD', '--json']);
     expect(invoke).toHaveBeenCalledWith('plan', 'T123', ['--against', 'HEAD', '--json']);
     invoke.mockClear();
-    await program.parseAsync(['node', 'yy', 'merge', 'resolve', 'T123', '--plan-id', 'abc',
-      '--train-plan', '/train-plan.json']);
-    expect(invoke).toHaveBeenCalledWith('resolve', 'T123', ['--plan-id', 'abc',
-      '--train-plan', '/train-plan.json']);
+    await program.parseAsync(['node', 'yy', 'merge', 'resolve', 'T123', '--plan-id', 'abc']);
+    expect(invoke).toHaveBeenCalledWith('resolve', 'T123', ['--plan-id', 'abc']);
     invoke.mockClear();
-    await program.parseAsync(['node', 'yy', 'merge', 'next', '--train-plan', '/train-plan.json']);
-    expect(invoke).toHaveBeenCalledWith('next', undefined, ['--train-plan', '/train-plan.json']);
+    await program.parseAsync(['node', 'yy', 'merge', 'next']);
+    expect(invoke).toHaveBeenCalledWith('next');
     invoke.mockClear();
     await program.parseAsync(['node', 'yy', 'merge', 'reconcile', 'plan', 'T123']);
     expect(invoke).toHaveBeenCalledWith('reconcile', undefined, ['plan', 'T123']);
