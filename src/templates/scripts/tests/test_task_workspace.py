@@ -1891,6 +1891,20 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
         self.assertEqual((receipt["surface"], receipt["operation"],
                           receipt["policy_operation"], receipt["task_id"]),
                          ("merge", "supersede-lifecycle-journal", "orchestration", "WxK4xy"))
+    def test_merge_recover_authority_drift_audit_is_exact_and_unknown_operations_refuse(self) -> None:
+        audit_root = self.controller / ".juno_task/runtime/control-audit/merge"
+        receipt = task_runtime.record_control_audit(
+            self.controller, "merge", "recover-authority-drift", "X")
+        audit = json.loads(Path(receipt["path"]).read_text())
+        self.assertEqual((audit["surface"], audit["operation"], audit["task_id"],
+                          audit["policy_operation"]),
+                         ("merge", "recover-authority-drift", "X", "orchestration"))
+        before = sorted(audit_root.glob("*.json"))
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
+                                    "unsupported merge audit operation: recover-authority-drift-unknown"):
+            task_runtime.record_control_audit(
+                self.controller, "merge", "recover-authority-drift-unknown", "X")
+        self.assertEqual(sorted(audit_root.glob("*.json")), before)
 
     def test_clean_working_umbrella_recovery_preserves_predecessor_and_is_idempotent(self) -> None:
         declaration = self.umbrella_fixture()
