@@ -91,6 +91,20 @@ describe('merge queue CLI', () => {
     expect(invoke).toHaveBeenCalledWith('recover-full-suite-failure', 'T123', args);
   });
 
+  it('forwards every exact semantic-repair pre-dispatch recovery identity', async () => {
+    const invoke = vi.fn(async () => undefined);
+    const program = new Command().exitOverride();
+    configureMergeQueueCommand(program, invoke);
+    const args = ['--attempt', '232', '--terminal-receipt', '/attempt-232-failed.json',
+      '--terminal-receipt-sha256', 'a'.repeat(64), '--expected-revision', 'b'.repeat(64),
+      '--run-id', '1788481850518348000-e36d9830ea1a078f', '--scope-sha256', 'c'.repeat(64),
+      '--journal-sha256', 'd'.repeat(64), '--worker-id', 'semantic-repair-0001',
+      '--predispatch-receipt', '/controller-predispatch-receipt.json',
+      '--predispatch-receipt-sha256', 'e'.repeat(64)];
+    await program.parseAsync(['node', 'yy', 'merge', 'recover-repair-predispatch', 'T123', ...args]);
+    expect(invoke).toHaveBeenCalledWith('recover-repair-predispatch', 'T123', args);
+  });
+
   it('forwards every exact authority-drift recovery identity', async () => {
     const invoke = vi.fn(async () => undefined);
     const program = new Command().exitOverride();
@@ -180,7 +194,7 @@ describe('merge queue CLI', () => {
     const program = new Command();
     configureMergeQueueCommand(program, async () => undefined);
     const merge = program.commands.find((command) => command.name() === 'merge');
-    expect(merge?.commands.map((command) => command.name())).toEqual(['status', 'drive', 'arbiter', 'plan', 'next', 'resolve', 'review', 'reopen', 'recover-full-suite-failure', 'recover-authority-drift', 'supersede-lifecycle-journal', 'withdraw', 'reconcile', 'refresh']);
+    expect(merge?.commands.map((command) => command.name())).toEqual(['status', 'drive', 'arbiter', 'plan', 'next', 'resolve', 'review', 'reopen', 'recover-full-suite-failure', 'recover-repair-predispatch', 'recover-authority-drift', 'supersede-lifecycle-journal', 'withdraw', 'reconcile', 'refresh']);
     expect(merge?.commands[0]?.registeredArguments).toHaveLength(0);
     expect(merge?.commands[1]?.registeredArguments).toHaveLength(0);
     expect(merge?.commands[3]?.registeredArguments[0]?.required).toBe(true);
@@ -190,7 +204,8 @@ describe('merge queue CLI', () => {
     expect(merge?.commands[7]?.registeredArguments[0]?.required).toBe(true);
     expect(merge?.commands[8]?.registeredArguments[0]?.required).toBe(true);
     expect(merge?.commands[9]?.registeredArguments[0]?.required).toBe(true);
-    expect(merge?.commands[10]?.registeredArguments).toHaveLength(0);
+    expect(merge?.commands[10]?.registeredArguments[0]?.required).toBe(true);
+    expect(merge?.commands[11]?.registeredArguments).toHaveLength(0);
   });
 
   it('forwards the bounded withdraw operator reason', async () => {
@@ -228,6 +243,8 @@ describe('merge queue CLI', () => {
     expect(command('resolve')?.description()).toContain('Explicit recovery mutation');
     expect(command('recover-full-suite-failure')?.description()).toContain('receipt-bound');
     expect(command('recover-full-suite-failure')?.description()).toContain('one deterministic');
+    expect(command('recover-repair-predispatch')?.description()).toContain('Receipt-bound');
+    expect(command('recover-repair-predispatch')?.description()).toContain('exact existing');
     expect(command('recover-authority-drift')?.description()).toContain('receipt-bound recovery');
     expect(command('recover-authority-drift')?.description()).toContain('pre-CAS');
     expect(command('supersede-lifecycle-journal')?.description()).toContain('Terminalize');

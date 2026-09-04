@@ -2300,7 +2300,7 @@ def record_control_audit(controller: Path, surface: str, operation: str,
             "lease-status", "lease-heartbeat", "lease-handoff", "lease-successor",
             "lease-revoke", "lease-release"}:
         raise TaskWorkspaceError(f"unsupported task audit operation: {operation}")
-    if surface == "merge" and operation not in {"status", "drive", "next", "resolve", "review", "reopen", "reconcile", "refresh", "withdraw", "recover-full-suite-failure", "recover-authority-drift", "supersede-lifecycle-journal"}:
+    if surface == "merge" and operation not in {"status", "drive", "next", "resolve", "review", "reopen", "reconcile", "refresh", "withdraw", "recover-full-suite-failure", "recover-repair-predispatch", "recover-authority-drift", "supersede-lifecycle-journal"}:
         raise TaskWorkspaceError(f"unsupported merge audit operation: {operation}")
     if forwarded_policy is not None and forwarded_policy != expected_policy:
         raise TaskWorkspaceError(
@@ -6265,21 +6265,33 @@ def _launch_task_worker(controller: Path, task_id: str, record: dict[str, Any],
                         run_dir: Path, prompt_seed: Path, *, repair: bool,
                         timeout_seconds: int,
                         context_bytes: bytes = b"",
-                        hydration_gate: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+                        hydration_gate: Optional[dict[str, Any]] = None,
+                        reuse_existing_admission: bool = False) -> dict[str, Any]:
     worktree = Path(record["worktree"])
     before = git(worktree, "rev-parse", "HEAD")
-    if hydration_gate is None:
-        hydration_gate = _managed_hydration_gate(controller, record)
-        record = hydration_gate["record"]
-    create, verify, edit = _managed_worker_receipts(run_dir, record, hydration_gate)
     prompt = run_dir / "worker-prompt.md"
-    task_data = task_file(controller, task_id).read_bytes()
-    seed = prompt_seed.read_bytes()
-    if not seed or len(seed) + len(task_data) + len(context_bytes) > 4 * 1024 * 1024:
-        raise TaskWorkspaceError("managed task-run prompt is empty or unbounded")
-    prompt.write_bytes(seed + b"\n\n# Canonical task\n\n" + task_data
-                       + (b"\n\n# Exact failure context\n\n" + context_bytes
-                          if context_bytes else b""))
+    if reuse_existing_admission:
+        create, verify, edit = (run_dir / "create-receipt.json",
+                                run_dir / "verify-receipt.json",
+                                run_dir / "edit-preflight-receipt.json")
+        for label, path in (("create", create), ("verify", verify), ("edit-preflight", edit)):
+            if not path.is_file():
+                raise TaskWorkspaceError(
+                    f"same-worker redispatch {label} receipt is unavailable")
+        if not prompt.is_file() or not prompt.read_bytes():
+            raise TaskWorkspaceError("same-worker redispatch prompt is unavailable")
+    else:
+        if hydration_gate is None:
+            hydration_gate = _managed_hydration_gate(controller, record)
+            record = hydration_gate["record"]
+        create, verify, edit = _managed_worker_receipts(run_dir, record, hydration_gate)
+        task_data = task_file(controller, task_id).read_bytes()
+        seed = prompt_seed.read_bytes()
+        if not seed or len(seed) + len(task_data) + len(context_bytes) > 4 * 1024 * 1024:
+            raise TaskWorkspaceError("managed task-run prompt is empty or unbounded")
+        prompt.write_bytes(seed + b"\n\n# Canonical task\n\n" + task_data
+                           + (b"\n\n# Exact failure context\n\n" + context_bytes
+                              if context_bytes else b""))
     out_dir = run_dir / "managed-agent"
     runner = controller / ".juno_task/scripts/managed_agent_runner.py"
     branch = git(controller, "symbolic-ref", "-q", "HEAD")

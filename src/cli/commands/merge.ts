@@ -5,7 +5,7 @@ import { Command } from 'commander';
 import { routeControlPlane } from '../../utils/control-plane-router.js';
 import { checkpointControllerAfterFinalization } from '../../utils/controller-checkpoint.js';
 
-export type MergeQueueOperation = 'status' | 'drive' | 'arbiter-status' | 'arbiter-run' | 'plan' | 'next' | 'resolve' | 'review' | 'reopen' | 'recover-full-suite-failure' | 'recover-authority-drift' | 'supersede-lifecycle-journal' | 'reconcile' | 'refresh' | 'withdraw';
+export type MergeQueueOperation = 'status' | 'drive' | 'arbiter-status' | 'arbiter-run' | 'plan' | 'next' | 'resolve' | 'review' | 'reopen' | 'recover-full-suite-failure' | 'recover-repair-predispatch' | 'recover-authority-drift' | 'supersede-lifecycle-journal' | 'reconcile' | 'refresh' | 'withdraw';
 export type MergeQueueInvoker = (
   operation: MergeQueueOperation,
   taskId?: string,
@@ -238,6 +238,35 @@ export function configureMergeQueueCommand(
       '--run-id', options.runId,
       '--scope-sha256', options.scopeSha256,
       '--journal-sha256', options.journalSha256,
+    ]));
+  merge.command('recover-repair-predispatch')
+    .description('Receipt-bound zero-cost recovery for the exact existing semantic repair worker')
+    .argument('<task-id>', 'REVIEW_FINDINGS task with one refused semantic-repair worker')
+    .requiredOption('--attempt <number>', 'Exact terminal target-arbiter attempt')
+    .requiredOption('--terminal-receipt <path>', 'Canonical terminal failed-arbiter receipt')
+    .requiredOption('--terminal-receipt-sha256 <sha256>', 'Exact terminal receipt bytes')
+    .requiredOption('--expected-revision <sha256>', 'Exact lifecycle record revision')
+    .requiredOption('--run-id <id>', 'Exact managed merge-drive run identity')
+    .requiredOption('--scope-sha256 <sha256>', 'Exact frozen FIFO scope identity')
+    .requiredOption('--journal-sha256 <sha256>', 'Exact nonterminal journal bytes')
+    .requiredOption('--worker-id <id>', 'Exact existing semantic-repair worker ID')
+    .requiredOption('--predispatch-receipt <path>', 'Canonical no-provider receipt')
+    .requiredOption('--predispatch-receipt-sha256 <sha256>', 'Exact no-provider receipt bytes')
+    .action((taskId: string, options: {
+      attempt: string; terminalReceipt: string; terminalReceiptSha256: string;
+      expectedRevision: string; runId: string; scopeSha256: string; journalSha256: string;
+      workerId: string; predispatchReceipt: string; predispatchReceiptSha256: string;
+    }) => invoke('recover-repair-predispatch', taskId, [
+      '--attempt', options.attempt,
+      '--terminal-receipt', options.terminalReceipt,
+      '--terminal-receipt-sha256', options.terminalReceiptSha256,
+      '--expected-revision', options.expectedRevision,
+      '--run-id', options.runId,
+      '--scope-sha256', options.scopeSha256,
+      '--journal-sha256', options.journalSha256,
+      '--worker-id', options.workerId,
+      '--predispatch-receipt', options.predispatchReceipt,
+      '--predispatch-receipt-sha256', options.predispatchReceiptSha256,
     ]));
   merge.command('recover-authority-drift')
     .description('Explicit receipt-bound recovery from terminal pre-CAS authority drift to fenced editable WORKING')
