@@ -7,7 +7,7 @@ import { execa } from 'execa';
 import { afterEach, describe, expect, it } from 'vitest';
 import { useSharedHeavyWorkloadLock } from '../../test-utils/resource-lock.js';
 import packageJson from '../../../package.json';
-import { inspect, inspectPackedTarball, runSyntheticLeakageCanaries } from '../../../scripts/scan-benchmark-release-artifacts.mjs';
+import { inspect, inspectPackedTarball, isSensitiveEnvironmentName, runSyntheticLeakageCanaries } from '../../../scripts/scan-benchmark-release-artifacts.mjs';
 import { MAX_BENCHMARK_RELEASE_COMMAND_TIMEOUT_MS, runBoundedReleaseCommand } from '../../../scripts/bounded-release-command.mjs';
 import {
   BENCHMARK_VERSION_RANGE,
@@ -62,6 +62,14 @@ afterEach(async () => {
 });
 
 describe('benchmark release leakage canaries', () => {
+  it('scans private path and credential variables without treating generic XDG session metadata as a secret', () => {
+    for (const name of ['HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'NPM_TOKEN', 'API_KEY']) {
+      expect(isSensitiveEnvironmentName(name), name).toBe(true);
+    }
+    for (const name of ['XDG_SESSION_CLASS', 'XDG_CURRENT_DESKTOP', 'PATH']) {
+      expect(isSensitiveEnvironmentName(name), name).toBe(false);
+    }
+  });
   it('runs every canary through the production rejection path and hashes its actual failure', () => {
     const failures = new Map<string, Error & { detectedClasses: string[] }>();
     const calls: Array<{ label: string; count: boolean }> = [];
