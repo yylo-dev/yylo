@@ -9,45 +9,35 @@ import { ManagedProjectAssets } from '../../../utils/managed-project-assets.js';
 const sha256 = (value: Buffer | string) => createHash('sha256').update(value).digest('hex');
 
 export const REAL_METADATA_CONTROLLER_TARGET_REF =
-  'bb5483cde24518d9a727c0633deece60ec0d56a9';
+  '9f304582967514ccbef6ac9be9ebc96d7ef36291';
 export const REAL_STALE_CONTROLLER_SCRIPTS = {
   'managed_agent_runner.py': {
-    targetSha256: '01cd94c975de13c4b7744317fb6b1083c62f154328cea2c8cda2f783044fc17b',
+    targetSha256: 'd37df7d5a9b5bfeecaef7e29876535f437a1d99ac2171fa36cd49a4625bd14c3',
     staleBlob: 'b1bbfa5e8a0220f2d60b1d162b91055ea64f686f',
     staleSha256: '506451eb01ab720bdfe6e32fa4ff435fde53ede01c2fc6c123d4884da83eead5',
   },
   'merge_queue.py': {
-    targetSha256: '0d11220d6998fe456d0aeee8ebc113cbabb601515fa94873ea9f496919881c76',
+    targetSha256: '24a25e905c40c80a306b91220842cf11c1759a0772458d319aa553dcf7d7d768',
     staleBlob: '52c166d2ef414ca84547a5bcb42b99fdf9d5e2d6',
     staleSha256: 'd46dca5d1309d3069480ad5b2cdfe67e581925fbe23e127437424a59da05e862',
   },
-  'release_train.py': {
-    targetSha256: '943a64576f6808137491d9eef8e419eefd21596b171ef36f27fd0968b593ed88',
-    staleBlob: '17eac999bf505e5c83d5660d912a8dae88d150c7',
-    staleSha256: '4a7a3e916d816057453d6aeb049cbd83a5ed2e86594527afcadcad1a9683119c',
-  },
   'task_workspace.py': {
-    targetSha256: '11e7dfc65e0be869fc8a1f2beafeebaf141d6c2c7f3fde3547a4c329b1214473',
+    targetSha256: '307ac1cce8d13e5c2bc1e0a47326359ce014fe7e1d19b8371b577c34126dd77d',
     staleBlob: '989dfd43547c646d6e88478cfe47a27f7f997d8e',
     staleSha256: '861abba186bc8f87e76c3c1204e50eed8f07b6797bd6f38a582f6c6560e95c48',
   },
   'tests/test_managed_agent_runner.py': {
-    targetSha256: '2d4856ad3e06f1f8c7cddb5885a3c8ce8379568c68b0f3cee4db43a9b902c9ec',
+    targetSha256: '679f2a2e17babe2151d65e52126015e4b9168c54433b4cbf734ccde24c7cc78b',
     staleBlob: 'f2fa9ecc94b14342d1591fb5b6326f29609e77bb',
     staleSha256: '30652580f93cb4150b4435c868e1b750cdfaa7a2e9b188d124fd3668f3d902f4',
   },
   'tests/test_merge_queue.py': {
-    targetSha256: '79a545a5bb33993d5831d28cd6825130bcb197fadbaafbfb6698e1464900de6c',
+    targetSha256: 'b74988042d33f03c312db0afab869dd9d2f36698cf0440371bd14f0dd40af4ae',
     staleBlob: '842f255e1d93470af02b068c5171657e5090f8ec',
     staleSha256: 'a7d3f9619943537660cab3741096aeb51c60d71f7215ece6cf796e798c41d41f',
   },
-  'tests/test_release_train.py': {
-    targetSha256: 'af813530596ecec54f49996b399f19563ac84ceaaf8bd7f1658ba8d769c53b09',
-    staleBlob: '8d7684b67957283e4ec418d59df317533fcbb955',
-    staleSha256: '05e50092027419bf747fd864ab987c9d30e0f2975f43110e20627bbb757f11f3',
-  },
   'tests/test_task_workspace.py': {
-    targetSha256: '6200a57dbffd4e535a307fe7e4ca808e0a26c45b9c5db51b6391fcf3d4a292d5',
+    targetSha256: 'bcff3e8eca644b733f4ea6150e0bfad599676ee2f39aec8100c28f477db2fc2a',
     staleBlob: '8eb5516fbcd6d71da53cc74b424078a304c55561',
     staleSha256: '1a12eee625de2f2f2b81fa4a5ff931a08b64807d8afab3b501a0c4f009791051',
   },
@@ -158,8 +148,8 @@ export async function createTargetBoundMetadataController(
     });
   }
   const changedScripts = Object.keys(REAL_STALE_CONTROLLER_SCRIPTS);
-  // Generic binary coverage uses target-only markers to exercise the same
-  // eight-path mismatch without depending on repository history. The exact
+  // Generic binary coverage uses target-only markers for active managed
+  // scripts without reviving retired compatibility tombstones. The exact
   // protected-target regression below instead uses the immutable Git bytes.
   if (!options.exactTargetRef) {
     for (const name of changedScripts) {
