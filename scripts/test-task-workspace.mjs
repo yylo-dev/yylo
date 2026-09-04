@@ -108,7 +108,11 @@ function parsePosixProcessInventory(output) {
 
 async function processInventory() {
   if (process.platform !== 'win32') {
-    const inventory = await captureBounded('ps', ['eww', '-axo', 'pid=,ppid=,pgid=,lstart=,command=']);
+    // procps-ng parses a bare `eww` as BSD personality and then rejects the
+    // following `-x`; Linux requires the option's leading dash. Preserve the
+    // BSD form used by macOS ps.
+    const psEnvironmentArgs = process.platform === 'linux' ? ['-eww'] : ['eww'];
+    const inventory = await captureBounded('ps', [...psEnvironmentArgs, '-axo', 'pid=,ppid=,pgid=,lstart=,command=']);
     return inventory.ok
       ? { rows: parsePosixProcessInventory(inventory.output), error: null }
       : { rows: [], error: inventory.error };
