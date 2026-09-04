@@ -5,7 +5,7 @@ import { Command } from 'commander';
 import { routeControlPlane } from '../../utils/control-plane-router.js';
 import { checkpointControllerAfterFinalization } from '../../utils/controller-checkpoint.js';
 
-export type MergeQueueOperation = 'status' | 'drive' | 'arbiter-status' | 'arbiter-run' | 'plan' | 'next' | 'resolve' | 'review' | 'reopen' | 'reconcile' | 'refresh' | 'withdraw';
+export type MergeQueueOperation = 'status' | 'drive' | 'arbiter-status' | 'arbiter-run' | 'plan' | 'next' | 'resolve' | 'review' | 'reopen' | 'recover-authority-drift' | 'supersede-lifecycle-journal' | 'reconcile' | 'refresh' | 'withdraw';
 export type MergeQueueInvoker = (
   operation: MergeQueueOperation,
   taskId?: string,
@@ -201,6 +201,55 @@ export function configureMergeQueueCommand(
     .action((taskId: string, options: { planId?: string }) => options.planId
       ? invoke('reopen', taskId, ['--plan-id', options.planId])
       : invoke('reopen', taskId));
+  merge.command('recover-authority-drift')
+    .description('Explicit receipt-bound recovery from terminal pre-CAS authority drift to fenced editable WORKING')
+    .argument('<task-id>', 'MERGING task bound by the failed arbiter receipt')
+    .requiredOption('--attempt <number>', 'Exact terminal target-arbiter attempt')
+    .requiredOption('--terminal-receipt <path>', 'Canonical terminal failed-arbiter receipt')
+    .requiredOption('--terminal-receipt-sha256 <sha256>', 'Exact terminal receipt byte identity')
+    .requiredOption('--expected-revision <sha256>', 'Exact current lifecycle record revision')
+    .action((taskId: string, options: {
+      attempt: string; terminalReceipt: string; terminalReceiptSha256: string; expectedRevision: string;
+    }) => invoke('recover-authority-drift', taskId, [
+      '--attempt', options.attempt,
+      '--terminal-receipt', options.terminalReceipt,
+      '--terminal-receipt-sha256', options.terminalReceiptSha256,
+      '--expected-revision', options.expectedRevision,
+    ]));
+  merge.command('supersede-lifecycle-journal')
+    .description('Terminalize one receipt-recovered pre-CAS stale merge lifecycle journal')
+    .requiredOption('--run-id <id>', 'Exact managed merge-drive run identity')
+    .requiredOption('--expected-journal-revision <number>', 'Exact nonterminal journal revision')
+    .requiredOption('--expected-journal-sha256 <sha256>', 'Exact nonterminal journal bytes')
+    .requiredOption('--scope-sha256 <sha256>', 'Exact frozen FIFO scope identity')
+    .requiredOption('--arbiter-attempt <number>', 'Exact terminal failed arbiter attempt')
+    .requiredOption('--terminal-receipt <path>', 'Canonical terminal failed-arbiter receipt')
+    .requiredOption('--terminal-receipt-sha256 <sha256>', 'Exact failed-arbiter receipt bytes')
+    .requiredOption('--recovered-task <task-id>', 'Receipt-recovered and requeued frozen task')
+    .requiredOption('--recovery-receipt <path>', 'Canonical pre-CAS task recovery receipt')
+    .requiredOption('--recovery-receipt-sha256 <sha256>', 'Exact task recovery receipt bytes')
+    .requiredOption('--expected-target-sha <sha>', 'Exact unchanged protected target')
+    .requiredOption('--expected-current-fifo-sha256 <sha256>', 'Exact current actionable FIFO identity')
+    .action((options: {
+      runId: string; expectedJournalRevision: string; expectedJournalSha256: string;
+      scopeSha256: string; arbiterAttempt: string; terminalReceipt: string;
+      terminalReceiptSha256: string; recoveredTask: string; recoveryReceipt: string;
+      recoveryReceiptSha256: string; expectedTargetSha: string;
+      expectedCurrentFifoSha256: string;
+    }) => invoke('supersede-lifecycle-journal', undefined, [
+      '--run-id', options.runId,
+      '--expected-journal-revision', options.expectedJournalRevision,
+      '--expected-journal-sha256', options.expectedJournalSha256,
+      '--scope-sha256', options.scopeSha256,
+      '--arbiter-attempt', options.arbiterAttempt,
+      '--terminal-receipt', options.terminalReceipt,
+      '--terminal-receipt-sha256', options.terminalReceiptSha256,
+      '--recovered-task', options.recoveredTask,
+      '--recovery-receipt', options.recoveryReceipt,
+      '--recovery-receipt-sha256', options.recoveryReceiptSha256,
+      '--expected-target-sha', options.expectedTargetSha,
+      '--expected-current-fifo-sha256', options.expectedCurrentFifoSha256,
+    ]));
   merge
     .command('withdraw')
     .description('Withdraw one queued task after proving no live producer owns its claims')
