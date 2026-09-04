@@ -143,7 +143,23 @@ export function configureMergeQueueCommand(
   invoke: MergeQueueInvoker = invokeMergeQueue,
 ): void {
   const merge = program.command('merge').description('Observe delivery or explicitly run one fenced target owner');
-  merge.command('status').description('Read-only queue and blocker observation').action(() => invoke('status'));
+  merge.command('status')
+    .description('Read-only bounded queue summary; request detail or legacy exhaustive output explicitly')
+    .option('--detail [task-id]', 'Bounded detail for TASK_ID, or the active FIFO attempt')
+    .option('--full', 'Legacy exhaustive diagnostic representation')
+    .option('--json', 'Force structured JSON when stdout is interactive')
+    .action((options: { detail?: string | boolean; full?: boolean; json?: boolean }) => {
+      if (options.full && options.detail !== undefined) {
+        throw new Error('merge status accepts only one of --detail or --full');
+      }
+      const args = [
+        ...(options.full ? ['--full'] : []),
+        ...(options.detail === true ? ['--detail']
+          : typeof options.detail === 'string' ? ['--detail', options.detail] : []),
+        ...(!options.json && process.stdout.isTTY && !options.full ? ['--human'] : []),
+      ];
+      return args.length ? invoke('status', undefined, args) : invoke('status');
+    });
   merge
     .command('drive')
     .description('Explicit mutation: run the controller-owned typed workflow for a frozen FIFO scope')
