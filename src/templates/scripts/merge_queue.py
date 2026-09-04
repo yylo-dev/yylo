@@ -14,6 +14,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -42,6 +43,8 @@ AUTHORITY_SCHEMA = "juno_merge_live_authority.v1"
 PRE_CAS_EDIT_RECOVERY_SCHEMA = "juno_merge_pre_cas_edit_recovery.v1"
 PRE_CAS_EDIT_RECOVERY_ROOT = ".juno_task/runtime/merge-queue/pre-cas-edit-recovery"
 LIFECYCLE_SUPERSESSION_SCHEMA = "juno_merge_lifecycle_journal_supersession.v1"
+FULL_SUITE_REPAIR_SCHEMA = "juno_merge_deterministic_full_suite_repair.v1"
+FULL_SUITE_REPAIR_ROOT = ".juno_task/runtime/merge-queue/full-suite-repair"
 WITHDRAWABLE_STATES = {"QUEUED", "AWAITING_RISK", "AWAITING_RELEASE", "REVIEW_FINDINGS",
                        "REVIEW_FINDINGS_EXHAUSTED", "CONFLICT", "CONFLICT_RESOLVED",
                        "REOPENING", "REQUEUING_STALE"}
@@ -4670,6 +4673,12 @@ def merge_review(controller: Path, task_id: str, *, overlap_suite: bool = False)
     with review_lock(repository, task_id):
         with task_runtime.state_lock(controller):
             record = task_runtime.read_state(controller)["tasks"].get(task_id)
+        if (isinstance(record, dict)
+                and record.get("last_queue_outcome") == "FAILED_FULL_SUITE"
+                and _record_has_deterministic_router_finding(record)):
+            raise MergeQueueError(
+                "unchanged deterministic full-suite failure cannot be rerun; use the "
+                "typed safe_next_command from yy merge status")
         if not isinstance(record, dict) or record.get("state") not in {
                 "AWAITING_RISK", "AWAITING_RELEASE", "REQUEUING_STALE"}:
             raise MergeQueueError("task has no frozen candidate awaiting risk evidence")
@@ -5570,6 +5579,323 @@ def apply_target_refresh(controller: Path, task_id: str, receipt_path: str,
         return {**updated, "outcome": "TARGET_REFRESH_APPLIED", "target_refresh": reference}
 
 
+def _full_suite_repair_receipt_root(controller: Path) -> Path:
+    return (controller / FULL_SUITE_REPAIR_ROOT).resolve()
+
+
+def _deterministic_router_finding(receipt: dict[str, Any], command_cwd: str) -> dict[str, Any]:
+    """Classify only the receipt shape proven deterministic by attempts 230/231."""
+    result = receipt.get("result")
+    retries = result.get("retries") if isinstance(result, dict) else None
+    integrity = result.get("result_integrity") if isinstance(result, dict) else None
+    files = retries.get("files") if isinstance(retries, dict) else None
+    if (not isinstance(result, dict) or result.get("exit_code") == 0
+            or result.get("timed_out") is True
+            or not isinstance(integrity, dict) or integrity.get("contradiction") is not False
+            or not isinstance(retries, dict) or retries.get("absorbed") is not False
+            or not isinstance(files, list) or not files):
+        raise MergeQueueError(
+            "deterministic full-suite repair refused (environmental_only): "
+            "receipt has no repeated deterministic test finding")
+    identities: set[str] = set()
+    failure_paths: set[str] = set()
+    for row in files:
+        attempts = row.get("attempts") if isinstance(row, dict) else None
+        path = row.get("file") if isinstance(row, dict) else None
+        tail = row.get("final_tail") if isinstance(row, dict) else None
+        if (not isinstance(path, str) or Path(path).is_absolute() or ".." in Path(path).parts
+                or not path.endswith("src/bin/__tests__/router-allowlist.test.ts")
+                or row.get("passed") is not False or not isinstance(tail, str)
+                or "route_registered_product_control" not in tail
+                or not isinstance(attempts, list) or len(attempts) < 2
+                or any(not isinstance(item, dict) or item.get("exit_code") == 0
+                       or item.get("timed_out") is not False for item in attempts)):
+            raise MergeQueueError(
+                "deterministic full-suite repair refused (unsupported_finding): "
+                "failure is not the repeated router-allowlist contract")
+        failure_paths.add(str(Path(command_cwd) / path))
+        identities.update(re.findall(r"['\"]((?:task|merge|evidence):[a-z0-9-]+)['\"]", tail))
+    if not identities:
+        raise MergeQueueError(
+            "deterministic full-suite repair refused (finding_malformed): "
+            "router finding has no exact missing command identity")
+    surfaces = {identity.split(":", 1)[0] for identity in identities}
+    allowed = set(failure_paths)
+    allowed.add(str(Path(command_cwd) / "src/bin/yylo.sh"))
+    for surface in surfaces:
+        allowed.add(str(Path(command_cwd) / f"src/cli/commands/{surface}.ts"))
+        allowed.add(str(Path(command_cwd) / f"src/cli/__tests__/{surface}-command.test.ts"))
+    body = {"kind": "router_allowlist_missing_registered_command",
+            "identities": sorted(identities), "failure_paths": sorted(failure_paths),
+            "allowed_paths": sorted(allowed)}
+    return {**body, "finding_sha256": digest(body)}
+
+
+def _record_has_deterministic_router_finding(record: dict[str, Any]) -> bool:
+    attempt = record.get("queue_attempt")
+    risk = attempt.get("risk") if isinstance(attempt, dict) else None
+    progress = risk.get("review_progress") if isinstance(risk, dict) else None
+    admission = progress.get("full_suite_admission") if isinstance(progress, dict) else None
+    references = admission.get("receipts") if isinstance(admission, dict) else None
+    if admission.get("state") != "FAILED" or not isinstance(references, list) or not references:
+        return False
+    reference = references[-1]
+    try:
+        path = Path(reference["receipt_path"])
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != reference["receipt_sha256"]:
+            return False
+        receipt = json.loads(data)
+        _deterministic_router_finding(receipt, receipt.get("command", {}).get("cwd", ""))
+    except (KeyError, OSError, json.JSONDecodeError, MergeQueueError):
+        return False
+    return True
+
+
+def _full_suite_repair_safe_next(controller: Path, repository: Path,
+                                 config: dict[str, Any], task_id: str,
+                                 record: dict[str, Any]) -> dict[str, Any]:
+    if (record.get("state") != "AWAITING_RISK"
+            or record.get("last_queue_outcome") != "FAILED_FULL_SUITE"):
+        return {"reason_code": None, "safe_next_command": None}
+    if not _record_has_deterministic_router_finding(record):
+        return {"reason_code": "failed_full_suite_not_deterministic_repair",
+                "safe_next_command": "yy merge arbiter run"}
+    arbiter = _arbiter_state(_arbiter_root(controller, repository, config["target_ref"]))
+    pointer_path = controller / MERGE_DRIVE_ROOT / "latest.json"
+    try:
+        pointer = json.loads(pointer_path.read_text())
+        run_id = pointer["run_id"]
+        journal_path = controller / MERGE_DRIVE_ROOT / run_id / "journal.json"
+        journal_bytes = journal_path.read_bytes()
+        journal = json.loads(journal_bytes)
+        terminal = arbiter["terminal_receipt"]
+        values_valid = (
+            arbiter.get("state") == "FAILED" and isinstance(arbiter.get("attempt"), int)
+            and isinstance(terminal, dict) and isinstance(terminal.get("path"), str)
+            and isinstance(terminal.get("sha256"), str)
+            and journal.get("run_id") == run_id
+            and pointer.get("scope_sha256") == journal.get("scope_sha256"))
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        values_valid = False
+    if not values_valid:
+        return {"reason_code": "deterministic_full_suite_repair_evidence_incomplete",
+                "safe_next_command": None}
+    command = " ".join([
+        "yy merge recover-full-suite-failure", shlex.quote(task_id),
+        "--attempt", str(arbiter["attempt"]),
+        "--terminal-receipt", shlex.quote(terminal["path"]),
+        "--terminal-receipt-sha256", terminal["sha256"],
+        "--expected-revision", digest(record),
+        "--run-id", shlex.quote(run_id),
+        "--scope-sha256", journal["scope_sha256"],
+        "--journal-sha256", hashlib.sha256(journal_bytes).hexdigest(),
+    ])
+    return {"reason_code": "deterministic_full_suite_repair_available",
+            "safe_next_command": command}
+
+
+def recover_deterministic_full_suite_failure(
+        controller: Path, task_id: str, arbiter_attempt: int,
+        terminal_receipt_path: str, terminal_receipt_sha256: str,
+        expected_record_revision: str, run_id: str, scope_sha256: str,
+        journal_sha256: str) -> dict[str, Any]:
+    """Authorize one queue-owned repair without replaying an unchanged suite."""
+    hashes = (terminal_receipt_sha256, expected_record_revision,
+              scope_sha256, journal_sha256)
+    if (not task_runtime.TASK_RE.fullmatch(task_id)
+            or not isinstance(arbiter_attempt, int) or isinstance(arbiter_attempt, bool)
+            or arbiter_attempt < 2 or not all(re.fullmatch(r"[0-9a-f]{64}", x or "")
+                                             for x in hashes)
+            or not re.fullmatch(r"[0-9]+-[0-9a-f]+", run_id or "")):
+        raise MergeQueueError("deterministic full-suite repair refused (malformed_request)")
+    config = task_runtime.load_config(controller)
+    repository = task_runtime.product_repository(controller, config)
+    arbiter_root = _arbiter_root(controller, repository, config["target_ref"])
+    supplied = Path(terminal_receipt_path).expanduser().resolve()
+    expected_terminal = (arbiter_root / "receipts"
+                         / f"attempt-{arbiter_attempt}-failed.json").resolve()
+    try:
+        terminal_bytes = supplied.read_bytes()
+        terminal = json.loads(terminal_bytes)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MergeQueueError(
+            "deterministic full-suite repair refused (receipt_malformed)") from exc
+    if (supplied != expected_terminal
+            or hashlib.sha256(terminal_bytes).hexdigest() != terminal_receipt_sha256
+            or terminal.get("schema_version") != TARGET_ARBITER_RECEIPT_SCHEMA
+            or terminal.get("attempt") != arbiter_attempt
+            or terminal.get("target_ref") != config["target_ref"]
+            or terminal.get("state") != "FAILED"):
+        raise MergeQueueError("deterministic full-suite repair refused (receipt_malformed)")
+    with review_lock(repository, task_id):
+        with _target_arbiter_claim(arbiter_root) as arbiter_claim:
+            if arbiter_claim is None:
+                raise MergeQueueError(
+                    "deterministic full-suite repair refused (live_producer)")
+            with target_lock(controller, repository, config["target_ref"]):
+                arbiter = _arbiter_state(arbiter_root)
+                predecessor = arbiter.get("successor_of") if isinstance(arbiter, dict) else None
+                predecessor_path = (arbiter_root / "receipts"
+                                    / f"attempt-{arbiter_attempt - 1}-failed.json").resolve()
+                try:
+                    predecessor_bytes = predecessor_path.read_bytes()
+                    predecessor_value = json.loads(predecessor_bytes)
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise MergeQueueError(
+                        "deterministic full-suite repair refused (predecessor_malformed)") from exc
+                if (not isinstance(arbiter, dict) or arbiter.get("state") != "FAILED"
+                        or arbiter.get("attempt") != arbiter_attempt
+                        or arbiter.get("terminal_receipt") != {
+                            "path": str(supplied), "sha256": terminal_receipt_sha256}
+                        or arbiter.get("target_sha_at_start")
+                            != task_runtime.ref_sha(repository, config["target_ref"])
+                        or predecessor != {"path": str(predecessor_path),
+                                           "sha256": hashlib.sha256(predecessor_bytes).hexdigest()}
+                        or predecessor_value.get("attempt") != arbiter_attempt - 1
+                        or predecessor_value.get("state") != "FAILED"):
+                    raise MergeQueueError(
+                        "deterministic full-suite repair refused (arbiter_identity_moved)")
+                pointer_path = controller / MERGE_DRIVE_ROOT / "latest.json"
+                journal_path = controller / MERGE_DRIVE_ROOT / run_id / "journal.json"
+                try:
+                    pointer = json.loads(pointer_path.read_text())
+                    journal_bytes = journal_path.read_bytes()
+                    journal = json.loads(journal_bytes)
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise MergeQueueError(
+                        "deterministic full-suite repair refused (lifecycle_malformed)") from exc
+                pending = journal.get("operations", [])[-1:] if isinstance(journal, dict) else []
+                if (hashlib.sha256(journal_bytes).hexdigest() != journal_sha256
+                        or pointer.get("run_id") != run_id
+                        or pointer.get("scope_sha256") != scope_sha256
+                        or journal.get("run_id") != run_id
+                        or journal.get("scope_sha256") != scope_sha256
+                        or journal.get("terminal") is True
+                        or journal.get("state") != "CLAIMED"
+                        or journal.get("initial_target_sha")
+                            != task_runtime.ref_sha(repository, config["target_ref"])
+                        or journal.get("attempts", {}).get("semantic_repairs") != 0
+                        or journal.get("repairs") != []
+                        or len(pending) != 1 or pending[0].get("task_id") != task_id
+                        or pending[0].get("phase") != "review"
+                        or pending[0].get("post_state") is not None):
+                    raise MergeQueueError(
+                        "deterministic full-suite repair refused (lifecycle_identity_moved)")
+                with task_runtime.state_lock(controller):
+                    state = task_runtime.read_state(controller)
+                    record = state["tasks"].get(task_id)
+                if (not isinstance(record, dict)
+                        or digest(record) != expected_record_revision):
+                    raise MergeQueueError(
+                        "deterministic full-suite repair refused (revision_mismatch)")
+                attempt = record.get("queue_attempt")
+                risk = attempt.get("risk") if isinstance(attempt, dict) else None
+                progress = risk.get("review_progress") if isinstance(risk, dict) else None
+                admission = progress.get("full_suite_admission") if isinstance(progress, dict) else None
+                if (record.get("state") != "AWAITING_RISK"
+                        or record.get("last_queue_outcome") != "FAILED_FULL_SUITE"
+                        or not isinstance(attempt, dict)
+                        or attempt.get("outcome") != "FAILED_FULL_SUITE"
+                        or record.get("review_round", 1) != 1
+                        or record.get("full_suite_repair") is not None
+                        or not isinstance(admission, dict) or admission.get("state") != "FAILED"
+                        or risk.get("plan", {}).get("candidate", {}).get("changed_paths")
+                            != record.get("changed_paths")):
+                    raise MergeQueueError(
+                        "deterministic full-suite repair refused (state_or_budget)")
+                candidate_sha = attempt.get("candidate_sha")
+                candidate_tree = attempt.get("candidate_tree")
+                target_sha = task_runtime.ref_sha(repository, config["target_ref"])
+                if (candidate_sha != risk.get("candidate_sha")
+                        or candidate_sha != risk.get("plan", {}).get("candidate", {}).get("candidate_sha")
+                        or task_runtime.git(repository, "rev-parse", f"{candidate_sha}^{{tree}}",
+                                            check=False) != candidate_tree
+                        or attempt.get("expected_target_sha") != target_sha):
+                    raise MergeQueueError(
+                        "deterministic full-suite repair refused (candidate_or_target_moved)")
+                policy = risk_runtime.load_policy(risk_policy_path(controller))
+                request = risk_request(repository, candidate_sha, config["target_ref"], target_sha)
+                plan = risk_runtime.classify(policy, request, risk_flags(record))
+                if plan != risk.get("plan"):
+                    raise MergeQueueError(
+                        "deterministic full-suite repair refused (policy_identity_moved)")
+                candidate_root = (task_runtime.exact_root(Path(attempt["candidate_checkout"]),
+                                                          "repair candidate")
+                                  if attempt.get("candidate_checkout")
+                                  else task_runtime.exact_root(Path(record["worktree"]),
+                                                               "repair feature worktree"))
+                validation_identity = full_validation_identity(
+                    controller, config, record, candidate_root, candidate_sha)
+                commands, routing = full_suite_selection(config, plan["candidate"]["changed_paths"])
+                verified = verify_queue_failed_admission(
+                    controller, task_id, plan, validation_identity, commands, routing, admission)
+                receipt_ref = verified["receipts"][-1]
+                receipt_path = Path(receipt_ref["receipt_path"])
+                receipt_bytes = receipt_path.read_bytes()
+                if hashlib.sha256(receipt_bytes).hexdigest() != receipt_ref["receipt_sha256"]:
+                    raise MergeQueueError(
+                        "deterministic full-suite repair refused (failed_receipt_moved)")
+                failed_receipt = json.loads(receipt_bytes)
+                finding = _deterministic_router_finding(
+                    failed_receipt, failed_receipt.get("command", {}).get("cwd", ""))
+                frozen_allowed = (record.get("creation_receipt") or {}).get(
+                    "allowed_paths", config["allowed_paths"])
+                if any(not task_runtime.path_within(path, frozen_allowed)
+                       for path in finding["allowed_paths"]):
+                    raise MergeQueueError(
+                        "deterministic full-suite repair refused (repair_path_not_admitted)")
+                producer_lock = receipt_path.parent / "producer.lock"
+                if not producer_lock.is_file():
+                    raise MergeQueueError(
+                        "deterministic full-suite repair refused (producer_fencing_missing)")
+                with producer_lock.open("r+b") as producer:
+                    try:
+                        fcntl.flock(producer.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError as exc:
+                        raise MergeQueueError(
+                            "deterministic full-suite repair refused (live_producer)") from exc
+                    body = {
+                        "schema_version": FULL_SUITE_REPAIR_SCHEMA, "task_id": task_id,
+                        "record_revision": expected_record_revision,
+                        "candidate_sha": candidate_sha, "candidate_tree": candidate_tree,
+                        "target_ref": config["target_ref"], "target_sha": target_sha,
+                        "failed_full_suite": receipt_ref, "finding": finding,
+                        "arbiter": {"attempt": arbiter_attempt,
+                                    "terminal_receipt": arbiter["terminal_receipt"],
+                                    "predecessor_receipt": predecessor},
+                        "lifecycle": {"run_id": run_id, "scope_sha256": scope_sha256,
+                                      "journal_sha256": journal_sha256},
+                        "budgets": {"repair_candidates": 1, "delta_review_groups": 1},
+                    }
+                    receipt_id = digest(body)
+                    repair_path = (_full_suite_repair_receipt_root(controller) / task_id
+                                   / f"{receipt_id}.json")
+                    with task_runtime.state_lock(controller):
+                        current = task_runtime.read_state(controller)
+                        if current["tasks"].get(task_id) != record:
+                            raise MergeQueueError(
+                                "deterministic full-suite repair refused (revision_mismatch)")
+                        reference = lifecycle_runtime.atomic_json(
+                            repair_path, {**body, "receipt_id": receipt_id}, exclusive=True)
+                        repair = {"schema_version": FULL_SUITE_REPAIR_SCHEMA,
+                                  "status": "READY", "repair_count": 0,
+                                  "delta_review_groups": 0,
+                                  "authorization_receipt": reference,
+                                  "finding": finding,
+                                  "allowed_paths": finding["allowed_paths"]}
+                        updated_risk = {**risk, "status": "REVIEW_FINDINGS",
+                                        "full_suite_repair": repair}
+                        updated_attempt = {**attempt, "risk": updated_risk,
+                                           "review": updated_risk}
+                        updated = {**record, "state": "REVIEW_FINDINGS",
+                                   "queue_attempt": updated_attempt,
+                                   "full_suite_repair": repair}
+                        current["tasks"][task_id] = updated
+                        task_runtime.write_state(controller, current)
+                    return {**updated, "outcome": "FULL_SUITE_REPAIR_AUTHORIZED"}
+
+
 def merge_reopen(controller: Path, task_id: str,
                  expected_plan_id: Optional[str] = None) -> dict[str, Any]:
     """Recoverable two-phase requeue after a new validated feature tip."""
@@ -5768,6 +6094,21 @@ def merge_reopen(controller: Path, task_id: str,
             changed = sorted(set(task_runtime.git(
                 worktree, "diff", "--name-only", f"{changed_base}..{new_tip}"
             ).splitlines()))
+            full_suite_repair = record.get("full_suite_repair")
+            if full_suite_repair is not None:
+                delta_paths = sorted(set(task_runtime.git(
+                    worktree, "diff", "--name-only", f"{record['tip_sha']}..{new_tip}"
+                ).splitlines()))
+                if (not isinstance(full_suite_repair, dict)
+                        or full_suite_repair.get("schema_version") != FULL_SUITE_REPAIR_SCHEMA
+                        or full_suite_repair.get("status") != "DISPATCHED"
+                        or full_suite_repair.get("repair_count") != 1
+                        or full_suite_repair.get("delta_review_groups") != 0
+                        or not delta_paths
+                        or any(path not in full_suite_repair.get("allowed_paths", [])
+                               for path in delta_paths)):
+                    raise MergeQueueError(
+                        "full-suite repair delta is unrelated or its absolute budget is exhausted")
             forbidden = [path for path in changed
                          if task_runtime.path_within(path, config["controller_private_paths"])]
             frozen_allowed = (record.get("creation_receipt") or {}).get(
@@ -5935,7 +6276,7 @@ def merge_reopen(controller: Path, task_id: str,
             raise MergeQueueError("target moved during resolved candidate reopen")
         checkout_value = reopen_attempt.get("old_candidate_checkout")
         token = reopen_attempt.get("old_candidate_token")
-        if checkout_value:
+        if checkout_value and record.get("full_suite_repair") is None:
             if not token:
                 raise MergeQueueError("old candidate ownership token is missing")
             checkout = Path(checkout_value)
@@ -5992,6 +6333,11 @@ def merge_reopen(controller: Path, task_id: str,
                        "last_validation_outcome": "PASSED",
                        "review_round": next_review_round,
                        "reopened_from_candidate_sha": reopen_attempt["old_candidate_sha"]})
+        full_suite_repair = record.get("full_suite_repair")
+        if isinstance(full_suite_repair, dict):
+            full_suite_repair = {**full_suite_repair, "status": "DELTA_REVIEW_PENDING",
+                                 "delta_review_groups": 1}
+            queued["full_suite_repair"] = full_suite_repair
         prior_findings_sha = record.get("prior_findings_candidate_sha")
         if reopen_attempt.get("source_state") == "REVIEW_FINDINGS":
             prior_findings_sha = reopen_attempt["old_candidate_sha"]
@@ -6295,6 +6641,18 @@ def status(controller: Path) -> dict[str, Any]:
                                          "AWAITING_RISK", "AWAITING_RELEASE", "REVIEW_FINDINGS",
                                          "REVIEW_FINDINGS_EXHAUSTED",
                                          "REOPENING", "REQUEUING_STALE", "MERGED", "WITHDRAWN"}]
+    for projection in rows:
+        record = tasks[projection["task_id"]]
+        projection.update(_full_suite_repair_safe_next(
+            controller, repository, config, projection["task_id"], record))
+        repair = record.get("full_suite_repair")
+        if isinstance(repair, dict):
+            projection["repair_status"] = repair.get("status")
+            projection["repair_count"] = repair.get("repair_count")
+            projection["delta_review_groups"] = repair.get("delta_review_groups")
+            if repair.get("status") == "READY":
+                projection["reason_code"] = "deterministic_full_suite_repair_ready"
+                projection["safe_next_command"] = "yy merge arbiter run"
     return {"schema_version": QUEUE_SCHEMA, "repository_identity": repository_identity(repository),
             "target_ref": config["target_ref"], "target_sha": task_runtime.ref_sha(repository, config["target_ref"]),
             "tasks": rows, "last_attempt": entry["last_attempt"],
@@ -6695,7 +7053,35 @@ def _merge_drive_claimed(controller: Path, through: Optional[str] = None) -> dic
                         # preserves the queue-owned REVIEW_FINDINGS state.
                         semantic_gate = task_runtime._managed_hydration_gate(controller, record)
                         record = semantic_gate["record"]
+                        repair_authorization = record.get("full_suite_repair")
                         repair = journal["repairs"][0] if journal["repairs"] else None
+                        if isinstance(repair_authorization, dict) and repair is None:
+                            if (repair_authorization.get("status") != "READY"
+                                    or repair_authorization.get("repair_count") != 0
+                                    or repair_authorization.get("delta_review_groups") != 0):
+                                blocker = {"category": "review_findings_exhausted",
+                                           "task_id": task_id}; break
+                            claimed_authorization = {**repair_authorization,
+                                                     "status": "DISPATCHED",
+                                                     "repair_count": 1}
+                            with task_runtime.state_lock(controller):
+                                claim_state = task_runtime.read_state(controller)
+                                current = claim_state["tasks"].get(task_id)
+                                if current != record:
+                                    raise MergeQueueError(
+                                        "full-suite repair authority moved before dispatch")
+                                current = {**record,
+                                           "full_suite_repair": claimed_authorization}
+                                attempt = current.get("queue_attempt")
+                                risk = attempt.get("risk") if isinstance(attempt, dict) else None
+                                if isinstance(risk, dict):
+                                    risk = {**risk, "full_suite_repair": claimed_authorization}
+                                    current["queue_attempt"] = {**attempt, "risk": risk,
+                                                                "review": risk}
+                                claim_state["tasks"][task_id] = current
+                                task_runtime.write_state(controller, claim_state)
+                            record = current
+                            semantic_gate = {**semantic_gate, "record": record}
                         repaired = (task_runtime._recover_task_worker(record, repair)
                                     if repair and not repair.get("terminal_state") else repair)
                         if repaired is None:
@@ -6707,7 +7093,10 @@ def _merge_drive_claimed(controller: Path, through: Optional[str] = None) -> dic
                                       "attempt_dir": str(repair_dir.resolve()),
                                       "before_sha": task_runtime.git(Path(record["worktree"]),
                                                                      "rev-parse", "HEAD"),
-                                      "task_id": task_id, "terminal_state": None}
+                                      "task_id": task_id, "terminal_state": None,
+                                      "authorization_receipt": (
+                                          repair_authorization.get("authorization_receipt")
+                                          if isinstance(repair_authorization, dict) else None)}
                             journal["repairs"].append(repair)
                             journal["attempts"]["semantic_repairs"] += 1
                             lifecycle_runtime.lifecycle_checkpoint(
@@ -7508,6 +7897,15 @@ def parser() -> argparse.ArgumentParser:
     reopen = sub.add_parser("reopen")
     reopen.add_argument("task_id")
     reopen.add_argument("--plan-id")
+    recover_suite = sub.add_parser("recover-full-suite-failure")
+    recover_suite.add_argument("task_id")
+    recover_suite.add_argument("--attempt", required=True, type=int)
+    recover_suite.add_argument("--terminal-receipt", required=True)
+    recover_suite.add_argument("--terminal-receipt-sha256", required=True)
+    recover_suite.add_argument("--expected-revision", required=True)
+    recover_suite.add_argument("--run-id", required=True)
+    recover_suite.add_argument("--scope-sha256", required=True)
+    recover_suite.add_argument("--journal-sha256", required=True)
     recover_drift = sub.add_parser("recover-authority-drift")
     recover_drift.add_argument("task_id")
     recover_drift.add_argument("--attempt", required=True, type=int)
@@ -7606,6 +8004,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             result = merge_review(controller, args.task_id)
         elif args.operation == "reopen":
             result = merge_reopen(controller, args.task_id, args.plan_id)
+        elif args.operation == "recover-full-suite-failure":
+            result = recover_deterministic_full_suite_failure(
+                controller, args.task_id, args.attempt, args.terminal_receipt,
+                args.terminal_receipt_sha256, args.expected_revision, args.run_id,
+                args.scope_sha256, args.journal_sha256)
         elif args.operation == "recover-authority-drift":
             result = recover_pre_cas_authority_drift(
                 controller, args.task_id, args.attempt, args.terminal_receipt,
