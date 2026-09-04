@@ -1099,9 +1099,7 @@ exit 1
         '.claude/skills/ralph-loop/references/implement.md',
         '.pi/skills/understand-project/SKILL.md',
         '.juno_task/prompts/lifecycle/task-implementation.md',
-        '.juno_task/wiki/controller/sealed_release_epochs.md',
         '.juno_task/workflows/yy-task-run.yaml',
-        '.juno_task/scripts/release_train.py',
       ]) expect(manifest.assets[destination], destination).toBeDefined();
       const dirtyPaths = execFileSync(
         'git', ['status', '--porcelain=v1', '--untracked-files=all'],

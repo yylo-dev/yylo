@@ -29,12 +29,7 @@ product code.
 7. Observe delivery with `yy merge status` or `yy merge arbiter status`. The
    target owner uses one fenced `yy merge arbiter run` (or typed `yy merge drive`)
    instead of session polling. `next|resolve` are explicit recovery mutations.
-8. For an umbrella/shared-path wave, inspect economics, explicitly `select` epoch
-   delivery, then explicitly seal one immutable epoch; ordinary FIFO must not race it. Drain
-   every eligible pre-cutoff candidate into a private history-preserving train,
-   validate/review the aggregate once, and update the target with one expected-old-
-   SHA CAS. Read `$(yy wiki --path)/controller/sealed_release_epochs.md`; release
-   readiness grants no tag, publish, push, deploy, or cleanup authority.
+8. Integration always uses the ordinary task and merge lifecycle. Package publication is maintainer-only, outside `yy`, and requires separate authority.
 9. Never copy product code, bulky artifacts, or project-specific skill assets
    into this controller. Root instructions and core skills here are ignored local
    runtime files refreshed atomically from one bound immutable Juno package.

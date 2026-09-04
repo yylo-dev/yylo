@@ -73,7 +73,6 @@ describe('ManagedProjectAssets', {
       'skills/canonical/ralph-loop/references/implement.md',
       'wiki/controller/git_worktree_lifecycle.md',
       'wiki/controller/metadata_controller_boundary.md',
-      'wiki/controller/sealed_release_epochs.md',
     ];
     const surfaces = (await Promise.all(files.map((file) => fs.readFile(
       path.join(sourceRoot, file), 'utf8',
@@ -128,9 +127,7 @@ describe('ManagedProjectAssets', {
       '.claude/skills/kanban-workflow/SKILL.md',
       '.pi/skills/understand-project/SKILL.md',
       '.juno_task/prompts/lifecycle/task-implementation.md',
-      '.juno_task/wiki/controller/sealed_release_epochs.md',
       '.juno_task/workflows/yy-task-run.yaml',
-      '.juno_task/scripts/release_train.py',
     ]) {
       expect(manifest.assets[destination], destination).toBeDefined();
       expect(manifest.assets[destination].installedSha256).toBe(
@@ -384,7 +381,6 @@ describe('ManagedProjectAssets', {
       expect(controllerInstruction, relative).toContain('sole review owner');
       expect(controllerInstruction, relative).toContain('REVIEW_FINDINGS_EXHAUSTED');
       expect(controllerInstruction, relative).toContain('yy merge arbiter status');
-      expect(controllerInstruction, relative).toContain('sealed_release_epochs.md');
     }
     const installedWatcher = await fs.readFile(
       path.join(projectDir, '.juno_task/scripts/watch_progress.py'),

@@ -196,7 +196,6 @@ export function configureMergeQueueCommand(
     .description('Explicit recovery mutation: advance once or continue paused evidence for TASK_ID')
     .argument('[task-id]', 'Paused task whose evidence/review processing should continue')
     .option('--plan-id <sha256>', 'Require this exact current feasibility identity')
-    .option('--train-plan <path>', 'Require this exact current release-train/FIFO identity')
     .action((taskId: string | undefined, options: { planId?: string; trainPlan?: string }) => {
       const args = [...(options.planId ? ['--plan-id', options.planId] : []),
         ...(options.trainPlan ? ['--train-plan', options.trainPlan] : [])];
@@ -205,7 +204,6 @@ export function configureMergeQueueCommand(
     });
   merge.command('resolve').description('Explicit recovery mutation for one preserved conflict').argument('<task-id>', 'Canonical YYLO Ledger task ID')
     .option('--plan-id <sha256>', 'Require this exact current feasibility identity')
-    .option('--train-plan <path>', 'Require this exact current release-train/FIFO identity')
     .action((taskId: string, options: { planId?: string; trainPlan?: string }) => {
       const args = [...(options.planId ? ['--plan-id', options.planId] : []),
         ...(options.trainPlan ? ['--train-plan', options.trainPlan] : [])];

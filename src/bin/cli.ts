@@ -91,7 +91,6 @@ import { configureIntegrationCommand } from '../cli/commands/integration.js';
 import { configureMergeQueueCommand } from '../cli/commands/merge.js';
 import { configureWatchCommand } from '../cli/commands/watch.js';
 import { configureEvidenceCommand } from '../cli/commands/evidence.js';
-import { configureReleaseTrainCommand } from '../cli/commands/release.js';
 import { configureKanbanCommand } from '../cli/commands/kanban.js';
 import { configureMigrationCommand } from '../cli/commands/migrate.js';
 import { configureWorkspaceCommands } from '../cli/commands/workspace.js';
@@ -2090,7 +2089,6 @@ function configureCommandSurface(program: Command): void {
   configureMergeQueueCommand(program);
   configureWatchCommand(program);
   configureEvidenceCommand(program);
-  configureReleaseTrainCommand(program);
   configureMigrationCommand(program);
   configureWorkspaceCommands(program, VERSION);
   configureWikiCommand(program);
