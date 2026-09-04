@@ -4758,6 +4758,35 @@ finished = time.monotonic()
                          {"mode": "profile", "profile_ids": ["pkg-suite"],
                           "authored_path_count": 1})
 
+    def test_absent_allowed_root_is_creatable_and_selects_only_its_profile(self) -> None:
+        config_path = self.controller / ".juno_task/config/task-workspace.json"
+        config = json.loads(config_path.read_text())
+        config["allowed_paths"].append("telegram_bot")
+        config["validation_profiles"] = [{
+            "id": "telegram-bot-suite", "path_roots": ["telegram_bot"],
+            "commands": [{"id": "telegram-bot-test", "cwd": "telegram_bot",
+                          "argv": [sys.executable, "-c", "pass"],
+                          "timeout_seconds": 10, "max_output_bytes": 4096,
+                          "input_paths": ["telegram_bot"]}],
+        }]
+        config_path.write_text(json.dumps(config, indent=2) + "\n")
+
+        started = self.payload("start", "X")
+        self.assertIn("telegram_bot", started["creation_receipt"]["allowed_paths"])
+        worktree = self.workspaces / "X"
+        (worktree / "telegram_bot").mkdir()
+        (worktree / "telegram_bot/app.py").write_text("VALUE = 1\n")
+        git(worktree, "add", "telegram_bot/app.py")
+        git(worktree, "commit", "-m", "create newly admitted root")
+        finished = self.payload("finish", "X")
+        self.assertEqual([row["id"] for row in finished["validation"]],
+                         ["telegram-bot-test"])
+        self.assertEqual(finished["validation_routing"]["profile_ids"],
+                         ["telegram-bot-suite"])
+
+        self.assertFalse(task_runtime.path_within("unrelated_root/file.py",
+                                                  started["creation_receipt"]["allowed_paths"]))
+
     def test_task_run_persists_needs_decision_before_product_editing(self) -> None:
         self.install_task_run_assets()
         task_runtime.task_file(self.controller, "X").write_text(
