@@ -44,14 +44,15 @@ if (process.argv[2] === '--version') {
     process.stdout.write(process.env.FAKE_BENCHMARK_VERSION || 'yylo-benchmark ${requiredBenchmarkVersion}');
     process.exit(Number(process.env.FAKE_VERSION_EXIT || 0));
   }
+} else {
+  fs.writeFileSync(process.env.FAKE_RECORD, JSON.stringify({
+    argv: process.argv.slice(2), cwd: process.cwd(), marker: process.env.DELEGATE_MARKER,
+    preflightPresent: Object.prototype.hasOwnProperty.call(process.env, 'YYLO_PREFLIGHT_ONLY')
+  }));
+  process.stdout.write('delegate stdout\\n');
+  process.stderr.write('delegate stderr\\n');
+  process.exit(Number(process.env.FAKE_EXIT || 0));
 }
-fs.writeFileSync(process.env.FAKE_RECORD, JSON.stringify({
-  argv: process.argv.slice(2), cwd: process.cwd(), marker: process.env.DELEGATE_MARKER,
-  preflightPresent: Object.prototype.hasOwnProperty.call(process.env, 'YYLO_PREFLIGHT_ONLY')
-}));
-process.stdout.write('delegate stdout\\n');
-process.stderr.write('delegate stderr\\n');
-process.exit(Number(process.env.FAKE_EXIT || 0));
 `);
   await chmod(executable, 0o755);
   return { root, bin: binDirectory, record };
