@@ -49,7 +49,7 @@ HYDRATABLE_STATES = frozenset({WORKING, HYDRATION_FAILED, HYDRATING, REVIEW_FIND
 # Handoff phase projection: durable lifecycle state -> agent-facing phase.
 HANDOFF_PHASES = {
     "NOT_STARTED": "planned", "WORKING": "working", "QUEUED": "queued",
-    "AWAITING_RISK": "validating", "AWAITING_RELEASE": "awaiting-release",
+    "AWAITING_RISK": "validating",
     "REVIEWING": "reviewing", "REVIEW_FINDINGS": "findings",
     "REVIEW_FINDINGS_EXHAUSTED": "exhausted", "CONFLICT": "conflict",
     "CONFLICT_RESOLVED": "resolved", "REOPENING": "reopening",

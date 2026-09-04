@@ -2326,33 +2326,6 @@ class MergeQueueTests(unittest.TestCase):
         self.assertNotIn("arbiter", replay)
         self.assertEqual(json.loads((root / "state.json").read_text())["attempt"], 1)
 
-    def test_epoch_selected_members_refuse_ordinary_arbiter_before_attempt(self) -> None:
-        self.install_merge_drive_assets()
-        self.commit_feature("X", "src/epoch-selected.txt", "train only\n")
-        config = task_runtime.load_config(self.controller.resolve())
-        selection = {"schema_version": "juno_epoch_delivery_selection.v1",
-            "epoch_id": "wave-1", "target_ref": config["target_ref"],
-            "base_sha": self.base, "plan_id": "a" * 64,
-            "declaration": {"path": "/tmp/wave-1.json", "sha256": "b" * 64,
-                            "revision": 1, "identity_sha256": "c" * 64},
-            "member_task_ids": ["X"], "required_task_ids": ["X"],
-            "optional_task_ids": [],
-            "cutoff_policy": "all_eligible_queue_snapshot_at_explicit_seal",
-            "external_exclusions": ["release"], "economics": {},
-            "authority": "routing_only_explicit_seal_still_required"}
-        selection["selection_id"] = merge_runtime.digest(selection)
-        path = self.controller / ".juno_task/runtime/epoch-delivery-selections/wave-1.json"
-        path.parent.mkdir(parents=True); path.write_text(json.dumps(selection, sort_keys=True) + "\n")
-        before = git(self.repository, "rev-parse", "refs/heads/product")
-        observed = merge_runtime.target_arbiter_status(self.controller.resolve())
-        refused = merge_runtime.merge_drive(self.controller.resolve())
-        self.assertEqual("epoch_delivery_selected", observed["reason_code"])
-        self.assertIn("release train inspect", observed["next_action"])
-        self.assertEqual(("REFUSED", False), (refused["outcome"], refused["mutated"]))
-        self.assertEqual(before, git(self.repository, "rev-parse", "refs/heads/product"))
-        root = merge_runtime._arbiter_root(
-            self.controller.resolve(), self.repository.resolve(), config["target_ref"])
-        self.assertFalse((root / "state.json").exists())
 
     def test_target_arbiter_dead_predecessor_yields_fenced_successor(self) -> None:
         self.install_merge_drive_assets()
@@ -4890,17 +4863,6 @@ steps:
         first = self.queue_payload("next")
         self.assertEqual((first["task_id"], first["candidate_sha"]), ("Y", y_tip))
 
-    def test_awaiting_release_does_not_starve_queued_work(self) -> None:
-        self.commit_feature("X", "src/security/auth.py", "auth\n")
-        y_tip = self.commit_feature("Y", "docs/y.md", "y\n")
-        state_path = self.controller / ".juno_task/state/tasks.json"
-        state = json.loads(state_path.read_text())
-        state["tasks"]["X"]["risk_flags"] = ["release"]
-        state_path.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
-        self.assertEqual(self.queue_payload("next")["outcome"], "AWAITING_RELEASE")
-        merged = self.queue_payload("next")
-        self.assertEqual((merged["task_id"], merged["candidate_sha"]), ("Y", y_tip))
-        self.assertEqual(self.task("status", "X")["state"], "AWAITING_RELEASE")
 
     def test_long_x_review_does_not_hold_target_lock_and_moved_x_cleans_safely(self) -> None:
         self.commit_feature("X", "src/security/auth.py", "auth\n")

@@ -8,7 +8,6 @@ wiki_contract:
   related_sots:
     - "controller/fenced_task_leases.md"
     - "controller/target_arbiter.md"
-    - "controller/sealed_release_epochs.md"
 ---
 
 # Bolt task worktrees and merge queue
@@ -163,9 +162,6 @@ live producer, moved identity, unrelated delta, malformed receipt, post-CAS
 state, or spent repair/delta budget refuses without mutation. If existing `semantic-repair-0001` passes create/verify/edit preflight but is refused before provider launch, `yy merge status --detail TASK_ID` exposes the only supported `recover-repair-predispatch` command.
 It binds failed arbiter, lifecycle revision/run/scope/journal, candidate/tree/target, repair authorization, exact worker path, all admission-receipt digests, no-provider receipt, and clean controller commit/tree; its immutable projection proves no provider launch/model cost, preserves worker/receipts, keeps `repair_count=1`, and makes only that worker eligible for typed safe next `yy merge arbiter run --through TASK_ID`.
 Live producer, launch/terminal evidence, dirt, moved identity, altered worker, missing receipt, repeat, exhausted delta budget, conflict, or post-CAS state refuses without mutation; generic task pre-dispatch recovery does not own REVIEW_FINDINGS merge journals. After CAS, only deterministic identity/readback and bounded smoke checks run.
-Release waves close admission explicitly and compose every eligible pre-cutoff
-candidate into one private history-preserving epoch; one aggregate gate and one
-protected-target CAS produce read-only release readiness.
 
 Cleanup refuses unless the delivered commit is reachable and the task worktree
 is safe to remove. Push, release, publication, deployment, production mutation,

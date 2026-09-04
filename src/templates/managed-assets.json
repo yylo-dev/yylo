@@ -275,12 +275,6 @@
       "type": "wiki"
     },
     {
-      "source": "wiki/controller/sealed_release_epochs.md",
-      "destination": ".juno_task/wiki/controller/sealed_release_epochs.md",
-      "installClass": "project",
-      "type": "wiki"
-    },
-    {
       "source": "wiki/effective_lifecycle_field_guide.md",
       "destination": ".juno_task/wiki/effective_lifecycle_field_guide.md",
       "installClass": "project",
@@ -538,18 +532,6 @@
     {
       "source": "scripts/operation_snapshot.py",
       "destination": ".juno_task/scripts/operation_snapshot.py",
-      "installClass": "script",
-      "type": "script"
-    },
-    {
-      "source": "scripts/release_train.py",
-      "destination": ".juno_task/scripts/release_train.py",
-      "installClass": "script",
-      "type": "script"
-    },
-    {
-      "source": "scripts/tests/test_release_train.py",
-      "destination": ".juno_task/scripts/tests/test_release_train.py",
       "installClass": "script",
       "type": "script"
     },
