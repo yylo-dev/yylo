@@ -30,6 +30,25 @@ import task_workflow_helper as lifecycle_runtime
 import operation_snapshot as operation_runtime
 
 QUEUE_SCHEMA = task_runtime.STATE_SCHEMA
+MERGE_STATUS_SCHEMA = "juno_merge_status.v1"
+MERGE_STATUS_SUMMARY_PROJECTION = "merge-status.summary.v1"
+MERGE_STATUS_DETAIL_PROJECTION = "merge-status.detail.v1"
+MERGE_STATUS_FULL_PROJECTION = "merge-status.full.v1"
+MERGE_STATUS_MAX_BYTES = 32768
+MERGE_STATUS_SUMMARY_ROWS = 10
+MERGE_STATUS_BLOCKER_ROWS = 8
+MERGE_STATUS_DETAIL_ITEMS = 12
+MERGE_STATUS_STRING_CHARS = 512
+MERGE_STATUS_VISIBLE_STATES = {
+    "QUEUED", "MERGING", "CONFLICT", "CONFLICT_RESOLVED", "AWAITING_RISK",
+    "AWAITING_RELEASE", "REVIEW_FINDINGS", "REVIEW_FINDINGS_EXHAUSTED",
+    "REOPENING", "REQUEUING_STALE", "MERGED", "WITHDRAWN",
+}
+MERGE_STATUS_ACTIVE_STATES = MERGE_STATUS_VISIBLE_STATES - {"MERGED", "WITHDRAWN"}
+MERGE_STATUS_BLOCKER_STATES = {
+    "CONFLICT", "REVIEW_FINDINGS", "REVIEW_FINDINGS_EXHAUSTED",
+    "REQUEUING_STALE", "REOPENING",
+}
 ATTEMPT_SCHEMA = "juno_merge_queue_attempt.v1"
 PLAN_SCHEMA = "juno_merge_candidate_feasibility.v1"
 PLAN_ID_SCHEMA = "juno_merge_candidate_plan_identity.v1"
@@ -6659,6 +6678,220 @@ def status(controller: Path) -> dict[str, Any]:
             "conflict_task_ids": sorted(entry["conflicts"])}
 
 
+def _status_cursor(row: dict[str, Any]) -> str:
+    sequence = row.get("enqueue_sequence")
+    return f"{sequence if isinstance(sequence, int) else 'none'}:{row.get('task_id', '')}"
+
+
+def _bounded_status_value(value: Any, *, depth: int = 0) -> Any:
+    """Bound diagnostic values without serializing an exhaustive queue attempt."""
+    if depth >= 4:
+        return "<depth-limit>"
+    if isinstance(value, str):
+        return value[:MERGE_STATUS_STRING_CHARS]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, list):
+        return [_bounded_status_value(item, depth=depth + 1)
+                for item in value[:MERGE_STATUS_DETAIL_ITEMS]]
+    if isinstance(value, dict):
+        keys = sorted(value)[:MERGE_STATUS_DETAIL_ITEMS]
+        return {str(key)[:MERGE_STATUS_STRING_CHARS]:
+                _bounded_status_value(value[key], depth=depth + 1) for key in keys}
+    return str(value)[:MERGE_STATUS_STRING_CHARS]
+
+
+def _status_task_row(controller: Path, repository: Path, config: dict[str, Any],
+                     task_id: str, record: dict[str, Any], *, detail: bool,
+                     action: bool = False) -> dict[str, Any]:
+    attempt = record.get("queue_attempt") if isinstance(record.get("queue_attempt"), dict) else {}
+    risk = attempt.get("risk") if isinstance(attempt.get("risk"), dict) else {}
+    progress = risk.get("review_progress") if isinstance(risk.get("review_progress"), dict) else {}
+    row = {"task_id": task_id, "state": record.get("state"),
+           "enqueue_sequence": record.get("enqueue_sequence"),
+           "tip_sha": record.get("tip_sha"), "candidate_sha": attempt.get("candidate_sha"),
+           "outcome": attempt.get("outcome") or record.get("last_queue_outcome"),
+           "risk_status": risk.get("status"),
+           "review_attempt_counter": progress.get("review_attempt_counter"),
+           "recovery_command": (attempt.get("recovery_command") if action or detail else None),
+           "kanban_sync_required": (isinstance(record.get("kanban_sync"), dict)
+                                    and record["kanban_sync"].get("status") == "required")}
+    if (action or detail):
+        row.update(_full_suite_repair_safe_next(controller, repository, config, task_id, record))
+    if row["kanban_sync_required"]:
+        row["safe_next_command"] = task_runtime.KANBAN_SYNC_RECOVERY.format(task=task_id)
+        row["reason_code"] = "kanban_sync_required"
+    if detail:
+        plan = risk.get("plan") if isinstance(risk.get("plan"), dict) else {}
+        steps = progress.get("steps") if isinstance(progress.get("steps"), list) else []
+        post = attempt.get("post_integration") if isinstance(attempt.get("post_integration"), dict) else {}
+        validation = attempt.get("validation") if isinstance(attempt.get("validation"), list) else []
+        repair = record.get("full_suite_repair") if isinstance(record.get("full_suite_repair"), dict) else {}
+        row.update({
+            "record_revision": digest(record),
+            "base_sha": record.get("base_sha"),
+            "branch_ref": record.get("branch_ref"),
+            "candidate_checkout": attempt.get("candidate_checkout"),
+            "expected_target_sha": attempt.get("expected_target_sha"),
+            "review_round": record.get("review_round", 1),
+            "risk": _bounded_status_value({
+                "status": risk.get("status"), "policy_identity": risk.get("policy_identity"),
+                "tier": plan.get("tier"), "reasons": plan.get("reasons"),
+                "reviewer_sequence": plan.get("reviewer_sequence"),
+                "review_attempt_counter": progress.get("review_attempt_counter"),
+                "steps": [{"reviewer": step.get("reviewer"), "status": step.get("status")}
+                          for step in steps[:MERGE_STATUS_DETAIL_ITEMS] if isinstance(step, dict)],
+            }),
+            "post_integration": {str(key)[:MERGE_STATUS_STRING_CHARS]: ({"status": value.get("status"),
+                                         "outcome": value.get("outcome")}
+                                        if isinstance(value, dict) else _bounded_status_value(value))
+                                 for key, value in sorted(post.items())[:MERGE_STATUS_DETAIL_ITEMS]},
+            "validation": [{"id": value.get("id"), "exit_code": value.get("exit_code"),
+                            "timed_out": value.get("timed_out")}
+                           for value in validation[:MERGE_STATUS_DETAIL_ITEMS]
+                           if isinstance(value, dict)],
+            "full_suite_repair": _bounded_status_value({
+                key: repair.get(key) for key in
+                ("status", "repair_count", "delta_review_groups", "finding")}),
+        })
+    return row
+
+
+def _status_arbiter(controller: Path, repository: Path, target_ref: str) -> dict[str, Any]:
+    state = _arbiter_state(_arbiter_root(controller, repository, target_ref))
+    observation = _arbiter_observation(state)
+    return {"status": observation["status"], "detail": observation["detail"],
+            "attempt": state.get("attempt") if isinstance(state, dict) else None,
+            "state": state.get("state") if isinstance(state, dict) else None,
+            "outcome": state.get("outcome") if isinstance(state, dict) else None}
+
+
+def _status_metadata(level: str, *, truncated: bool, cursor: Optional[str],
+                     row_limit: Optional[int]) -> dict[str, Any]:
+    return {"level": level, "identifier": f"merge-status.{level}.v1",
+            "truncated": truncated, "cursor": cursor,
+            "limits": {"max_bytes": (None if level == "full" else MERGE_STATUS_MAX_BYTES),
+                       "max_rows": row_limit}}
+
+
+def status_projection(controller: Path, *, level: str = "summary",
+                      task_id: Optional[str] = None) -> dict[str, Any]:
+    """Return summary/detail without constructing legacy exhaustive task payloads."""
+    if level == "full":
+        legacy = status(controller)
+        return {**legacy, "status_schema_version": MERGE_STATUS_SCHEMA,
+                "projection": _status_metadata("full", truncated=False, cursor=None,
+                                               row_limit=None)}
+    config = task_runtime.load_config(controller)
+    repository = task_runtime.product_repository(controller, config)
+    with task_runtime.state_lock(controller):
+        state = task_runtime.read_state(controller)
+        records = [(key, value) for key, value in state["tasks"].items()
+                   if isinstance(value, dict)
+                   and value.get("target_ref") == config["target_ref"]
+                   and value.get("state") in MERGE_STATUS_VISIBLE_STATES]
+        entry = target_entry(state, repository, config["target_ref"])
+    ordered = sorted(records, key=lambda item: (
+        item[1].get("enqueue_sequence") if isinstance(item[1].get("enqueue_sequence"), int)
+        else -1, item[0]), reverse=True)
+    active = sorted((item for item in records if item[1].get("state") in MERGE_STATUS_ACTIVE_STATES),
+                    key=lambda item: (item[1].get("enqueue_sequence", 2**63 - 1), item[0]))
+    selected = None
+    if level == "detail":
+        if task_id is not None:
+            selected = next((item for item in records if item[0] == task_id), None)
+            if selected is None:
+                raise MergeQueueError(f"detail task is not in merge queue history: {task_id}")
+        elif active:
+            selected = active[0]
+        else:
+            raise MergeQueueError("detail requires TASK_ID when there is no active merge attempt")
+    arbiter = _status_arbiter(controller, repository, config["target_ref"])
+    state_counts: dict[str, int] = {}
+    for _, record in records:
+        state_name = str(record.get("state"))
+        state_counts[state_name] = state_counts.get(state_name, 0) + 1
+    target = {"repository_identity": repository_identity(repository),
+              "target_ref": config["target_ref"],
+              "target_sha": task_runtime.ref_sha(repository, config["target_ref"])}
+    if level == "detail" and selected is not None:
+        detail_row = _status_task_row(controller, repository, config, selected[0], selected[1],
+                                      detail=True)
+        return {"schema_version": MERGE_STATUS_SCHEMA,
+                "projection": _status_metadata("detail", truncated=True, cursor=None,
+                                               row_limit=MERGE_STATUS_DETAIL_ITEMS),
+                "target": target, "arbiter": arbiter, "task": detail_row,
+                "next_action": (detail_row.get("safe_next_command")
+                                or detail_row.get("recovery_command")
+                                or ("yy merge arbiter run" if active else "none"))}
+    blockers_all = [item for item in active
+                    if item[1].get("state") in MERGE_STATUS_BLOCKER_STATES
+                    or (item[1].get("state") == "AWAITING_RISK"
+                        and item[1].get("last_queue_outcome") == "FAILED_FULL_SUITE")
+                    or (isinstance(item[1].get("kanban_sync"), dict)
+                        and item[1]["kanban_sync"].get("status") == "required")]
+    active_task_id = active[0][0] if active else None
+    blockers = [_status_task_row(controller, repository, config, key, record, detail=False,
+                                 action=(key == active_task_id))
+                for key, record in blockers_all[:MERGE_STATUS_BLOCKER_ROWS]]
+    recent_source = ordered[:MERGE_STATUS_SUMMARY_ROWS]
+    recent = [{"task_id": key, "state": record.get("state"),
+               "enqueue_sequence": record.get("enqueue_sequence"),
+               "outcome": ((record.get("queue_attempt") or {}).get("outcome")
+                           if isinstance(record.get("queue_attempt"), dict) else None)
+                          or record.get("last_queue_outcome")}
+              for key, record in recent_source]
+    active_row = (_status_task_row(controller, repository, config, active[0][0], active[0][1],
+                                   detail=False, action=True) if active else None)
+    active_blocker_action = ((active_row.get("safe_next_command")
+                              or active_row.get("recovery_command"))
+                             if active_row is not None
+                             and (active_row.get("state") in MERGE_STATUS_BLOCKER_STATES
+                                  or active_row.get("reason_code") is not None)
+                             else None)
+    next_action = ("observe with: yy merge arbiter status" if arbiter["status"] == "alive"
+                   else active_blocker_action
+                   or ("yy merge arbiter run" if active else "none"))
+    truncated = (len(ordered) > len(recent_source)
+                 or len(blockers_all) > len(blockers))
+    cursor = _status_cursor(recent_source[-1][1]) if len(ordered) > len(recent_source) else None
+    return {"schema_version": MERGE_STATUS_SCHEMA,
+            "projection": _status_metadata(
+                "summary", truncated=truncated, cursor=cursor,
+                row_limit=MERGE_STATUS_SUMMARY_ROWS + MERGE_STATUS_BLOCKER_ROWS + 1),
+            "target": target, "arbiter": arbiter,
+            "active_task": active_row,
+            "candidate_counts": {"total": len(records), "active": len(active),
+                                 "by_state": dict(sorted(state_counts.items()))},
+            "blockers": blockers,
+            "recent_transitions": recent,
+            "conflict_task_ids": sorted(entry["conflicts"])[:MERGE_STATUS_BLOCKER_ROWS],
+            "next_action": next_action,
+            "more": ({"command": "yy merge status --full"} if truncated else None)}
+
+
+def human_status(report: dict[str, Any]) -> str:
+    projection = report["projection"]
+    lines = [f"merge status [{projection['identifier']}]",
+             f"target: {report['target']['target_ref']} @ {report['target']['target_sha']}",
+             f"arbiter: {report['arbiter']['status']} ({report['arbiter']['detail']})"]
+    if projection["level"] == "detail":
+        task = report["task"]
+        lines.append(f"task: {task['task_id']} state={task['state']} outcome={task.get('outcome')}")
+    else:
+        active = report.get("active_task")
+        lines.append("active: " + (f"{active['task_id']} ({active['state']})" if active else "none"))
+        counts = report["candidate_counts"]
+        lines.append(f"candidates: total={counts['total']} active={counts['active']}")
+        lines.extend(f"blocker: {row['task_id']} state={row['state']} reason={row.get('reason_code')}"
+                     for row in report["blockers"])
+        lines.extend(f"recent: {row['task_id']} {row['state']} {row.get('outcome')}"
+                     for row in report["recent_transitions"])
+    lines.append(f"truncated: {str(projection['truncated']).lower()} cursor={projection['cursor']}")
+    lines.append(f"next: {report['next_action']}")
+    return "\n".join(lines)
+
+
 MERGE_DRIVE_ROOT = ".juno_task/runtime/lifecycle-runs/merge"
 # Queue states a merge-drive scope may legally contain. REVIEW_FINDINGS_EXHAUSTED
 # is terminal queue history with no drive-legal transition: the loop can only
@@ -7263,9 +7496,13 @@ def target_arbiter_status(controller: Path) -> dict[str, Any]:
     root = _arbiter_root(controller, repository, config["target_ref"])
     state = _arbiter_state(root)
     observation = _arbiter_observation(state)
-    queue = status(controller)
-    eligible = [row for row in queue["tasks"]
-                if row.get("state") in TARGET_ARBITER_WORK_STATES]
+    with task_runtime.state_lock(controller):
+        tasks = task_runtime.read_state(controller)["tasks"]
+    eligible = [{"task_id": task_id, "state": row.get("state")}
+                for task_id, row in tasks.items() if isinstance(row, dict)
+                and row.get("target_ref") == config["target_ref"]
+                and row.get("state") in TARGET_ARBITER_WORK_STATES]
+    eligible.sort(key=lambda item: item["task_id"])
     selections = _epoch_delivery_selections(
         controller, config["target_ref"], [row["task_id"] for row in eligible])
     if state and state.get("state") == "ACTIVE" and observation["status"] == "alive":
@@ -7280,7 +7517,8 @@ def target_arbiter_status(controller: Path) -> dict[str, Any]:
     else:
         reason_code, next_action = "queue_idle", "none: worker exits while target queue is idle"
     return {"schema_version": TARGET_ARBITER_SCHEMA,
-            "target_ref": config["target_ref"], "target_sha": queue["target_sha"],
+            "target_ref": config["target_ref"],
+            "target_sha": task_runtime.ref_sha(repository, config["target_ref"]),
             "state": state, "producer_observation": observation,
             "current_fifo": (current_fifo_identity(controller, config, None)
                              if eligible else None),
@@ -7913,7 +8151,11 @@ def merge_drive(controller: Path, through: Optional[str] = None) -> dict[str, An
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(description=__doc__)
     sub = value.add_subparsers(dest="operation", required=True)
-    sub.add_parser("status")
+    status_command = sub.add_parser("status")
+    status_mode = status_command.add_mutually_exclusive_group()
+    status_mode.add_argument("--detail", nargs="?", const="")
+    status_mode.add_argument("--full", action="store_true")
+    status_command.add_argument("--human", action="store_true", help=argparse.SUPPRESS)
     drive = sub.add_parser("drive")
     drive.add_argument("--through")
     arbiter = sub.add_parser("arbiter")
@@ -8031,7 +8273,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         audit = task_runtime.record_control_audit(
             controller, "merge", audit_operation, audit_task_id)
         if args.operation == "status":
-            result = status(controller)
+            level = "full" if args.full else "detail" if args.detail is not None else "summary"
+            result = status_projection(controller, level=level, task_id=(args.detail or None))
         elif args.operation == "drive":
             result = merge_drive(controller, args.through)
         elif args.operation == "arbiter":
@@ -8076,7 +8319,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             result = apply_target_refresh(
                 controller, args.task_id, args.receipt, args.receipt_sha256)
         result = {**result, "control_audit": audit}
-        print(canonical(result))
+        if (args.operation == "status" and args.human and not args.full):
+            rendered = human_status(result)
+        else:
+            rendered = canonical(result)
+        if (args.operation == "status" and not args.full
+                and len((rendered + "\n").encode()) > MERGE_STATUS_MAX_BYTES):
+            raise MergeQueueError("bounded merge status exceeded its enforced byte limit")
+        print(rendered)
         return 0
     except (MergeQueueError, task_runtime.TaskWorkspaceError, risk_runtime.RiskPolicyError,
             OSError, json.JSONDecodeError) as exc:
