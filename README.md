@@ -259,7 +259,9 @@ yy task start TASK_ID
 # Read its AGENTS.md/CLAUDE.md, implement, run focused tests, and commit.
 yy task preflight TASK_ID
 yy task finish TASK_ID
-yy merge status
+yy merge status                       # bounded operational summary
+yy merge status --detail TASK_ID      # bounded task diagnostics
+yy merge status --full                # explicit legacy exhaustive output
 yy merge arbiter status
 yy merge arbiter run --through TASK_ID
 ```
@@ -282,8 +284,18 @@ yy task status TASK_ID
 yy task doctor TASK_ID
 yy merge plan TASK_ID --json
 yy merge status
+# When needed:
+yy merge status --detail TASK_ID
+yy merge status --detail              # active FIFO attempt
+yy merge status --full                # exhaustive compatibility/diagnosis
 yy merge arbiter status
 ```
+
+Bare status is `merge-status.summary.v1`, capped at 32 KiB and 19 projected rows.
+Detail remains capped at 32 KiB and identifies omitted diagnostic material;
+`--full` is the unbounded `merge-status.full.v1` compatibility projection. JSON
+always includes schema, projection, truncation, and cursor metadata. Interactive
+status renders those same identifiers; pass `--json` to force structured output.
 
 `yy merge next` and `yy merge resolve` are explicit recovery mutations, not polling commands.
 

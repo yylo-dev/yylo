@@ -48,7 +48,10 @@ yy task runtime-bootstrap --dry-run
 # review the printed immutable receipt
 yy task runtime-bootstrap --apply RECEIPT
 
-yy merge status                 # read-only queue observation
+yy merge status                 # bounded read-only summary (32 KiB / 19 rows maximum)
+yy merge status --detail TASK_ID # bounded selected-task diagnostic projection
+yy merge status --detail        # bounded active FIFO-attempt projection
+yy merge status --full          # explicit legacy exhaustive representation
 yy merge arbiter status         # read-only owner/next-action observation
 yy merge arbiter run            # explicit fenced on-demand mutation
 yy merge drive --through TASK_ID # explicit typed mutation
@@ -61,7 +64,7 @@ yy merge recover-authority-drift TASK_ID --attempt N \
 
 `recover-authority-drift` is the only editable recovery for a preserved `MERGING`
 incident that failed deterministically at `before_target_cas`. Read `record_revision`
-from `yy merge status` and the exact attempt/terminal receipt identity from
+from `yy merge status --detail TASK_ID` and the exact attempt/terminal receipt identity from
 `yy merge arbiter status`, then run the command once. It requires a dead producer,
 exact clean source and candidate worktrees, unchanged source/candidate/target
 identities, and positive no-CAS proof. It atomically retains the failed queue
@@ -143,11 +146,16 @@ finding stops as `REVIEW_FINDINGS_EXHAUSTED` instead of spawning an autonomous
 loop. A changed product candidate invalidates prior semantic evidence, while a
 byte-identical metadata/harness retry may reuse evidence only when all bound
 policy/runtime/closure identities remain exact. A repeated deterministic
-`FAILED_FULL_SUITE` is never rerun unchanged. `yy merge status` returns
+`FAILED_FULL_SUITE` is never rerun unchanged. `yy merge status --detail TASK_ID` returns
 `deterministic_full_suite_repair_available` and one exact
 `yy merge recover-full-suite-failure TASK ...` command binding the lifecycle
 journal/revision, failed suite and finding, candidate/tree, target, producer, and
-predecessor arbiter. That transition authorizes the existing queue-owned single
+predecessor arbiter. Bare status is the `merge-status.summary.v1` projection and
+never constructs exhaustive attempt payloads; detail is `merge-status.detail.v1`,
+and only `--full` returns `merge-status.full.v1` legacy fields. JSON projections
+always declare their level, byte/row limits, truncation, and cursor. Interactive
+output prints the same projection identifier and truncation/cursor truth; use
+`--json` to force structured output in a terminal. That transition authorizes the existing queue-owned single
 repair worker; only the failing router contract and its exact CLI/router
 counterparts may change. The repaired delta runs focused validation before the
 required policy suite and one delta review group. Any environmental failure,

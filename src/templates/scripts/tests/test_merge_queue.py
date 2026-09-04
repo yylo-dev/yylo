@@ -3065,6 +3065,92 @@ steps:
             "effective_root": str(self.controller.resolve()),
         })
 
+    def test_merge_status_summary_is_bounded_at_scale_and_keeps_blocker_action(self) -> None:
+        state = task_runtime.read_state(self.controller)
+        for index in range(600):
+            task_id = f"H{index:05d}"
+            state["tasks"][task_id] = {
+                "task_id": task_id, "target_ref": "refs/heads/product", "state": "MERGED",
+                "tip_sha": self.base, "enqueue_sequence": index + 10,
+                "last_queue_outcome": "MERGED",
+                "queue_attempt": {"outcome": "MERGED",
+                                  "post_integration": {"payload": "x" * 20000}},
+            }
+        state["tasks"]["X"] = {
+            "task_id": "X", "target_ref": "refs/heads/product", "state": "CONFLICT",
+            "tip_sha": self.base, "enqueue_sequence": 1,
+            "queue_attempt": {"outcome": "CONFLICT",
+                              "recovery_command": "yy merge resolve X"},
+        }
+        task_runtime.write_state(self.controller, state)
+
+        summary = merge_runtime.status_projection(self.controller.resolve())
+        encoded = (merge_runtime.canonical(summary) + "\n").encode()
+        self.assertLessEqual(len(encoded), merge_runtime.MERGE_STATUS_MAX_BYTES)
+        self.assertEqual(summary["schema_version"], merge_runtime.MERGE_STATUS_SCHEMA)
+        self.assertEqual(summary["projection"]["identifier"],
+                         merge_runtime.MERGE_STATUS_SUMMARY_PROJECTION)
+        self.assertTrue(summary["projection"]["truncated"])
+        self.assertIsNotNone(summary["projection"]["cursor"])
+        self.assertLessEqual(len(summary["recent_transitions"]),
+                             merge_runtime.MERGE_STATUS_SUMMARY_ROWS)
+        self.assertEqual(summary["blockers"][0]["task_id"], "X")
+        self.assertEqual(summary["next_action"], "yy merge resolve X")
+        self.assertNotIn("post_integration", encoded.decode())
+        cli = self.command(QUEUE, ["status"])
+        self.assertLessEqual(len(cli.stdout.encode()), merge_runtime.MERGE_STATUS_MAX_BYTES)
+        self.assertEqual(json.loads(cli.stdout)["next_action"], "yy merge resolve X")
+
+    def test_merge_status_detail_is_richer_bounded_and_full_is_legacy_compatible(self) -> None:
+        state = task_runtime.read_state(self.controller)
+        state["tasks"]["X"] = {
+            "task_id": "X", "target_ref": "refs/heads/product", "state": "CONFLICT",
+            "base_sha": self.base, "tip_sha": self.base, "enqueue_sequence": 1,
+            "queue_attempt": {"outcome": "CONFLICT", "candidate_sha": self.base,
+                              "recovery_command": "yy merge resolve X",
+                              "post_integration": {"target": {"status": "blocked",
+                                                               "payload": "x" * 100000}},
+                              "validation": [{"id": str(index), "exit_code": 0,
+                                              "stdout_tail": "x" * 100000}
+                                             for index in range(100)]},
+        }
+        task_runtime.write_state(self.controller, state)
+
+        detail = merge_runtime.status_projection(
+            self.controller.resolve(), level="detail", task_id="X")
+        self.assertEqual(detail["projection"]["identifier"],
+                         merge_runtime.MERGE_STATUS_DETAIL_PROJECTION)
+        self.assertTrue(detail["projection"]["truncated"])
+        self.assertIn("record_revision", detail["task"])
+        self.assertIn("post_integration", detail["task"])
+        self.assertLessEqual(len((merge_runtime.canonical(detail) + "\n").encode()),
+                             merge_runtime.MERGE_STATUS_MAX_BYTES)
+
+        full = merge_runtime.status_projection(self.controller.resolve(), level="full")
+        legacy = merge_runtime.status(self.controller.resolve())
+        self.assertEqual(full["projection"]["identifier"],
+                         merge_runtime.MERGE_STATUS_FULL_PROJECTION)
+        for key in ("tasks", "last_attempt", "conflict_task_ids", "target_ref", "target_sha"):
+            self.assertEqual(full[key], legacy[key])
+        full_row = next(row for row in full["tasks"] if row["task_id"] == "X")
+        self.assertIn("post_integration", full_row)
+
+    def test_merge_status_machine_and_human_render_projection_and_truncation(self) -> None:
+        state = task_runtime.read_state(self.controller)
+        state["tasks"]["X"] = {
+            "task_id": "X", "target_ref": "refs/heads/product", "state": "QUEUED",
+            "tip_sha": self.base, "enqueue_sequence": 1,
+        }
+        task_runtime.write_state(self.controller, state)
+        machine = self.command(QUEUE, ["status"])
+        projection = json.loads(machine.stdout)
+        self.assertEqual(projection["projection"]["level"], "summary")
+        self.assertIn("truncated", projection["projection"])
+        human = self.command(QUEUE, ["status", "--human"])
+        self.assertIn("merge status [merge-status.summary.v1]", human.stdout)
+        self.assertIn("truncated:", human.stdout)
+        self.assertIn("next:", human.stdout)
+
     def test_forged_pass_and_absent_evidence_never_authorize_security_cas(self) -> None:
         self.commit_feature("X", "src/security/auth.py", "secure = False\n")
         self.queue_payload("next")
