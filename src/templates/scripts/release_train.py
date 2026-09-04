@@ -1236,52 +1236,47 @@ def forecast_epoch_conflicts(controller: Path, repository: Path,
             merged = _forecast_git(checkout, "merge", "--no-ff", "--no-commit",
                                    member["tip_sha"], check=False)
             conflict_paths: list[str] = []
-            replay = None
             if merged.returncode:
                 conflict_paths = _forecast_conflict_paths(checkout)
                 _forecast_git(checkout, "merge", "--abort")
+                # Historical proof is diagnostic until an explicit replay-repair
+                # transition consumes its complete immutable closure.  Forecast
+                # must not silently advance past evidence that drive cannot use.
                 replay = _proven_forecast_composition(controller, repository, task_id,
                                                       before, member["tip_sha"], plan["epoch_id"])
-                if not replay:
-                    row = {"task_id": task_id, "pre_sha": before, "pre_tree": before_tree,
-                           "candidate_tip": member["tip_sha"], "candidate_tree": member["tree_sha"],
-                           "post_sha": None, "post_tree": None, "decision": "conflict_unresolved"}
-                    unresolved_boundary = {"task_id": task_id, "pre_sha": before,
-                                           "candidate_tip": member["tip_sha"],
-                                           "conflict_paths": conflict_paths}
-                    compositions.append(row)
-                    conflicts.append({**row, "conflict_paths": conflict_paths,
-                                      "required": member["required"],
-                                      "forecast_resolution": "requires_proven_both_parent_composition"})
-                    continue
-                _forecast_git(checkout, "reset", "--quiet", "--hard", replay["commit"])
-                commit, tree = replay["commit"], replay["tree"]
-            else:
-                tree = _forecast_git(checkout, "write-tree").stdout.strip()
-                if not SHA_RE.fullmatch(tree):
-                    raise ReleaseTrainError("conflict forecast did not produce an exact tree")
-                fixed_time = f"2000-01-01T00:00:{index % 60:02d}Z"
-                environment = {**os.environ, "GIT_AUTHOR_NAME": "YYLO Conflict Forecast",
-                               "GIT_AUTHOR_EMAIL": "forecast@invalid.local",
-                               "GIT_COMMITTER_NAME": "YYLO Conflict Forecast",
-                               "GIT_COMMITTER_EMAIL": "forecast@invalid.local",
-                               "GIT_AUTHOR_DATE": fixed_time, "GIT_COMMITTER_DATE": fixed_time}
-                commit = _forecast_git(checkout, "commit-tree", tree, "-p", before, "-p",
-                                       member["tip_sha"], env=environment).stdout.strip()
-                if not SHA_RE.fullmatch(commit):
-                    raise ReleaseTrainError("conflict forecast did not produce an exact composition commit")
-                _forecast_git(checkout, "reset", "--quiet", "--hard", commit)
-            row = {"task_id": task_id, "pre_sha": before, "pre_tree": before_tree,
-                   "candidate_tip": member["tip_sha"], "candidate_tree": member["tree_sha"],
-                   "post_sha": commit, "post_tree": tree,
-                   "decision": "conflict_replayed" if conflict_paths else "clean"}
-            if replay:
-                row["proven_composition"] = replay
-            compositions.append(row)
-            if conflict_paths:
+                row = {"task_id": task_id, "pre_sha": before, "pre_tree": before_tree,
+                       "candidate_tip": member["tip_sha"], "candidate_tree": member["tree_sha"],
+                       "post_sha": None, "post_tree": None, "decision": "conflict_unresolved"}
+                if replay:
+                    row["proven_composition"] = replay
+                unresolved_boundary = {"task_id": task_id, "pre_sha": before,
+                                       "candidate_tip": member["tip_sha"],
+                                       "conflict_paths": conflict_paths}
+                compositions.append(row)
                 conflicts.append({**row, "conflict_paths": conflict_paths,
                                   "required": member["required"],
-                                  "forecast_resolution": "immutable_receipt_bound_composition"})
+                                  "forecast_resolution": ("explicit_replay_repair_required"
+                                                          if replay else
+                                                          "requires_proven_both_parent_composition")})
+                continue
+            tree = _forecast_git(checkout, "write-tree").stdout.strip()
+            if not SHA_RE.fullmatch(tree):
+                raise ReleaseTrainError("conflict forecast did not produce an exact tree")
+            fixed_time = f"2000-01-01T00:00:{index % 60:02d}Z"
+            environment = {**os.environ, "GIT_AUTHOR_NAME": "YYLO Conflict Forecast",
+                           "GIT_AUTHOR_EMAIL": "forecast@invalid.local",
+                           "GIT_COMMITTER_NAME": "YYLO Conflict Forecast",
+                           "GIT_COMMITTER_EMAIL": "forecast@invalid.local",
+                           "GIT_AUTHOR_DATE": fixed_time, "GIT_COMMITTER_DATE": fixed_time}
+            commit = _forecast_git(checkout, "commit-tree", tree, "-p", before, "-p",
+                                   member["tip_sha"], env=environment).stdout.strip()
+            if not SHA_RE.fullmatch(commit):
+                raise ReleaseTrainError("conflict forecast did not produce an exact composition commit")
+            _forecast_git(checkout, "reset", "--quiet", "--hard", commit)
+            compositions.append({"task_id": task_id, "pre_sha": before, "pre_tree": before_tree,
+                                 "candidate_tip": member["tip_sha"],
+                                 "candidate_tree": member["tree_sha"], "post_sha": commit,
+                                 "post_tree": tree, "decision": "clean"})
     member_accounting_complete = len(compositions) == len(plan["order"])
     exact_composition_complete = member_accounting_complete and unresolved_boundary is None
     conservative_envelope = None
@@ -1565,7 +1560,7 @@ def _verify_phase1_fixture(repository: Path, plan: dict[str, Any], fixture: dict
         except (ReleaseTrainError, subprocess.CalledProcessError):
             blockers.append("fixture.member_object")
     expected = {row["task_id"]: row for row in manifest["compositions"]
-                if row.get("decision") == "conflict_replayed"}
+                if isinstance(row.get("proven_composition"), dict)}
     observed = fixture.get("proven_compositions")
     if not isinstance(observed, list) or {row.get("task_id") for row in observed
                                          if isinstance(row, dict)} != set(expected):
@@ -1590,7 +1585,8 @@ def _verify_phase1_fixture(repository: Path, plan: dict[str, Any], fixture: dict
             tree = git(repository, "rev-parse", f'{row["commit"]}^{{tree}}')
         except (KeyError, ReleaseTrainError, subprocess.CalledProcessError):
             blockers.append("fixture.composition_object"); continue
-        if (row.get("commit") != source.get("post_sha") or row.get("tree") != source.get("post_tree")
+        proof = source.get("proven_composition") or {}
+        if (row.get("commit") != proof.get("commit") or row.get("tree") != proof.get("tree")
                 or parents != [source.get("pre_sha"), source.get("candidate_tip")]
                 or tree != row.get("tree")):
             blockers.append("fixture.composition_identity")
@@ -1619,6 +1615,9 @@ PHASE1_SUITE_TESTS = (
     "ReleaseTrainTests.test_epoch_status_projection_is_bounded_and_actionable",
     "ReleaseTrainTests.test_epoch_seal_refuses_required_missing_closure_without_state",
     "ReleaseTrainTests.test_rc7_rc8_serial_conflicts_fit_one_conservative_repair_set",
+    "ReleaseTrainTests.test_five_member_grouped_repair_refuses_unresolved_suffix_before_consumption",
+    "ReleaseTrainTests.test_five_member_grouped_repair_consumes_only_after_complete_suffix_proof",
+    "ReleaseTrainTests.test_follow_on_conflict_after_consumed_budget_has_truthful_terminal_projection",
     "ReleaseTrainTests.test_conflict_authority_refuses_missing_ambiguous_sensitive_scope_and_identity",
     "ReleaseTrainTests.test_legacy_epoch_identity_adapter_is_deterministic_typed_and_read_only",
     "ReleaseTrainTests.test_exact_rc7_rc8_receipts_cover_every_member_without_synthetic_repair",
@@ -3124,6 +3123,14 @@ def compose_epoch(controller: Path, state: dict[str, Any]) -> dict[str, Any]:
             conflicts = sorted(git(checkout, "diff", "--name-only", "--diff-filter=U").splitlines())
             if resolve_bound_managed_generation(checkout, state, member, conflicts):
                 ordering_reason = "receipt_bound_cumulative_managed_generation"
+            elif state.get("conflict_repair"):
+                state["operator_packet"] = {
+                    "reason_code": "repair.grouped_suffix_unresolved",
+                    "task_id": member["task_id"], "conflict_paths": conflicts,
+                    "repair_budget": 1, "repair_budget_consumed": 1,
+                    "safe_next_action": "inspect and seal a fresh successor epoch; do not rerun repair"}
+                return save_epoch(controller, state, "NEEDS_OPERATOR", "GROUPED_SUFFIX_UNRESOLVED",
+                                  state["operator_packet"])
             else:
                 manifest = state["seal"].get("conflict_manifest") or {}
                 authority = manifest.get("authority_binding")
@@ -3144,7 +3151,15 @@ def compose_epoch(controller: Path, state: dict[str, Any]) -> dict[str, Any]:
                     return save_epoch(controller, state, "NEEDS_OPERATOR", "REPAIR_AUTHORITY_REFUSED",
                                       state["operator_packet"])
                 validation = task_runtime.load_config(controller)["full_suite_validation"]
-                packet = {"schema_version": "juno_release_epoch_conflict.v2",
+                frozen_by_id = {row["task_id"]: row for row in state["seal"]["members"]}
+                frozen_members = [{"task_id": task_id,
+                    "tip_sha": frozen_by_id[task_id]["tip_sha"],
+                    "tree_sha": frozen_by_id[task_id]["tree_sha"],
+                    "requirements_sha256": frozen_by_id[task_id]["task_sha256"],
+                    "permitted_paths": sorted(set(frozen_by_id[task_id]["changed_paths"])
+                                              & set(admitted_paths))}
+                    for task_id in ordered_tasks]
+                packet = {"schema_version": "juno_release_epoch_conflict.v3",
                       "task_id": member["task_id"], "base_sha": state["seal"]["base_sha"],
                       "ours_sha": before, "theirs_sha": member["tip_sha"],
                       "conflict_paths": sorted(conflicts), "admitted_paths": admitted_paths,
@@ -3155,6 +3170,7 @@ def compose_epoch(controller: Path, state: dict[str, Any]) -> dict[str, Any]:
                           "ordered_task_ids": ordered_tasks, "permitted_paths": admitted_paths,
                           "classification": logical_set.get("classification"),
                           "authority_sha256": authority.get("sha256")},
+                      "frozen_logical_members": frozen_members,
                       "validation_root": {"cwd": validation["cwd"],
                           "timeout_seconds": validation.get("timeout_seconds", 3600)}}
                 state["conflict"] = packet
@@ -3171,6 +3187,17 @@ def compose_epoch(controller: Path, state: dict[str, Any]) -> dict[str, Any]:
         if subprocess.run(["git", "-C", str(checkout), "merge-base", "--is-ancestor",
                            member["tip_sha"], commit]).returncode:
             raise ReleaseTrainError("composed train lost candidate ancestry")
+        suffix = (state.get("conflict_repair") or {}).get("suffix_validation") or {}
+        expected = next((item for item in suffix.get("members", [])
+                         if item.get("task_id") == member["task_id"]), None)
+        if expected and (expected.get("candidate_tip") != member["tip_sha"]
+                         or expected.get("pre_tree") != before_tree
+                         or expected.get("post_tree") != row["post_tree"]):
+            state["operator_packet"] = {"reason_code": "repair.grouped_suffix_closure_drift",
+                "task_id": member["task_id"],
+                "safe_next_action": "inspect and seal a fresh successor epoch; do not rerun repair"}
+            return save_epoch(controller, state, "NEEDS_OPERATOR", "GROUPED_SUFFIX_CLOSURE_DRIFT",
+                              state["operator_packet"])
         composition["commits"].append(row); composition["tip_sha"] = commit
         task_runtime.run(["git", "-C", str(repository), "update-ref", ref, commit], repository)
         save_epoch(controller, state, "COMPOSING", "COMPOSE_MEMBER", row)
@@ -3431,6 +3458,62 @@ def validate_recovered_worker_receipt(receipt: dict[str, Any]) -> None:
         raise ReleaseTrainError("managed recovery continuity binding is invalid")
 
 
+def validate_grouped_repair_suffix(controller: Path, state: dict[str, Any],
+                                   repair_head: str) -> dict[str, Any]:
+    """Prove the repaired tree drains the complete frozen suffix without another repair."""
+    repository, _, _ = composition_paths(controller, state)
+    packet = state["conflict"]
+    ordered = (packet.get("logical_conflict_set") or {}).get("ordered_task_ids") or []
+    if packet.get("task_id") not in ordered:
+        raise ReleaseTrainError("grouped repair packet does not contain its current member")
+    remaining = ordered[ordered.index(packet["task_id"]) + 1:]
+    active = {row["task_id"]: row for row in active_members(state)}
+    if any(task_id not in active for task_id in remaining):
+        raise ReleaseTrainError("grouped repair suffix no longer matches frozen active membership")
+    rows: list[dict[str, Any]] = []
+    with tempfile.TemporaryDirectory(prefix="yylo-grouped-repair-suffix-") as temporary:
+        checkout = Path(temporary) / "checkout"
+        _forecast_git(repository, "clone", "--quiet", "--shared", "--no-checkout",
+                      str(repository), str(checkout))
+        _forecast_git(checkout, "checkout", "--quiet", "--detach", repair_head)
+        for index, task_id in enumerate(remaining):
+            member = active[task_id]
+            before = git(checkout, "rev-parse", "HEAD")
+            before_tree = git(checkout, "rev-parse", "HEAD^{tree}")
+            if not subprocess.run(["git", "-C", str(checkout), "merge-base", "--is-ancestor",
+                                   member["tip_sha"], before], stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL).returncode:
+                rows.append({"task_id": task_id, "candidate_tip": member["tip_sha"],
+                             "pre_tree": before_tree, "post_tree": before_tree,
+                             "decision": "already_present"})
+                continue
+            merged = _forecast_git(checkout, "merge", "--no-ff", "--no-commit",
+                                   member["tip_sha"], check=False)
+            if merged.returncode:
+                conflicts = _forecast_conflict_paths(checkout)
+                return {"schema_version": "juno_release_epoch_grouped_suffix_validation.v1",
+                        "status": "conflict", "repair_head": repair_head,
+                        "ordered_task_ids": remaining, "members": rows,
+                        "failed_task_id": task_id, "conflict_paths": conflicts}
+            tree = _forecast_git(checkout, "write-tree").stdout.strip()
+            environment = {**os.environ, "GIT_AUTHOR_NAME": "YYLO Grouped Repair Validator",
+                           "GIT_AUTHOR_EMAIL": "grouped-repair@invalid.local",
+                           "GIT_COMMITTER_NAME": "YYLO Grouped Repair Validator",
+                           "GIT_COMMITTER_EMAIL": "grouped-repair@invalid.local",
+                           "GIT_AUTHOR_DATE": f"2000-01-02T00:00:{index % 60:02d}Z",
+                           "GIT_COMMITTER_DATE": f"2000-01-02T00:00:{index % 60:02d}Z"}
+            commit = _forecast_git(checkout, "commit-tree", tree, "-p", before, "-p",
+                                   member["tip_sha"], env=environment).stdout.strip()
+            _forecast_git(checkout, "reset", "--quiet", "--hard", commit)
+            rows.append({"task_id": task_id, "candidate_tip": member["tip_sha"],
+                         "pre_tree": before_tree, "post_tree": tree, "decision": "clean"})
+        final_tree = git(checkout, "rev-parse", "HEAD^{tree}")
+    core = {"schema_version": "juno_release_epoch_grouped_suffix_validation.v1",
+            "status": "complete", "repair_head": repair_head,
+            "ordered_task_ids": remaining, "members": rows, "final_tree": final_tree}
+    return {**core, "validation_sha256": digest(core)}
+
+
 def apply_conflict_repair(controller: Path, epoch_id: str, receipt_path: Path,
                           token: str) -> dict[str, Any]:
     state = read_epoch(controller, epoch_id); require_epoch_token(state, token)
@@ -3471,10 +3554,21 @@ def apply_conflict_repair(controller: Path, epoch_id: str, receipt_path: Path,
         state["operator_packet"] = {**packet, "reason_code": "repair.out_of_scope",
                                     "unexpected_paths": sorted(changed - admitted)}
         return save_epoch(controller, state, "NEEDS_OPERATOR", "REPAIR_ESCALATED", state["operator_packet"])
+    suffix_validation = validate_grouped_repair_suffix(controller, state, head)
+    if suffix_validation["status"] != "complete":
+        state["operator_packet"] = {"reason_code": "repair.grouped_suffix_unresolved",
+            "task_id": suffix_validation["failed_task_id"],
+            "conflict_paths": suffix_validation["conflict_paths"],
+            "repair_budget": 1, "repair_budget_consumed": 0,
+            "receipt_consumed": False, "suffix_validation": suffix_validation,
+            "safe_next_action": "inspect and seal a fresh successor epoch; do not rerun repair"}
+        return save_epoch(controller, state, "NEEDS_OPERATOR", "GROUPED_SUFFIX_UNRESOLVED",
+                          state["operator_packet"])
     reference = {"schema_version": "juno_release_epoch_grouped_repair.v1",
                  "path": str(receipt_path.expanduser().resolve()), "sha256": file_hash(receipt_path),
                  "session_id": receipt.get("session_id"), "repair_commit": head,
                  "changed_paths": sorted(changed), "logical_conflict_set": logical_set,
+                 "suffix_validation": suffix_validation,
                  "model_sessions": 1, "immutable_receipts": 1,
                  "delta_review": "one_scoped_delta_review_required"}
     state["conflict_repair"] = reference
@@ -3951,8 +4045,8 @@ def epoch_status_projection(controller: Path, epoch_id: str) -> dict[str, Any]:
     unresolved = state.get("epoch_id") in _unresolved_finalization_epochs(controller)
     projected_state = "FINALIZATION_INCOMPLETE" if unresolved else state.get("state")
     projected_action = ("use only replay-finalization-successor with both exact targets"
-                        if unresolved else actions.get(state.get("state"),
-                                                       "inspect immutable epoch evidence"))
+                        if unresolved else (state.get("operator_packet") or {}).get("safe_next_action")
+                        or actions.get(state.get("state"), "inspect immutable epoch evidence"))
     return {"schema_version": "juno_release_epoch_status_projection.v1",
         "epoch_id": state.get("epoch_id"), "state": projected_state,
         "epoch_state": state.get("state"),
