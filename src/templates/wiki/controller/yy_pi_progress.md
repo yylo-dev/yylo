@@ -9,7 +9,7 @@ Do not assemble a producer with heredocs and do not use `sleep; tail` polling.
 
 ```text
 new command you own       -> yy watch exec -- COMMAND...
-already detached watch run -> yy watch status RUN_ID / yy watch await RUN_ID
+already detached watch run -> yy watch status RUN_ID / yy watch follow RUN_ID / yy watch await RUN_ID
 coherent task checkpoint   -> yy task checkpoint TASK_ID; yy evidence run TASK_ID
 waiting for task evidence  -> yy evidence await TASK_ID
 external one-shot blocker  -> await_blocker.py --then ...
@@ -40,6 +40,34 @@ yy watch await "$run_id"
 `status` is read-only. `await` observes the bound producer and returns its exit
 code. Timeout or interruption sends TERM and then bounded KILL only to the owned
 process group. Unrelated process groups are never cleanup targets.
+
+## Read-only log follower
+
+`follow` reads `combined.log` from byte zero, follows appended bytes, and returns
+the producer exit code only after observing the exact atomic footer. It never
+signals or acquires ownership of the producer. Ctrl-C exits only the follower.
+Malformed or missing footers are not terminal truth.
+
+```bash
+# Direct terminal or tmux pane: semantic ANSI when stdout is a TTY
+yy watch follow "$run_id"
+tmux split-window -h "yy watch follow '$run_id'"
+
+# Stable plain semantic layout
+NO_COLOR=1 yy watch follow "$run_id"
+yy watch follow "$run_id" | cat
+
+# Raw log access remains available without presentation
+tail -F ".juno_task/runtime/watch-runs/$run_id/combined.log"
+cat ".juno_task/runtime/watch-runs/$run_id/combined.log"
+```
+
+The follower colors only exact `[THINKING]`, `[TOOL]`, `[INPUT]`,
+`[TOOL_RESPONSE]`, `[ANSWER]`, and `[STATUS]` grammar. A tool response is red
+only when its enclosing compact tool metadata contains structured
+`"isError":true`; arbitrary words such as `error`, `failed`, or `blocked` do
+not select error styling. Unknown tags, malformed metadata, and non-Pi logs pass
+through unchanged. `NO_COLOR` and pipes preserve the same text and spacing.
 
 ## Task validation evidence
 
