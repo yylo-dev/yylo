@@ -16,6 +16,8 @@ describe('release train CLI', () => {
     const invoke = vi.fn(async () => undefined);
     const program = new Command().exitOverride();
     configureReleaseTrainCommand(program, invoke);
+    await program.parseAsync(['node', 'yy', 'release', 'train', 'select', '/train.json', '--json']);
+    expect(invoke).toHaveBeenLastCalledWith('select', '/train.json', ['--json']);
     await program.parseAsync(['node', 'yy', 'release', 'train', 'seal', '/train.json', '--json']);
     expect(invoke).toHaveBeenLastCalledWith('seal', '/train.json', ['--json']);
     await program.parseAsync(['node', 'yy', 'release', 'train', 'drive', 'epoch-1',
@@ -38,6 +40,7 @@ describe('release train CLI', () => {
     expect(command('reconcile-members')?.description()).toContain('Receipt-bound');
     expect(command('replay-finalization-successor')?.description()).toContain('Typed descendant-target replay');
     expect(command('shadow')?.description()).toContain('Read-only');
+    expect(command('select')?.description()).toContain('does not seal');
     expect(command('seal')?.description()).toContain('Explicitly close admission');
     expect(command('drive')?.description()).toContain('one target CAS');
     expect(command('repair')?.description()).toContain('one bounded');
