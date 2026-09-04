@@ -1680,8 +1680,13 @@ def run(args: argparse.Namespace) -> int:
         revalidated, _ = release_conflict_admission(args, controller_before)
         if revalidated != identity:
             raise RunnerError("conflict worker authority drifted before provider dispatch")
+    # Lifecycle orchestration is one bounded provider dispatch.  Higher iteration
+    # counts previously multiplied identical expensive contexts before any
+    # controller-owned transition could be observed.
     argv = [env_contract["node_runtime"]["yy_executable"], "pi", "--no-hooks", "--config",
-            compatible_config["derived"]["path"], "-w", str(agent_root), "-f", str(prompt)]
+            compatible_config["derived"]["path"], "--max-iterations", "1",
+            "-w", str(agent_root), "-f", str(prompt)]
+    validate_orchestrator_iterations(argv)
     prompt_evidence = evidence(prompt)
     if binding is None:
         prompt_evidence["echo"] = prompt_echo
@@ -1898,6 +1903,24 @@ def parser() -> argparse.ArgumentParser:
     recover.add_argument("--failed-receipt", required=True)
     recover.add_argument("--out-dir", required=True)
     return top
+
+
+def validate_orchestrator_iterations(argv: list[str]) -> None:
+    """Fail closed before dispatch unless the lifecycle launch is exactly one turn."""
+    values: list[str] = []
+    for index, item in enumerate(argv):
+        if item == "--max-iterations":
+            if index + 1 >= len(argv):
+                raise RunnerError("orchestrator iterations must be exactly 1")
+            values.append(argv[index + 1])
+        elif item.startswith("--max-iterations="):
+            values.append(item.partition("=")[2])
+        elif item == "-i":
+            if index + 1 >= len(argv):
+                raise RunnerError("orchestrator iterations must be exactly 1")
+            values.append(argv[index + 1])
+    if values != ["1"]:
+        raise RunnerError("orchestrator iterations must be exactly 1")
 
 
 def main() -> int:

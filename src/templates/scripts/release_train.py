@@ -6,6 +6,7 @@ import argparse
 import ast
 import base64
 import fcntl
+import fnmatch
 import hashlib
 import json
 import os
@@ -49,6 +50,8 @@ EPOCH_FINALIZATION_SUCCESSOR_SCHEMA = "juno_release_epoch_terminal_finalization_
 EPOCH_FINALIZATION_MEMBER_SCHEMA = "juno_release_epoch_terminal_member.v1"
 EPOCH_FINALIZATION_RECEIPT_SCHEMA = "juno_release_epoch_terminal_finalization_receipt.v1"
 EPOCH_FINALIZATION_SUPERSESSION_SCHEMA = "juno_release_epoch_terminal_finalization_supersession.v1"
+EPOCH_DELIVERY_SELECTION_SCHEMA = "juno_epoch_delivery_selection.v1"
+WAVE_ECONOMICS_SCHEMA = "juno_wave_economics_projection.v1"
 EXTERNAL_ACTIONS = {"release", "tag", "push", "publish", "deploy", "cleanup"}
 EPOCH_TERMINAL_STATES = {"RELEASE_READY", "CLOSED", "PAUSED_REQUIRED", "NEEDS_OPERATOR", "STALE"}
 ACTIVE_QUEUE_STATES = {"QUEUED", "MERGING", "CONFLICT", "CONFLICT_RESOLVED", "AWAITING_RISK",
@@ -868,13 +871,106 @@ def queue_epoch_members(controller: Path, declaration: dict[str, Any], target_sh
                      "tree_sha": tree, "task_revision": task.get("last_modified"),
                      "task_sha256": digest(task), "queue_record_sha256": digest(record),
                      "fencing_attempt": attempt.get("arbiter_attempt") or attempt.get("attempt"),
-                     "complete_input_identity": closure, "evidence_sha256": digest(evidence),
+                     "complete_input_identity": closure,
+                     "focused_evidence_count": len(evidence), "evidence_sha256": digest(evidence),
                      "review_sha256": digest(attempt.get("risk") or attempt.get("review") or {}),
                      "changed_paths": sorted(record.get("changed_paths", [])),
                      "blocked_by": sorted(task.get("blocked_by", []) or [])})
     rows.sort(key=lambda row: (row["enqueue_sequence"] if isinstance(row["enqueue_sequence"], int) else 2**63,
                                row["task_id"]))
     return rows
+
+
+def _policy_patterns(controller: Path, key: str) -> list[str]:
+    path = controller / ".juno_task/config/risk-policy.json"
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    patterns = value.get(key) if isinstance(value, dict) else None
+    return patterns if isinstance(patterns, list) and all(isinstance(item, str) for item in patterns) else []
+
+
+def _matched_roots(paths: list[str], patterns: list[str]) -> list[str]:
+    return sorted({pattern for pattern in patterns for path in paths
+                   if fnmatch.fnmatchcase(path, pattern)})
+
+
+def wave_economics_projection(controller: Path, members: list[dict[str, Any]],
+                              order: list[str]) -> dict[str, Any]:
+    """Project deterministic changed-surface overlap and broad-suite savings."""
+    shared_patterns = _policy_patterns(controller, "shared_infrastructure_paths")
+    high_patterns = _policy_patterns(controller, "high_risk_paths")
+    rows = []
+    for member in members:
+        paths = sorted(set(member.get("changed_paths") or []))
+        shared = _matched_roots(paths, shared_patterns)
+        high = _matched_roots(paths, high_patterns)
+        focused_count = member.get("focused_evidence_count", 0)
+        rows.append({"task_id": member["task_id"], "changed_paths": paths,
+            "shared_roots": shared, "high_risk_roots": high,
+            "focused_command_count": focused_count if isinstance(focused_count, int) else 0,
+            "selected_validation_roots": sorted(set(shared + high))})
+    by_id = {row["task_id"]: row for row in rows}
+    overlap = []
+    for index, left_id in enumerate(order):
+        for right_id in order[index + 1:]:
+            left, right = by_id[left_id], by_id[right_id]
+            exact = sorted(set(left["changed_paths"]) & set(right["changed_paths"]))
+            roots = sorted(set(left["selected_validation_roots"]) &
+                           set(right["selected_validation_roots"]))
+            overlap.append({"left_task_id": left_id, "right_task_id": right_id,
+                            "exact_paths": exact, "shared_validation_roots": roots})
+    broad_members = [row["task_id"] for row in rows
+                     if row["selected_validation_roots"]]
+    recommend = len(broad_members) >= 2 or any(
+        row["exact_paths"] or row["shared_validation_roots"] for row in overlap)
+    per_candidate = len(broad_members)
+    aggregate = 1 if broad_members else 0
+    return {"schema_version": WAVE_ECONOMICS_SCHEMA,
+        "membership": order, "members": rows, "overlap_matrix": overlap,
+        "dependency_fifo_order": order,
+        "command_counts": {"focused": sum(row["focused_command_count"] for row in rows),
+            "per_candidate_broad": per_candidate, "aggregate_broad": aggregate,
+            "avoided_broad": max(0, per_candidate - aggregate)},
+        "recommendation": "epoch_delivery" if recommend else "ordinary_fifo",
+        "recommendation_reasons": (["two_or_more_compatible_shared_or_high_risk_candidates"]
+                                   if recommend else []),
+        "train_eligible": bool(members)}
+
+
+def epoch_delivery_selection_path(controller: Path, epoch_id: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", epoch_id):
+        raise ReleaseTrainError("epoch id is unsafe")
+    return controller / ".juno_task/runtime/epoch-delivery-selections" / f"{epoch_id}.json"
+
+
+def select_epoch_delivery(controller: Path, declaration_path: Path) -> dict[str, Any]:
+    """Persist explicit wave routing without sealing or granting target authority."""
+    plan = build_epoch_plan(controller, declaration_path)
+    path = epoch_delivery_selection_path(controller, plan["epoch_id"])
+    body = {"schema_version": EPOCH_DELIVERY_SELECTION_SCHEMA,
+        "epoch_id": plan["epoch_id"], "target_ref": plan["target_ref"],
+        "base_sha": plan["base_sha"], "plan_id": plan["plan_id"],
+        "declaration": plan["declaration"], "member_task_ids": plan["order"],
+        "required_task_ids": sorted(row["task_id"] for row in plan["members"] if row["required"]),
+        "optional_task_ids": sorted(row["task_id"] for row in plan["members"] if not row["required"]),
+        "cutoff_policy": "all_eligible_queue_snapshot_at_explicit_seal",
+        "external_exclusions": plan["exclusions"],
+        "economics": plan["economics"],
+        "authority": "routing_only_explicit_seal_still_required"}
+    body["selection_id"] = digest(body)
+    if path.exists():
+        current = json.loads(path.read_text())
+        if current != body:
+            raise ReleaseTrainError("epoch delivery selection already exists with different immutable inputs")
+        return {"outcome": "already_selected", "selection": current,
+                "safe_next_action": f"yy release train seal {plan['declaration']['path']}"}
+    atomic_json(path, body, exclusive=True)
+    return {"outcome": "selected", "selection": body,
+            "safe_next_action": f"yy release train seal {plan['declaration']['path']}",
+            "side_effects": ["controller_routing_record"],
+            "excluded_side_effects": ["seal", "test", "review", "target_mutation"]}
 
 
 def epoch_dependency_order(members: list[dict[str, Any]], declaration: dict[str, Any]) -> tuple[list[str], list[list[str]]]:
@@ -1519,6 +1615,7 @@ PHASE1_SUITE_TESTS = (
     "ReleaseTrainTests.test_clean_ready_release_and_version_gate",
     "ReleaseTrainTests.test_lean_sparse_controller_plans_release_from_target_tree",
     "ReleaseTrainTests.test_epoch_seal_is_complete_immutable_and_idempotent",
+    "ReleaseTrainTests.test_wave_economics_and_explicit_selection_route_without_sealing",
     "ReleaseTrainTests.test_epoch_status_projection_is_bounded_and_actionable",
     "ReleaseTrainTests.test_epoch_seal_refuses_required_missing_closure_without_state",
     "ReleaseTrainTests.test_rc7_rc8_serial_conflicts_fit_one_conservative_repair_set",
@@ -2033,6 +2130,7 @@ def build_epoch_plan(controller: Path, declaration_path: Path) -> dict[str, Any]
             "requested_version": declaration["requested_version"],
             "exclusions": declaration["exclusions"],
             "mutation_authority": "explicit_seal_required"}
+    body["economics"] = wave_economics_projection(controller, members, order)
     manifest = forecast_epoch_conflicts(controller, repository, body)
     body["conflict_manifest"] = manifest
     return {**body, "plan_id": digest(body)}
@@ -3656,7 +3754,7 @@ def shadow_source(controller: Path, source_path: Path) -> tuple[dict[str, Any], 
     plan_fields = {key: seal[key] for key in ("schema_version", "epoch_id", "declaration",
         "target_ref", "base_sha", "members", "order", "dependency_edges", "runtime_sha256",
         "policy_sha256", "requested_version", "exclusions", "mutation_authority",
-        "conflict_authority", "conflict_manifest") if key in seal}
+        "conflict_authority", "conflict_manifest", "economics") if key in seal}
     if digest(plan_fields) != seal["plan_id"]:
         raise ReleaseTrainError("historical epoch sealed plan identity is invalid")
     receipts = value.get("receipts")
@@ -3773,6 +3871,8 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--json", action="store_true"); command.add_argument("--output", type=Path)
     inspect = subs.add_parser("inspect"); inspect.add_argument("declaration", type=Path)
     inspect.add_argument("--json", action="store_true"); inspect.add_argument("--output", type=Path)
+    select = subs.add_parser("select"); select.add_argument("declaration", type=Path)
+    select.add_argument("--json", action="store_true")
     seal = subs.add_parser("seal"); seal.add_argument("declaration", type=Path)
     seal.add_argument("--json", action="store_true")
     epoch_status = subs.add_parser("epoch-status"); epoch_status.add_argument("epoch_id")
@@ -3879,6 +3979,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             result = check_plan(controller, args.plan, args.action, args.task_id, args.requested_version)
         elif args.operation == "inspect":
             result = build_epoch_plan(controller, args.declaration)
+        elif args.operation == "select":
+            result = select_epoch_delivery(controller, args.declaration)
         elif args.operation == "seal":
             result = seal_epoch(controller, args.declaration)
         elif args.operation == "epoch-status":

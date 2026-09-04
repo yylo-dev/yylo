@@ -488,6 +488,25 @@ raise SystemExit(2)
         current = runtime.read_epoch(self.root, "rc-1")
         self.assertEqual(["OLD", "REQ"], [row["task_id"] for row in current["seal"]["members"]])
 
+    def test_wave_economics_and_explicit_selection_route_without_sealing(self) -> None:
+        self.prepare_epoch()
+        (self.root / ".juno_task/config/risk-policy.json").write_text(json.dumps({
+            "shared_infrastructure_paths": ["src/**"], "high_risk_paths": ["src/**"]}) + "\n")
+        plan = runtime.build_epoch_plan(self.root, self.declaration)
+        economics = plan["economics"]
+        self.assertEqual("epoch_delivery", economics["recommendation"])
+        self.assertEqual({"focused": 2, "per_candidate_broad": 2,
+                          "aggregate_broad": 1, "avoided_broad": 1},
+                         economics["command_counts"])
+        self.assertEqual(["OLD", "REQ"], economics["membership"])
+        selected = runtime.select_epoch_delivery(self.root, self.declaration)
+        self.assertEqual("selected", selected["outcome"])
+        self.assertEqual("routing_only_explicit_seal_still_required",
+                         selected["selection"]["authority"])
+        self.assertFalse(runtime.epoch_state_path(self.root, "rc-1").exists())
+        self.assertEqual("already_selected",
+                         runtime.select_epoch_delivery(self.root, self.declaration)["outcome"])
+
     def test_epoch_status_projection_is_bounded_and_actionable(self) -> None:
         self.prepare_epoch()
         runtime.seal_epoch(self.root, self.declaration)

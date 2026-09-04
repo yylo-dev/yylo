@@ -2326,6 +2326,34 @@ class MergeQueueTests(unittest.TestCase):
         self.assertNotIn("arbiter", replay)
         self.assertEqual(json.loads((root / "state.json").read_text())["attempt"], 1)
 
+    def test_epoch_selected_members_refuse_ordinary_arbiter_before_attempt(self) -> None:
+        self.install_merge_drive_assets()
+        self.commit_feature("X", "src/epoch-selected.txt", "train only\n")
+        config = task_runtime.load_config(self.controller.resolve())
+        selection = {"schema_version": "juno_epoch_delivery_selection.v1",
+            "epoch_id": "wave-1", "target_ref": config["target_ref"],
+            "base_sha": self.base, "plan_id": "a" * 64,
+            "declaration": {"path": "/tmp/wave-1.json", "sha256": "b" * 64,
+                            "revision": 1, "identity_sha256": "c" * 64},
+            "member_task_ids": ["X"], "required_task_ids": ["X"],
+            "optional_task_ids": [],
+            "cutoff_policy": "all_eligible_queue_snapshot_at_explicit_seal",
+            "external_exclusions": ["release"], "economics": {},
+            "authority": "routing_only_explicit_seal_still_required"}
+        selection["selection_id"] = merge_runtime.digest(selection)
+        path = self.controller / ".juno_task/runtime/epoch-delivery-selections/wave-1.json"
+        path.parent.mkdir(parents=True); path.write_text(json.dumps(selection, sort_keys=True) + "\n")
+        before = git(self.repository, "rev-parse", "refs/heads/product")
+        observed = merge_runtime.target_arbiter_status(self.controller.resolve())
+        refused = merge_runtime.merge_drive(self.controller.resolve())
+        self.assertEqual("epoch_delivery_selected", observed["reason_code"])
+        self.assertIn("release train inspect", observed["next_action"])
+        self.assertEqual(("REFUSED", False), (refused["outcome"], refused["mutated"]))
+        self.assertEqual(before, git(self.repository, "rev-parse", "refs/heads/product"))
+        root = merge_runtime._arbiter_root(
+            self.controller.resolve(), self.repository.resolve(), config["target_ref"])
+        self.assertFalse((root / "state.json").exists())
+
     def test_target_arbiter_dead_predecessor_yields_fenced_successor(self) -> None:
         self.install_merge_drive_assets()
         self.commit_feature("X", "src/arbiter-successor.txt", "successor\n")
