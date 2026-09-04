@@ -2269,7 +2269,7 @@ def record_control_audit(controller: Path, surface: str, operation: str,
             "lease-status", "lease-heartbeat", "lease-handoff", "lease-successor",
             "lease-revoke", "lease-release"}:
         raise TaskWorkspaceError(f"unsupported task audit operation: {operation}")
-    if surface == "merge" and operation not in {"status", "drive", "next", "resolve", "review", "reopen", "reconcile", "refresh", "withdraw"}:
+    if surface == "merge" and operation not in {"status", "drive", "next", "resolve", "review", "reopen", "reconcile", "refresh", "withdraw", "recover-full-suite-failure", "recover-authority-drift", "supersede-lifecycle-journal"}:
         raise TaskWorkspaceError(f"unsupported merge audit operation: {operation}")
     if forwarded_policy is not None and forwarded_policy != expected_policy:
         raise TaskWorkspaceError(
