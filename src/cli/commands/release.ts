@@ -4,7 +4,7 @@ import fs from 'fs-extra';
 import { Command } from 'commander';
 import { routeControlPlane } from '../../utils/control-plane-router.js';
 
-export type ReleaseTrainOperation = 'plan' | 'status' | 'inspect' | 'seal' | 'epoch-status' | 'reconcile-members' | 'replay-finalization-successor' | 'drive' | 'eject' | 'repair' | 'replay-repair' | 'retry' | 'shadow' | 'bootstrap-inspect' | 'bootstrap-seal' | 'bootstrap-status' | 'bootstrap-drive';
+export type ReleaseTrainOperation = 'plan' | 'status' | 'inspect' | 'select' | 'seal' | 'epoch-status' | 'reconcile-members' | 'replay-finalization-successor' | 'drive' | 'eject' | 'repair' | 'replay-repair' | 'retry' | 'shadow' | 'bootstrap-inspect' | 'bootstrap-seal' | 'bootstrap-status' | 'bootstrap-drive';
 export type ReleaseTrainInvoker = (
   operation: ReleaseTrainOperation, declaration: string, extraArgs?: string[],
 ) => Promise<void>;
@@ -45,6 +45,13 @@ export function configureReleaseTrainCommand(
         [...(options.json ? ['--json'] : []), ...(options.output ? ['--output', options.output] : [])],
       ));
   }
+  train.command('select')
+    .description('Explicitly route the exact wave to epoch delivery; does not seal, test, review, or mutate the target')
+    .argument('<declaration>', 'Versioned release-train declaration JSON')
+    .option('--json', 'Emit stable versioned JSON')
+    .action((declaration: string, options: { json?: boolean }) => invoke(
+      'select', declaration, options.json ? ['--json'] : [],
+    ));
   train.command('seal')
     .description('Explicitly close admission and create one immutable fenced epoch')
     .argument('<declaration>', 'Versioned release-train declaration JSON')

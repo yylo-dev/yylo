@@ -45,6 +45,9 @@ explicit seal (close admission)
 
 `plan`, `status`, `inspect`, `epoch-status`, and `shadow` are observations. They
 never seal, compose, mutate a target, release, push, publish, deploy, or clean.
+`select` explicitly records routing for an exact umbrella/shared-path wave but
+still grants no seal, validation, review, or target authority. Once selected,
+the ordinary arbiter refuses those members with `epoch_delivery_selected`.
 `seal` is the sole v1 admission-closing authority and returns a one-time fencing
 token. Every later mutation requires that exact token.
 
@@ -52,6 +55,9 @@ token. Every later mutation requires that exact token.
 
 ```bash
 yy release train inspect /absolute/train.json --json
+# inspect includes overlap, dependency/FIFO order, selected validation roots,
+# per-candidate versus aggregate command counts, and a routing recommendation
+yy release train select /absolute/train.json --json
 yy release train seal /absolute/train.json --json
 # retain lease_token from the seal result
 yy release train drive EPOCH_ID --epoch-token TOKEN --json

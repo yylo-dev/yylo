@@ -7228,6 +7228,35 @@ def _arbiter_observation(state: Optional[dict[str, Any]]) -> dict[str, str]:
     return {"status": observation.status, "detail": observation.detail}
 
 
+def _epoch_delivery_selections(controller: Path, target_ref: str,
+                               eligible_task_ids: list[str]) -> list[dict[str, Any]]:
+    """Return immutable explicit train routing that overlaps ordinary FIFO."""
+    root = controller / ".juno_task/runtime/epoch-delivery-selections"
+    eligible = set(eligible_task_ids)
+    selected: list[dict[str, Any]] = []
+    if not root.is_dir():
+        return selected
+    for path in sorted(root.glob("*.json")):
+        try:
+            value = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        identity = value.get("selection_id") if isinstance(value, dict) else None
+        unsigned = {key: item for key, item in value.items() if key != "selection_id"} if isinstance(value, dict) else {}
+        members = value.get("member_task_ids") if isinstance(value, dict) else None
+        if (value.get("schema_version") != "juno_epoch_delivery_selection.v1"
+                or value.get("target_ref") != target_ref
+                or identity != digest(unsigned) or not isinstance(members, list)):
+            continue
+        overlap = sorted(eligible & set(members))
+        if overlap:
+            selected.append({"epoch_id": value.get("epoch_id"), "selection_id": identity,
+                             "base_sha": value.get("base_sha"), "task_ids": overlap,
+                             "declaration_path": (value.get("declaration") or {}).get("path"),
+                             "path": str(path.resolve())})
+    return selected
+
+
 def target_arbiter_status(controller: Path) -> dict[str, Any]:
     config = task_runtime.load_config(controller)
     repository = task_runtime.product_repository(controller, config)
@@ -7237,8 +7266,15 @@ def target_arbiter_status(controller: Path) -> dict[str, Any]:
     queue = status(controller)
     eligible = [row for row in queue["tasks"]
                 if row.get("state") in TARGET_ARBITER_WORK_STATES]
+    selections = _epoch_delivery_selections(
+        controller, config["target_ref"], [row["task_id"] for row in eligible])
     if state and state.get("state") == "ACTIVE" and observation["status"] == "alive":
         reason_code, next_action = "arbiter_running", "observe with: yy merge arbiter status"
+    elif selections:
+        reason_code = "epoch_delivery_selected"
+        declaration_path = selections[0].get("declaration_path") or "DECLARATION.json"
+        next_action = ("inspect selected epoch with: yy release train inspect "
+                       + str(declaration_path) + "; explicit seal remains required")
     elif eligible:
         reason_code, next_action = "eligible_work", "yy merge arbiter run"
     else:
@@ -7249,6 +7285,7 @@ def target_arbiter_status(controller: Path) -> dict[str, Any]:
             "current_fifo": (current_fifo_identity(controller, config, None)
                              if eligible else None),
             "eligible_task_ids": [row["task_id"] for row in eligible],
+            "epoch_delivery_selections": selections,
             "reason_code": reason_code, "next_action": next_action}
 
 
@@ -7803,6 +7840,8 @@ def merge_drive(controller: Path, through: Optional[str] = None) -> dict[str, An
     repository = task_runtime.product_repository(controller, config)
     # Admission is read-only. No worker attempt is created for an idle queue.
     admission = target_arbiter_status(controller)
+    if admission.get("reason_code") == "epoch_delivery_selected":
+        return {**admission, "outcome": "REFUSED", "mutated": False}
     if not admission["eligible_task_ids"]:
         # Preserve immutable terminal-drive replay for observers without
         # creating a new arbiter attempt. A never-used empty queue is plain IDLE.
@@ -7823,6 +7862,8 @@ def merge_drive(controller: Path, through: Optional[str] = None) -> dict[str, An
         # Recheck after ownership acquisition so two arrivals cannot create an
         # idle attempt after the first worker drains the queue.
         admission = target_arbiter_status(controller)
+        if admission.get("reason_code") == "epoch_delivery_selected":
+            return {**admission, "outcome": "REFUSED", "mutated": False}
         if not admission["eligible_task_ids"]:
             if not (controller / MERGE_DRIVE_ROOT / "latest.json").is_file():
                 return {**admission, "outcome": "IDLE"}

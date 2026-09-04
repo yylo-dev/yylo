@@ -29,7 +29,8 @@ product code.
 7. Observe delivery with `yy merge status` or `yy merge arbiter status`. The
    target owner uses one fenced `yy merge arbiter run` (or typed `yy merge drive`)
    instead of session polling. `next|resolve` are explicit recovery mutations.
-8. For a release wave, inspect then explicitly seal one immutable epoch, drain
+8. For an umbrella/shared-path wave, inspect economics, explicitly `select` epoch
+   delivery, then explicitly seal one immutable epoch; ordinary FIFO must not race it. Drain
    every eligible pre-cutoff candidate into a private history-preserving train,
    validate/review the aggregate once, and update the target with one expected-old-
    SHA CAS. Read `$(yy wiki --path)/controller/sealed_release_epochs.md`; release

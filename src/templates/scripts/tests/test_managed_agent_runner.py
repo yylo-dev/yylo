@@ -397,6 +397,14 @@ print(json.dumps({'path':str(pathlib.Path.cwd().resolve()),'role':'controller',
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("lacks required typed terminal outcome", refused.stderr)
 
+    def test_orchestrator_iterations_refuse_non_one_before_dispatch(self):
+        runner.validate_orchestrator_iterations(["yy", "pi", "--max-iterations", "1"])
+        for argv in (["yy", "pi"], ["yy", "pi", "--max-iterations", "2"],
+                     ["yy", "pi", "-i", "200"],
+                     ["yy", "pi", "--max-iterations=1", "--max-iterations=1"]):
+            with self.assertRaisesRegex(runner.RunnerError, "iterations must be exactly 1"):
+                runner.validate_orchestrator_iterations(list(argv))
+
     def test_conflicting_parent_and_venv_path_use_canonical_yy_node_runtime(self):
         out = self.tmp / "node-contract"
         inherited = self.env()
@@ -405,6 +413,9 @@ print(json.dumps({'path':str(pathlib.Path.cwd().resolve()),'role':'controller',
         result = subprocess.run(self.command(out), env=inherited, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         launch = json.loads((out / "launch.json").read_text())
+        self.assertEqual(1, launch["argv"].count("--max-iterations"))
+        iteration_index = launch["argv"].index("--max-iterations")
+        self.assertEqual("1", launch["argv"][iteration_index + 1])
         node = launch["environment_contract"]["node_runtime"]
         self.assertEqual(Path(inherited["YYLO_NODE_EXECUTABLE"]), Path(node["executable"]))
         self.assertEqual("18.15.0", node["path_node_version_before"])
