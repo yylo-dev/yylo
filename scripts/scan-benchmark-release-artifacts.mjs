@@ -15,7 +15,9 @@ const sha256 = (value) => `sha256:${createHash('sha256').update(value).digest('h
 const canonicalHash = (value) => sha256(canonicalJson(value));
 const emptyHash = sha256('');
 
-const SENSITIVE_ENV = /(?:TOKEN|SECRET|PASSWORD|AUTH|REGISTRY|API_KEY|^(?:HOME|XDG_))/u;
+const SECRET_ENV = /(?:TOKEN|SECRET|PASSWORD|AUTH|REGISTRY|API_KEY)/u;
+const PRIVATE_PATH_ENV = /^(?:HOME|XDG_(?:CONFIG|CACHE|DATA|STATE)_HOME)$/u;
+export const isSensitiveEnvironmentName = (name) => SECRET_ENV.test(name) || PRIVATE_PATH_ENV.test(name);
 const DETECTORS = Object.freeze({
   'private-registry': /(?:registry\s*=\s*https?:\/\/(?!registry\.npmjs\.org)|https?:\/\/(?:npm|packages|registry)\.[^\s/]*(?:private|internal)[^\s/]*)/iu,
   'auth-credentials': /(?:https?:\/\/[^\s"']+@|_authToken\s*=|\b(?:api[_-]?key|password|secret|access[_-]?token)\s*[:=]\s*["']?[A-Za-z0-9+/_=-]{16,})/iu,
@@ -34,7 +36,7 @@ const SYNTHETIC_ARTIFACTS = Object.freeze({
 });
 
 const forbiddenRuntimeValues = Object.entries(process.env)
-  .filter(([name, value]) => value !== undefined && value.length >= 4 && SENSITIVE_ENV.test(name) && !name.startsWith('YYLO_BENCHMARK_RELEASE_'))
+  .filter(([name, value]) => value !== undefined && value.length >= 4 && isSensitiveEnvironmentName(name) && !name.startsWith('YYLO_BENCHMARK_RELEASE_'))
   .map(([, value]) => Buffer.from(value));
 
 const files = [];
