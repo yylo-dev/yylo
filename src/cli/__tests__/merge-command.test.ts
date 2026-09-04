@@ -152,6 +152,13 @@ describe('merge queue CLI', () => {
       '--receipt', '/receipt.json', '--receipt-sha256', 'abc']);
     expect(invoke).toHaveBeenCalledWith('refresh', undefined,
       ['apply', 'T123', '--receipt', '/receipt.json', '--receipt-sha256', 'abc']);
+    invoke.mockClear();
+    await program.parseAsync(['node', 'yy', 'merge', 'recover-authority-drift', 'T123',
+      '--attempt', '225', '--terminal-receipt', '/attempt-225-failed.json',
+      '--terminal-receipt-sha256', 'abc', '--expected-revision', 'def']);
+    expect(invoke).toHaveBeenCalledWith('recover-authority-drift', 'T123', [
+      '--attempt', '225', '--terminal-receipt', '/attempt-225-failed.json',
+      '--terminal-receipt-sha256', 'abc', '--expected-revision', 'def']);
   });
 
   it('keeps next TASK_ID optional and requires task identity for recovery mutations', () => {
