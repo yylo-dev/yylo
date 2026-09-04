@@ -187,6 +187,75 @@ def path_within(path: str, roots: list[str]) -> bool:
     return any(path == root or path.startswith(root + "/") for root in roots)
 
 
+PATH_ORIGIN_PROJECTION_SCHEMA = "juno_path_origin_projection.v1"
+
+
+def project_path_origins(*, base_tree: dict[str, Optional[str]],
+                         source_tree: dict[str, Optional[str]],
+                         target_tree: dict[str, Optional[str]],
+                         candidate_tree: dict[str, Optional[str]],
+                         admitted_paths: list[str],
+                         generated_bindings: list[dict[str, Any]],
+                         conflict_paths: list[str]) -> dict[str, Any]:
+    """Classify frozen Git blob maps without ancestry-order shortcuts.
+
+    Admitted legacy ``changed_paths`` are evidence only when the source blob
+    actually differs from the immutable base.  An inherited target blob is
+    target-derived only while it remains byte-identical to the target; altered
+    inherited bytes are authored.  Every consumer receives this same versioned
+    projection and must fail closed on ``ambiguous_paths``.
+    """
+    admitted = set(admitted_paths)
+    conflicts = set(conflict_paths)
+    generated = {
+        row.get("destination") for row in generated_bindings
+        if isinstance(row, dict) and isinstance(row.get("destination"), str)
+    }
+    paths = sorted(set(base_tree) | set(source_tree) | set(target_tree)
+                   | set(candidate_tree) | admitted | conflicts | generated)
+    rows: list[dict[str, Any]] = []
+    authored: list[str] = []
+    target_derived: list[str] = []
+    generated_paths: list[str] = []
+    candidate_delta: list[str] = []
+    ambiguous: list[str] = []
+    for path in paths:
+        base = base_tree.get(path); source = source_tree.get(path)
+        target = target_tree.get(path); candidate = candidate_tree.get(path)
+        labels: list[str] = []
+        source_changed = source != base
+        target_changed = target != base
+        if path in admitted and not source_changed:
+            labels.append("ambiguous-legacy-admission")
+            ambiguous.append(path)
+        if source_changed:
+            if target_changed and source == target and path not in admitted:
+                labels.append("target-derived")
+                target_derived.append(path)
+            else:
+                labels.append("authored")
+                authored.append(path)
+        if path in generated:
+            labels.append("generated")
+            generated_paths.append(path)
+        if path in conflicts:
+            labels.append("conflict")
+        if candidate != target:
+            labels.append("candidate-delta")
+            candidate_delta.append(path)
+        if labels:
+            rows.append({"path": path, "origins": labels, "base_blob": base,
+                         "source_blob": source, "target_blob": target,
+                         "candidate_blob": candidate})
+    return {"schema_version": PATH_ORIGIN_PROJECTION_SCHEMA,
+            "authored_paths": authored,
+            "target_derived_paths": target_derived,
+            "generated_paths": generated_paths,
+            "conflict_paths": sorted(conflicts),
+            "candidate_delta_paths": candidate_delta,
+            "ambiguous_paths": ambiguous, "paths": rows}
+
+
 def validation_profile_selection(config: dict[str, Any],
                                  changed_paths: Any) -> dict[str, Any]:
     """Deterministically route validation from the authored Git path set.

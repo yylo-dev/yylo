@@ -230,6 +230,14 @@ class RiskPolicyTest(unittest.TestCase):
         self.assertEqual("high", plan["tier"])
         self.assertEqual(["docs/auth.md", "src/security/auth.ts"], plan["changed_paths"])
 
+    def test_lifecycle_infrastructure_requires_two_sequential_reviewers(self) -> None:
+        for path in (".juno_task/scripts/merge_queue.py",
+                     "juno-code/src/templates/scripts/merge_queue.py"):
+            plan = self.plan({path: "runtime\n"})
+            self.assertEqual("high", plan["tier"])
+            self.assertEqual(["reviewer_a", "reviewer_b"], plan["reviewer_sequence"])
+            self.assertEqual((2, 2), (plan["min_reviews"], plan["max_reviews"]))
+
     def test_docs_normal_high_and_release_are_derived(self) -> None:
         docs = self.plan({"docs/flow.md": "docs\n"})
         self.assertEqual(("low", 0), (docs["tier"], docs["max_reviews"]))
