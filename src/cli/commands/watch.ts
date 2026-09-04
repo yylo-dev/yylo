@@ -4,7 +4,7 @@ import fs from 'fs-extra';
 import { Command } from 'commander';
 import { routeControlPlane } from '../../utils/control-plane-router.js';
 
-export type WatchOperation = 'exec' | 'status' | 'await';
+export type WatchOperation = 'exec' | 'status' | 'await' | 'follow';
 export type WatchInvoker = (operation: WatchOperation, args: string[]) => Promise<void>;
 
 export async function invokeWatch(operation: WatchOperation, args: string[]): Promise<void> {
@@ -41,4 +41,8 @@ export function configureWatchCommand(program: Command, invoke: WatchInvoker = i
     ]));
   watch.command('status').argument('<run-id>').action((runId: string) => invoke('status', [runId]));
   watch.command('await').argument('<run-id>').action((runId: string) => invoke('await', [runId]));
+  watch.command('follow')
+    .description('Follow a run log with read-only semantic terminal presentation')
+    .argument('<run-id>')
+    .action((runId: string) => invoke('follow', [runId]));
 }
