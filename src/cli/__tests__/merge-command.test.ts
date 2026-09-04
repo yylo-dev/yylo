@@ -61,6 +61,9 @@ afterEach(async () => {
 describe('merge queue CLI', () => {
   it.each([
     { argv: ['status'], expected: ['status'] },
+    { argv: ['status', '--detail', 'T123'], expected: ['status', undefined, ['--detail', 'T123']] },
+    { argv: ['status', '--detail'], expected: ['status', undefined, ['--detail']] },
+    { argv: ['status', '--full'], expected: ['status', undefined, ['--full']] },
     { argv: ['next'], expected: ['next'] },
     { argv: ['next', 'T123'], expected: ['next', 'T123'] },
     { argv: ['resolve', 'T123'], expected: ['resolve', 'T123'] },
@@ -213,6 +216,10 @@ describe('merge queue CLI', () => {
     const arbiter = command('arbiter');
     const arbiterCommand = (name: string) => arbiter?.commands.find((entry) => entry.name() === name);
     expect(command('status')?.description()).toContain('Read-only');
+    expect(command('status')?.description()).toContain('bounded');
+    expect(command('status')?.options.map((option) => option.long)).toEqual([
+      '--detail', '--full', '--json',
+    ]);
     expect(arbiterCommand('status')?.description()).toContain('Read-only');
     expect(arbiterCommand('run')?.description()).toContain('Explicit mutation');
     expect(command('next')?.description()).toContain('Explicit recovery mutation');
