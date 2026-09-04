@@ -64,6 +64,7 @@ PRE_CAS_EDIT_RECOVERY_ROOT = ".juno_task/runtime/merge-queue/pre-cas-edit-recove
 LIFECYCLE_SUPERSESSION_SCHEMA = "juno_merge_lifecycle_journal_supersession.v1"
 FULL_SUITE_REPAIR_SCHEMA = "juno_merge_deterministic_full_suite_repair.v1"
 FULL_SUITE_REPAIR_ROOT = ".juno_task/runtime/merge-queue/full-suite-repair"
+REPAIR_PREDISPATCH_RECOVERY_SCHEMA = "juno_merge_repair_predispatch_recovery.v1"
 WITHDRAWABLE_STATES = {"QUEUED", "AWAITING_RISK", "AWAITING_RELEASE", "REVIEW_FINDINGS",
                        "REVIEW_FINDINGS_EXHAUSTED", "CONFLICT", "CONFLICT_RESOLVED",
                        "REOPENING", "REQUEUING_STALE"}
@@ -5915,6 +5916,360 @@ def recover_deterministic_full_suite_failure(
                     return {**updated, "outcome": "FULL_SUITE_REPAIR_AUTHORIZED"}
 
 
+def _repair_predispatch_evidence(controller: Path, repository: Path,
+                                 config: dict[str, Any], task_id: str,
+                                 record: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Project the exact pending semantic-repair no-provider incident, if present."""
+    repair_authority = record.get("full_suite_repair")
+    if (record.get("state") != "REVIEW_FINDINGS"
+            or not isinstance(repair_authority, dict)
+            or repair_authority.get("status") != "DISPATCHED"
+            or repair_authority.get("repair_count") != 1
+            or repair_authority.get("delta_review_groups") != 0):
+        return None
+    pointer_path = controller / MERGE_DRIVE_ROOT / "latest.json"
+    arbiter_root = _arbiter_root(controller, repository, config["target_ref"])
+    try:
+        pointer = json.loads(pointer_path.read_text())
+        run_id = pointer["run_id"]
+        journal_path = controller / MERGE_DRIVE_ROOT / run_id / "journal.json"
+        journal_bytes = journal_path.read_bytes(); journal = json.loads(journal_bytes)
+        arbiter = _arbiter_state(arbiter_root)
+        repairs = journal["repairs"]
+        worker = repairs[0]
+        worker_id = Path(worker["attempt_dir"]).name
+        predispatch_path = Path(worker["attempt_dir"]) / "controller-predispatch-receipt.json"
+        predispatch_bytes = predispatch_path.read_bytes()
+        predispatch = json.loads(predispatch_bytes)
+        terminal = arbiter["terminal_receipt"]
+    except (OSError, KeyError, IndexError, TypeError, json.JSONDecodeError):
+        return None
+    if (not isinstance(arbiter, dict) or arbiter.get("state") != "FAILED"
+            or not isinstance(arbiter.get("attempt"), int)
+            or journal.get("run_id") != run_id
+            or journal.get("scope_sha256") != pointer.get("scope_sha256")
+            or len(repairs) != 1 or worker.get("task_id") != task_id
+            or worker.get("kind") != "semantic_repair" or worker.get("index") != 1
+            or worker.get("terminal_state") is not None
+            or worker.get("predispatch_recovery") is not None
+            or worker_id != "semantic-repair-0001"
+            or predispatch.get("provider_launch_observed") is not False
+            or predispatch.get("model_budget_consumed") is not False
+            or ((Path(worker["attempt_dir"]) / "managed-agent").exists()
+                and any((Path(worker["attempt_dir"]) / "managed-agent").iterdir()))
+            or not isinstance(terminal, dict)
+            or terminal.get("path") != str((arbiter_root / "receipts" /
+                f"attempt-{arbiter['attempt']}-failed.json").resolve())):
+        return None
+    return {"run_id": run_id, "scope_sha256": journal["scope_sha256"],
+            "journal_path": journal_path,
+            "journal_sha256": hashlib.sha256(journal_bytes).hexdigest(),
+            "worker_id": worker_id, "predispatch_path": predispatch_path,
+            "predispatch_sha256": hashlib.sha256(predispatch_bytes).hexdigest(),
+            "arbiter_attempt": arbiter["attempt"], "terminal": terminal}
+
+
+def _repair_predispatch_safe_next(controller: Path, repository: Path,
+                                  config: dict[str, Any], task_id: str,
+                                  record: dict[str, Any]) -> Optional[dict[str, Any]]:
+    evidence = _repair_predispatch_evidence(controller, repository, config, task_id, record)
+    if evidence is None:
+        return None
+    command = " ".join([
+        "yy merge recover-repair-predispatch", shlex.quote(task_id),
+        "--attempt", str(evidence["arbiter_attempt"]),
+        "--terminal-receipt", shlex.quote(evidence["terminal"]["path"]),
+        "--terminal-receipt-sha256", evidence["terminal"]["sha256"],
+        "--expected-revision", digest(record),
+        "--run-id", shlex.quote(evidence["run_id"]),
+        "--scope-sha256", evidence["scope_sha256"],
+        "--journal-sha256", evidence["journal_sha256"],
+        "--worker-id", evidence["worker_id"],
+        "--predispatch-receipt", shlex.quote(str(evidence["predispatch_path"])),
+        "--predispatch-receipt-sha256", evidence["predispatch_sha256"],
+    ])
+    return {"reason_code": "repair_predispatch_recovery_available",
+            "safe_next_command": command}
+
+
+def _repair_predispatch_refuse(code: str) -> None:
+    raise MergeQueueError(f"repair pre-dispatch recovery refused ({code})")
+
+
+def recover_repair_predispatch(
+        controller: Path, task_id: str, arbiter_attempt: int,
+        terminal_receipt_path: str, terminal_receipt_sha256: str,
+        expected_record_revision: str, run_id: str, scope_sha256: str,
+        journal_sha256: str, worker_id: str, predispatch_receipt_path: str,
+        predispatch_receipt_sha256: str) -> dict[str, Any]:
+    """Restore only the existing semantic-repair worker's dispatch eligibility."""
+    hashes = (terminal_receipt_sha256, expected_record_revision, scope_sha256,
+              journal_sha256, predispatch_receipt_sha256)
+    if (not task_runtime.TASK_RE.fullmatch(task_id)
+            or not isinstance(arbiter_attempt, int) or isinstance(arbiter_attempt, bool)
+            or arbiter_attempt < 1
+            or not re.fullmatch(r"[0-9]+-[0-9a-f]+", run_id or "")
+            or worker_id != "semantic-repair-0001"
+            or not all(re.fullmatch(r"[0-9a-f]{64}", value or "") for value in hashes)):
+        _repair_predispatch_refuse("malformed_request")
+    controller_status = task_runtime.git(
+        controller, "status", "--porcelain=v1", "--untracked-files=all", check=False)
+    # The CLI writes its append-only control-audit receipt before dispatching
+    # the operation. That exact audit namespace is evidence of this call, not
+    # pre-existing controller dirt; every other tracked or untracked byte is a
+    # hard refusal.
+    controller_dirty = "\n".join(
+        line for line in controller_status.splitlines()
+        if ".juno_task/runtime/control-audit/" not in line)
+    config = task_runtime.load_config(controller)
+    repository = task_runtime.product_repository(controller, config)
+    arbiter_root = _arbiter_root(controller, repository, config["target_ref"])
+    expected_terminal = (arbiter_root / "receipts"
+                         / f"attempt-{arbiter_attempt}-failed.json").resolve()
+    supplied_terminal = Path(terminal_receipt_path).expanduser().resolve()
+    try:
+        terminal_bytes = supplied_terminal.read_bytes(); terminal = json.loads(terminal_bytes)
+    except (OSError, json.JSONDecodeError):
+        _repair_predispatch_refuse("receipt_malformed")
+    if (supplied_terminal != expected_terminal
+            or hashlib.sha256(terminal_bytes).hexdigest() != terminal_receipt_sha256
+            or terminal.get("schema_version") != TARGET_ARBITER_RECEIPT_SCHEMA
+            or terminal.get("attempt") != arbiter_attempt
+            or terminal.get("target_ref") != config["target_ref"]
+            or terminal.get("state") != "FAILED"):
+        _repair_predispatch_refuse("receipt_malformed")
+    with review_lock(repository, task_id):
+        with _target_arbiter_claim(arbiter_root) as claim:
+            if claim is None:
+                _repair_predispatch_refuse("live_producer")
+            with target_lock(controller, repository, config["target_ref"]):
+                arbiter = _arbiter_state(arbiter_root)
+                if (not isinstance(arbiter, dict) or arbiter.get("attempt") != arbiter_attempt
+                        or arbiter.get("state") != "FAILED"
+                        or arbiter.get("terminal_receipt") != {
+                            "path": str(supplied_terminal), "sha256": terminal_receipt_sha256}
+                        or arbiter.get("producer") != terminal.get("producer")
+                        or arbiter.get("detail") != terminal.get("detail")):
+                    _repair_predispatch_refuse("arbiter_identity_moved")
+                observation = task_runtime._observe_producer(arbiter.get("producer"))
+                if observation.status != "dead":
+                    _repair_predispatch_refuse("live_producer")
+                error = terminal.get("detail", {}).get("error") \
+                    if isinstance(terminal.get("detail"), dict) else None
+                if error != "managed task worker was refused before provider dispatch":
+                    _repair_predispatch_refuse("provider_evidence")
+                run_dir = controller / MERGE_DRIVE_ROOT / run_id
+                journal_path = run_dir / "journal.json"
+                try:
+                    initial_raw = journal_path.read_bytes(); journal = json.loads(initial_raw)
+                    pointer = json.loads((controller / MERGE_DRIVE_ROOT / "latest.json").read_text())
+                except (OSError, json.JSONDecodeError):
+                    _repair_predispatch_refuse("lifecycle_identity_moved")
+                repairs = journal.get("repairs") if isinstance(journal, dict) else None
+                if isinstance(repairs, list) and len(repairs) == 1 \
+                        and isinstance(repairs[0], dict) \
+                        and repairs[0].get("predispatch_recovery") is not None:
+                    _repair_predispatch_refuse("already_recovered")
+                if controller_dirty:
+                    _repair_predispatch_refuse("dirty_controller")
+                controller_identity = {
+                    "head": task_runtime.git(controller, "rev-parse", "HEAD"),
+                    "tree": task_runtime.git(controller, "rev-parse", "HEAD^{tree}"),
+                    "branch_ref": task_runtime.git(controller, "symbolic-ref", "-q", "HEAD"),
+                    "clean": True, "operation_audit_excluded": True,
+                }
+                if (hashlib.sha256(initial_raw).hexdigest() != journal_sha256
+                        or pointer.get("run_id") != run_id
+                        or pointer.get("scope_sha256") != scope_sha256
+                        or journal.get("run_id") != run_id
+                        or journal.get("scope_sha256") != scope_sha256
+                        or journal.get("state") != "CLAIMED" or journal.get("terminal") is True
+                        or journal.get("attempts", {}).get("semantic_repairs") != 1
+                        or not isinstance(repairs, list) or len(repairs) != 1
+                        or any(row.get("post_state") == "MERGED" for row in
+                               journal.get("operations", []) if isinstance(row, dict))):
+                    _repair_predispatch_refuse("lifecycle_identity_moved")
+                worker = repairs[0]
+                worker_dir = (run_dir / "workers" / worker_id).resolve()
+                if (worker.get("kind") != "semantic_repair" or worker.get("index") != 1
+                        or worker.get("task_id") != task_id
+                        or worker.get("terminal_state") is not None
+                        or Path(str(worker.get("attempt_dir", ""))).resolve() != worker_dir
+                        or worker_dir.name != worker_id):
+                    _repair_predispatch_refuse("worker_identity_moved")
+                with task_runtime.state_lock(controller):
+                    state = task_runtime.read_state(controller); record = state["tasks"].get(task_id)
+                if not isinstance(record, dict) or digest(record) != expected_record_revision:
+                    _repair_predispatch_refuse("revision_mismatch")
+                attempt = record.get("queue_attempt")
+                risk = attempt.get("risk") if isinstance(attempt, dict) else None
+                repair = record.get("full_suite_repair")
+                if (record.get("state") in {"CONFLICT", "CONFLICT_RESOLVED", "MERGING", "MERGED"}
+                        or not isinstance(attempt, dict)
+                        or record.get("state") != "REVIEW_FINDINGS"
+                        or attempt.get("outcome") == "MERGED"):
+                    _repair_predispatch_refuse("conflict_or_post_cas")
+                if (not isinstance(repair, dict)
+                        or repair.get("schema_version") != FULL_SUITE_REPAIR_SCHEMA
+                        or repair.get("status") != "DISPATCHED"
+                        or repair.get("repair_count") != 1):
+                    _repair_predispatch_refuse("repair_budget")
+                if repair.get("delta_review_groups") != 0 or record.get("review_round", 1) != 1:
+                    _repair_predispatch_refuse("delta_budget")
+                if (risk.get("full_suite_repair") != repair
+                        or attempt.get("review", {}).get("full_suite_repair") != repair
+                        or worker.get("authorization_receipt") != repair.get("authorization_receipt")):
+                    _repair_predispatch_refuse("repair_authorization_moved")
+                candidate_sha = attempt.get("candidate_sha")
+                candidate_tree = attempt.get("candidate_tree")
+                target_sha = task_runtime.ref_sha(repository, config["target_ref"])
+                if (arbiter.get("target_sha_at_start") != target_sha
+                        or attempt.get("expected_target_sha") != target_sha
+                        or task_runtime.git(repository, "rev-parse", f"{candidate_sha}^{{tree}}",
+                                            check=False) != candidate_tree):
+                    _repair_predispatch_refuse("conflict_or_post_cas")
+                authorization = repair["authorization_receipt"]
+                try:
+                    authorization_path = Path(authorization["path"]).resolve()
+                    authorization_bytes = authorization_path.read_bytes()
+                    authorization_value = json.loads(authorization_bytes)
+                except (KeyError, OSError, json.JSONDecodeError):
+                    _repair_predispatch_refuse("repair_authorization_moved")
+                if (hashlib.sha256(authorization_bytes).hexdigest() != authorization.get("sha256")
+                        or authorization_value.get("schema_version") != FULL_SUITE_REPAIR_SCHEMA
+                        or authorization_value.get("task_id") != task_id
+                        or authorization_value.get("candidate_sha") != candidate_sha
+                        or authorization_value.get("candidate_tree") != candidate_tree
+                        or authorization_value.get("target_sha") != target_sha
+                        or authorization_value.get("lifecycle", {}).get("run_id") != run_id
+                        or authorization_value.get("lifecycle", {}).get("scope_sha256") != scope_sha256):
+                    _repair_predispatch_refuse("repair_authorization_moved")
+                before_sha = worker.get("before_sha"); worktree = Path(record["worktree"])
+                if (before_sha != record.get("tip_sha")
+                        or task_runtime.git(worktree, "rev-parse", "HEAD", check=False) != before_sha
+                        or task_runtime.git(worktree, "status", "--porcelain=v1",
+                                            "--untracked-files=all", check=False)):
+                    _repair_predispatch_refuse("worker_identity_moved")
+                supplied_predispatch = Path(predispatch_receipt_path).expanduser().resolve()
+                expected_predispatch = worker_dir / "controller-predispatch-receipt.json"
+                if supplied_predispatch != expected_predispatch:
+                    _repair_predispatch_refuse("receipt_malformed")
+                try:
+                    reference = task_runtime._pending_predispatch_receipt(record, worker)
+                except task_runtime.TaskWorkspaceError as exc:
+                    _repair_predispatch_refuse(
+                        "provider_evidence" if "provider launch evidence" in str(exc)
+                        else "receipt_malformed")
+                if (reference != {"path": str(supplied_predispatch),
+                                  "sha256": predispatch_receipt_sha256}):
+                    _repair_predispatch_refuse("receipt_malformed")
+                predispatch = json.loads(supplied_predispatch.read_bytes())
+                names = ("create-receipt.json", "verify-receipt.json",
+                         "edit-preflight-receipt.json")
+                refs = predispatch.get("admission_receipts")
+                if (not isinstance(refs, list) or len(refs) != 3
+                        or any(Path(ref["path"]).resolve() != worker_dir / name
+                               for ref, name in zip(refs, names))):
+                    _repair_predispatch_refuse("receipt_malformed")
+                values = []
+                for ref in refs:
+                    try:
+                        path = Path(ref["path"]); data = path.read_bytes(); value = json.loads(data)
+                    except (KeyError, OSError, json.JSONDecodeError):
+                        _repair_predispatch_refuse("receipt_malformed")
+                    if hashlib.sha256(data).hexdigest() != ref.get("sha256"):
+                        _repair_predispatch_refuse("receipt_malformed")
+                    values.append(value)
+                create, verify, edit = values
+                if (create.get("schema_version") != "juno_managed_task_run_create.v1"
+                        or create.get("task_id") != task_id
+                        or Path(create.get("worktree", "")).resolve() != worktree.resolve()
+                        or create.get("branch_ref") != record.get("branch_ref")
+                        or create.get("clean_tip_sha") != before_sha
+                        or verify.get("schema_version") != "juno_managed_task_run_verify.v1"
+                        or verify.get("task_id") != task_id or verify.get("passed") is not True
+                        or verify.get("tip_sha") != before_sha
+                        or verify.get("create_receipt_sha256") != refs[0]["sha256"]
+                        or edit.get("schema_version") != "juno_managed_task_run_edit_preflight.v1"
+                        or edit.get("task_id") != task_id or edit.get("passed") is not True
+                        or edit.get("tip_sha") != before_sha
+                        or edit.get("create_receipt_sha256") != refs[0]["sha256"]
+                        or edit.get("verify_receipt_sha256") != refs[1]["sha256"]):
+                    _repair_predispatch_refuse("receipt_malformed")
+                managed_dir = worker_dir / "managed-agent"
+                if managed_dir.exists() and any(managed_dir.iterdir()):
+                    _repair_predispatch_refuse("provider_evidence")
+                if (predispatch.get("provider_launch_observed") is not False
+                        or predispatch.get("model_budget_consumed") is not False):
+                    _repair_predispatch_refuse("provider_evidence")
+                body = {
+                    "schema_version": REPAIR_PREDISPATCH_RECOVERY_SCHEMA,
+                    "task_id": task_id, "record_revision": expected_record_revision,
+                    "candidate_sha": candidate_sha, "candidate_tree": candidate_tree,
+                    "target_ref": config["target_ref"], "target_sha": target_sha,
+                    "repair_authorization": authorization,
+                    "worker": {"id": worker_id, "path": str(worker_dir),
+                               "before_sha": before_sha},
+                    "admission_receipts": refs, "predispatch_receipt": reference,
+                    "arbiter": {"attempt": arbiter_attempt,
+                                "terminal_receipt": arbiter["terminal_receipt"]},
+                    "lifecycle": {"run_id": run_id, "scope_sha256": scope_sha256,
+                                  "journal_sha256": journal_sha256},
+                    "controller_identity": controller_identity,
+                    "provider_launch_observed": False, "model_budget_consumed": False,
+                    "repair_count": 1, "delta_review_groups": 0,
+                    "reason_code": "same_worker_redispatch_ready",
+                    "safe_next_command": f"yy merge arbiter run --through {task_id}",
+                }
+                body["projection_sha256"] = digest(body)
+                projection_index = len(journal.get("projections", [])) + 1
+                projection_path = (run_dir / "projections" /
+                                   f"{projection_index:04d}-repair-predispatch-recovered.json")
+                expected_bytes = lifecycle_runtime.canonical_bytes(body)
+                if projection_path.is_file():
+                    if projection_path.read_bytes() != expected_bytes:
+                        _repair_predispatch_refuse("projection_collision")
+                    projection = {"path": str(projection_path.resolve()),
+                                  "sha256": hashlib.sha256(expected_bytes).hexdigest()}
+                else:
+                    projection = lifecycle_runtime.atomic_json(
+                        projection_path, body, exclusive=True)
+                with lifecycle_runtime.lifecycle_claim(run_dir / ".claim.lock"):
+                    if journal_path.read_bytes() != initial_raw:
+                        _repair_predispatch_refuse("lifecycle_identity_moved")
+                    with task_runtime.state_lock(controller):
+                        current_record = task_runtime.read_state(controller)["tasks"].get(task_id)
+                    if (not isinstance(current_record, dict)
+                            or digest(current_record) != expected_record_revision
+                            or task_runtime.ref_sha(repository, config["target_ref"]) != target_sha
+                            or task_runtime.git(worktree, "rev-parse", "HEAD", check=False) != before_sha
+                            or task_runtime.git(worktree, "status", "--porcelain=v1",
+                                                "--untracked-files=all", check=False)
+                            or hashlib.sha256(supplied_predispatch.read_bytes()).hexdigest()
+                               != predispatch_receipt_sha256
+                            or any(hashlib.sha256(Path(ref["path"]).read_bytes()).hexdigest()
+                                   != ref["sha256"] for ref in refs)):
+                        _repair_predispatch_refuse("worker_identity_moved")
+                    current_repair = journal["repairs"][0]
+                    current_repair["predispatch_recovery"] = {
+                        "schema_version": REPAIR_PREDISPATCH_RECOVERY_SCHEMA,
+                        "status": "READY", "projection": projection,
+                        "predispatch_receipt": reference,
+                    }
+                    journal.setdefault("projections", []).append(projection)
+                    journal.setdefault("events", []).append({
+                        "schema_version": "juno_lifecycle_phase_checkpoint.v1",
+                        "sequence": len(journal.get("events", [])) + 1,
+                        "phase": "semantic-repair-1-predispatch-recovery", "boundary": "POST",
+                        "recorded_at_unix_ns": time.time_ns(),
+                        "detail": {"worker_id": worker_id, "projection": projection,
+                                   "provider_launch_observed": False,
+                                   "model_budget_consumed": False}})
+                    lifecycle_runtime.lifecycle_journal_write(journal_path, journal)
+                return {**body, "outcome": "REPAIR_PREDISPATCH_RECOVERED",
+                        "projection": projection}
+
+
 def merge_reopen(controller: Path, task_id: str,
                  expected_plan_id: Optional[str] = None) -> dict[str, Any]:
     """Recoverable two-phase requeue after a new validated feature tip."""
@@ -6664,6 +7019,10 @@ def status(controller: Path) -> dict[str, Any]:
         record = tasks[projection["task_id"]]
         projection.update(_full_suite_repair_safe_next(
             controller, repository, config, projection["task_id"], record))
+        predispatch = _repair_predispatch_safe_next(
+            controller, repository, config, projection["task_id"], record)
+        if predispatch is not None:
+            projection.update(predispatch)
         repair = record.get("full_suite_repair")
         if isinstance(repair, dict):
             projection["repair_status"] = repair.get("status")
@@ -7317,7 +7676,26 @@ def _merge_drive_claimed(controller: Path, through: Optional[str] = None) -> dic
                             semantic_gate = {**semantic_gate, "record": record}
                         repaired = (task_runtime._recover_task_worker(record, repair)
                                     if repair and not repair.get("terminal_state") else repair)
-                        if repaired is None:
+                        predispatch_recovery = (repair.get("predispatch_recovery")
+                                                if isinstance(repair, dict) else None)
+                        if repaired is None and isinstance(predispatch_recovery, dict) \
+                                and predispatch_recovery.get("status") == "READY":
+                            repair_dir = Path(repair["attempt_dir"])
+                            predispatch_recovery["status"] = "DISPATCHED"
+                            lifecycle_runtime.lifecycle_checkpoint(
+                                journal_path, journal, phase="semantic-repair-1-redispatch",
+                                boundary="PRE", detail={"task_id": task_id,
+                                    "attempt_dir": repair["attempt_dir"],
+                                    "projection": predispatch_recovery.get("projection")})
+                            repaired = task_runtime._launch_task_worker(
+                                controller, task_id, record, repair_dir,
+                                Path(journal["frozen_prompt"]["path"]), repair=True,
+                                timeout_seconds=lifecycle_runtime.lifecycle_remaining_seconds(journal),
+                                context_bytes=lifecycle_runtime.canonical_bytes({
+                                    "candidate_sha": (record.get("queue_attempt") or {}).get("candidate_sha"),
+                                    "risk": (record.get("queue_attempt") or {}).get("risk")})[:32768],
+                                hydration_gate=semantic_gate, reuse_existing_admission=True)
+                        elif repaired is None:
                             if journal["attempts"]["semantic_repairs"] >= int(
                                     plan["budgets"]["semantic_repairs"]):
                                 blocker = {"category": "review_findings_exhausted", "task_id": task_id}; break
@@ -8189,6 +8567,18 @@ def parser() -> argparse.ArgumentParser:
     recover_suite.add_argument("--run-id", required=True)
     recover_suite.add_argument("--scope-sha256", required=True)
     recover_suite.add_argument("--journal-sha256", required=True)
+    recover_repair = sub.add_parser("recover-repair-predispatch")
+    recover_repair.add_argument("task_id")
+    recover_repair.add_argument("--attempt", required=True, type=int)
+    recover_repair.add_argument("--terminal-receipt", required=True)
+    recover_repair.add_argument("--terminal-receipt-sha256", required=True)
+    recover_repair.add_argument("--expected-revision", required=True)
+    recover_repair.add_argument("--run-id", required=True)
+    recover_repair.add_argument("--scope-sha256", required=True)
+    recover_repair.add_argument("--journal-sha256", required=True)
+    recover_repair.add_argument("--worker-id", required=True)
+    recover_repair.add_argument("--predispatch-receipt", required=True)
+    recover_repair.add_argument("--predispatch-receipt-sha256", required=True)
     recover_drift = sub.add_parser("recover-authority-drift")
     recover_drift.add_argument("task_id")
     recover_drift.add_argument("--attempt", required=True, type=int)
@@ -8293,6 +8683,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                 controller, args.task_id, args.attempt, args.terminal_receipt,
                 args.terminal_receipt_sha256, args.expected_revision, args.run_id,
                 args.scope_sha256, args.journal_sha256)
+        elif args.operation == "recover-repair-predispatch":
+            result = recover_repair_predispatch(
+                controller, args.task_id, args.attempt, args.terminal_receipt,
+                args.terminal_receipt_sha256, args.expected_revision, args.run_id,
+                args.scope_sha256, args.journal_sha256, args.worker_id,
+                args.predispatch_receipt, args.predispatch_receipt_sha256)
         elif args.operation == "recover-authority-drift":
             result = recover_pre_cas_authority_drift(
                 controller, args.task_id, args.attempt, args.terminal_receipt,

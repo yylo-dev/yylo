@@ -3987,6 +3987,290 @@ steps:
         self.assertEqual(authorized["queue_attempt"]["candidate_sha"],
                          reopened["reopened_from_candidate_sha"])
 
+    def prepare_repair_predispatch_incident(self) -> dict[str, object]:
+        """Freeze canonical attempt-232 after semantic-repair-0001 launch refusal."""
+        frozen = self.prepare_deterministic_full_suite_repair()
+        authorized = merge_runtime.recover_deterministic_full_suite_failure(
+            self.controller.resolve(), "X", 231,
+            frozen["terminal"]["path"], frozen["terminal"]["sha256"],
+            frozen["record_revision"], frozen["run_id"], frozen["scope_sha256"],
+            frozen["journal_sha256"])
+        state_path = self.controller / ".juno_task/state/tasks.json"
+        state = json.loads(state_path.read_text())
+        record = state["tasks"]["X"]
+        repair_authority = {**record["full_suite_repair"],
+                            "status": "DISPATCHED", "repair_count": 1}
+        record["full_suite_repair"] = repair_authority
+        record["queue_attempt"]["risk"]["full_suite_repair"] = repair_authority
+        record["queue_attempt"]["review"]["full_suite_repair"] = repair_authority
+        state_path.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
+
+        run_dir = self.controller / merge_runtime.MERGE_DRIVE_ROOT / frozen["run_id"]
+        worker_dir = run_dir / "workers/semantic-repair-0001"
+        before = git(self.workspaces / "X", "rev-parse", "HEAD")
+        worker_dir.mkdir(parents=True)
+        create_path = worker_dir / "create-receipt.json"
+        create = {"schema_version": "juno_managed_task_run_create.v1", "task_id": "X",
+                  "worktree": str((self.workspaces / "X").resolve()),
+                  "branch_ref": record["branch_ref"], "clean_tip_sha": before}
+        create_path.write_text(merge_runtime.canonical(create) + "\n")
+        create_sha = hashlib.sha256(create_path.read_bytes()).hexdigest()
+        verify_path = worker_dir / "verify-receipt.json"
+        verify = {"schema_version": "juno_managed_task_run_verify.v1", "task_id": "X",
+                  "passed": True, "tip_sha": before,
+                  "create_receipt_sha256": create_sha}
+        verify_path.write_text(merge_runtime.canonical(verify) + "\n")
+        edit_path = worker_dir / "edit-preflight-receipt.json"
+        edit = {"schema_version": "juno_managed_task_run_edit_preflight.v1", "task_id": "X",
+                "passed": True, "tip_sha": before,
+                "create_receipt_sha256": create_sha,
+                "verify_receipt_sha256": hashlib.sha256(verify_path.read_bytes()).hexdigest()}
+        edit_path.write_text(merge_runtime.canonical(edit) + "\n")
+        receipt_paths = (create_path, verify_path, edit_path)
+        (worker_dir / "worker-prompt.md").write_text("frozen semantic repair prompt\n")
+        predispatch = task_runtime._predispatch_receipt(
+            worker_dir, "X", before,
+            subprocess.CompletedProcess([], 2, "", "controller is dirty"), receipt_paths)
+        journal_path = run_dir / "journal.json"
+        journal = json.loads(journal_path.read_text())
+        journal["attempts"]["semantic_repairs"] = 1
+        journal["operations"][-1]["post_state"] = "REVIEW_FINDINGS"
+        journal["repairs"] = [{
+            "kind": "semantic_repair", "index": 1,
+            "attempt_dir": str(worker_dir.resolve()), "before_sha": before,
+            "task_id": "X", "terminal_state": None,
+            "authorization_receipt": repair_authority["authorization_receipt"],
+        }]
+        journal_path.write_text(merge_runtime.canonical(journal) + "\n")
+
+        arbiter_root = merge_runtime._arbiter_root(
+            self.controller.resolve(), self.repository.resolve(), "refs/heads/product")
+        terminal_path = arbiter_root / "receipts/attempt-232-failed.json"
+        terminal_body = {
+            "schema_version": merge_runtime.TARGET_ARBITER_RECEIPT_SCHEMA,
+            "attempt": 232, "target_ref": "refs/heads/product", "state": "FAILED",
+            "outcome": "ManagedAgentPreDispatchError",
+            "producer": {"pid": 999997, "lstart": "dead"},
+            "detail": {"error": "managed task worker was refused before provider dispatch"},
+        }
+        terminal_path.write_text(merge_runtime.canonical(terminal_body) + "\n")
+        terminal = {"path": str(terminal_path.resolve()),
+                    "sha256": hashlib.sha256(terminal_path.read_bytes()).hexdigest()}
+        prior = json.loads((arbiter_root / "state.json").read_text())["terminal_receipt"]
+        (arbiter_root / "state.json").write_text(merge_runtime.canonical({
+            "schema_version": merge_runtime.TARGET_ARBITER_SCHEMA,
+            "attempt": 232, "state": "FAILED", "target_ref": "refs/heads/product",
+            "target_sha_at_start": self.base,
+            "producer": terminal_body["producer"], "successor_of": prior,
+            "terminal_receipt": terminal, "detail": terminal_body["detail"],
+        }) + "\n")
+        dirt = git(self.controller, "status", "--porcelain=v1", "--untracked-files=all")
+        if dirt:
+            git(self.controller, "add", "-A")
+            git(self.controller, "commit", "-m", "freeze attempt-232 controller evidence")
+        record = task_runtime.read_state(self.controller)["tasks"]["X"]
+        return {
+            "run_id": frozen["run_id"], "scope_sha256": frozen["scope_sha256"],
+            "journal": journal_path,
+            "journal_sha256": hashlib.sha256(journal_path.read_bytes()).hexdigest(),
+            "terminal": terminal, "predispatch": predispatch,
+            "record_revision": merge_runtime.digest(record), "worker_dir": worker_dir,
+            "target": git(self.repository, "rev-parse", "refs/heads/product"),
+            "candidate": record["queue_attempt"]["candidate_sha"],
+            "authorization": authorized["full_suite_repair"]["authorization_receipt"],
+        }
+
+    def recover_repair_predispatch(self, frozen: dict[str, object]) -> dict[str, object]:
+        return merge_runtime.recover_repair_predispatch(
+            self.controller.resolve(), "X", 232,
+            frozen["terminal"]["path"], frozen["terminal"]["sha256"],
+            frozen["record_revision"], frozen["run_id"], frozen["scope_sha256"],
+            frozen["journal_sha256"], "semantic-repair-0001",
+            frozen["predispatch"]["path"], frozen["predispatch"]["sha256"])
+
+    def test_repair_predispatch_recovery_is_receipt_backed_zero_cost_and_same_worker_only(self) -> None:
+        frozen = self.prepare_repair_predispatch_incident()
+        protected = {
+            "target": git(self.repository, "rev-parse", "refs/heads/product"),
+            "worker": {str(path.relative_to(frozen["worker_dir"])): path.read_bytes()
+                       for path in frozen["worker_dir"].rglob("*") if path.is_file()},
+            "terminal": Path(frozen["terminal"]["path"]).read_bytes(),
+            "predispatch": Path(frozen["predispatch"]["path"]).read_bytes(),
+        }
+        with (mock.patch.object(task_runtime, "_launch_task_worker") as launch,
+              mock.patch.object(merge_runtime, "dispatch_reviewer") as reviewer,
+              mock.patch.object(merge_runtime, "cas_target") as cas):
+            recovered = self.recover_repair_predispatch(frozen)
+        launch.assert_not_called(); reviewer.assert_not_called(); cas.assert_not_called()
+        self.assertEqual(recovered["outcome"], "REPAIR_PREDISPATCH_RECOVERED")
+        self.assertEqual(recovered["reason_code"], "same_worker_redispatch_ready")
+        self.assertEqual(recovered["safe_next_command"], "yy merge arbiter run --through X")
+        self.assertFalse(recovered["provider_launch_observed"])
+        self.assertFalse(recovered["model_budget_consumed"])
+        journal = json.loads(Path(frozen["journal"]).read_text())
+        self.assertEqual(journal["attempts"]["semantic_repairs"], 1)
+        self.assertEqual(len(journal["repairs"]), 1)
+        self.assertEqual(journal["repairs"][0]["attempt_dir"], str(frozen["worker_dir"]))
+        self.assertEqual(journal["repairs"][0]["predispatch_recovery"]["status"], "READY")
+        self.assertEqual(journal["projections"][-1], recovered["projection"])
+        record = task_runtime.read_state(self.controller)["tasks"]["X"]
+        self.assertEqual((record["full_suite_repair"]["repair_count"],
+                          record["full_suite_repair"]["delta_review_groups"]), (1, 0))
+        self.assertEqual(git(self.repository, "rev-parse", "refs/heads/product"), protected["target"])
+        self.assertEqual(Path(frozen["terminal"]["path"]).read_bytes(), protected["terminal"])
+        self.assertEqual(Path(frozen["predispatch"]["path"]).read_bytes(), protected["predispatch"])
+        self.assertEqual({str(path.relative_to(frozen["worker_dir"])): path.read_bytes()
+                          for path in frozen["worker_dir"].rglob("*") if path.is_file()},
+                         protected["worker"])
+
+    def test_repair_predispatch_redispatch_reuses_exact_worker_and_admission_receipts(self) -> None:
+        frozen = self.prepare_repair_predispatch_incident()
+        recovered = self.recover_repair_predispatch(frozen)
+        worker_dir = frozen["worker_dir"]
+        preserved = {name: (worker_dir / name).read_bytes() for name in (
+            "create-receipt.json", "verify-receipt.json", "edit-preflight-receipt.json",
+            "controller-predispatch-receipt.json", "worker-prompt.md")}
+        record = task_runtime.read_state(self.controller)["tasks"]["X"]
+
+        original_run = subprocess.run
+
+        def completed(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            if "--out-dir" not in command:
+                return original_run(command, **kwargs)
+            out_dir = Path(command[command.index("--out-dir") + 1])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "receipt.json").write_text(merge_runtime.canonical({
+                "terminal_result": {"state": "blocked"}, "session_id": "same-worker"}) + "\n")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with (mock.patch.object(task_runtime, "_managed_worker_receipts") as recreate,
+              mock.patch.object(task_runtime.subprocess, "run", side_effect=completed) as launch):
+            result = task_runtime._launch_task_worker(
+                self.controller.resolve(), "X", record, worker_dir,
+                worker_dir / "worker-prompt.md", repair=True, timeout_seconds=30,
+                reuse_existing_admission=True)
+        recreate.assert_not_called()
+        managed_calls = [call for call in launch.call_args_list if "--out-dir" in call.args[0]]
+        self.assertEqual(len(managed_calls), 1)
+        command = managed_calls[0].args[0]
+        self.assertEqual(command[command.index("--out-dir") + 1],
+                         str(worker_dir / "managed-agent"))
+        self.assertEqual(result["terminal_state"], "blocked")
+        self.assertEqual(recovered["repair_count"], 1)
+        for name, data in preserved.items():
+            self.assertEqual((worker_dir / name).read_bytes(), data)
+
+    def test_repair_predispatch_direct_command_records_control_audit(self) -> None:
+        frozen = self.prepare_repair_predispatch_incident()
+        argv = ["recover-repair-predispatch", "X", "--attempt", "232",
+                "--terminal-receipt", frozen["terminal"]["path"],
+                "--terminal-receipt-sha256", frozen["terminal"]["sha256"],
+                "--expected-revision", frozen["record_revision"],
+                "--run-id", frozen["run_id"], "--scope-sha256", frozen["scope_sha256"],
+                "--journal-sha256", frozen["journal_sha256"],
+                "--worker-id", "semantic-repair-0001",
+                "--predispatch-receipt", frozen["predispatch"]["path"],
+                "--predispatch-receipt-sha256", frozen["predispatch"]["sha256"]]
+        result = self.command(QUEUE, argv, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        audit_ref = payload["control_audit"]
+        audit = json.loads(Path(audit_ref["path"]).read_text())
+        self.assertEqual((audit["surface"], audit["operation"], audit["task_id"],
+                          audit["policy_operation"]),
+                         ("merge", "recover-repair-predispatch", "X", "orchestration"))
+        self.assertEqual(hashlib.sha256(Path(audit_ref["path"]).read_bytes()).hexdigest(),
+                         audit_ref["sha256"])
+
+    def test_repair_predispatch_recovery_status_and_repeated_call_are_typed_nonmutating(self) -> None:
+        frozen = self.prepare_repair_predispatch_incident()
+        row = next(row for row in merge_runtime.status(self.controller.resolve())["tasks"]
+                   if row["task_id"] == "X")
+        self.assertEqual(row["reason_code"], "repair_predispatch_recovery_available")
+        for exact in ("recover-repair-predispatch X", "232", frozen["run_id"],
+                      frozen["journal_sha256"], frozen["predispatch"]["sha256"],
+                      "semantic-repair-0001"):
+            self.assertIn(str(exact), row["safe_next_command"])
+        self.recover_repair_predispatch(frozen)
+        journal_before = Path(frozen["journal"]).read_bytes()
+        state_before = (self.controller / ".juno_task/state/tasks.json").read_bytes()
+        with self.assertRaisesRegex(merge_runtime.MergeQueueError, "already_recovered"):
+            self.recover_repair_predispatch({**frozen,
+                "journal_sha256": hashlib.sha256(journal_before).hexdigest()})
+        self.assertEqual(Path(frozen["journal"]).read_bytes(), journal_before)
+        self.assertEqual((self.controller / ".juno_task/state/tasks.json").read_bytes(), state_before)
+
+    def test_repair_predispatch_recovery_refuses_every_unsafe_class_without_mutation(self) -> None:
+        cases = {
+            "revision_mismatch": lambda state, journal, worker, root: state["tasks"]["X"].update(
+                {"last_queue_outcome": "moved"}),
+            "repair_budget": lambda state, journal, worker, root: state["tasks"]["X"][
+                "full_suite_repair"].update({"repair_count": 2}),
+            "delta_budget": lambda state, journal, worker, root: state["tasks"]["X"][
+                "full_suite_repair"].update({"delta_review_groups": 1}),
+            "conflict_or_post_cas": lambda state, journal, worker, root: state["tasks"]["X"].update(
+                {"state": "CONFLICT"}),
+            "lifecycle_identity_moved": lambda state, journal, worker, root: journal.update(
+                {"scope_sha256": "f" * 64}),
+            "worker_identity_moved": lambda state, journal, worker, root: journal["repairs"][0].update(
+                {"attempt_dir": str(worker.parent / "semantic-repair-0002")}),
+            "provider_evidence": lambda state, journal, worker, root: (worker / "managed-agent" /
+                "terminal.json").parent.mkdir(parents=True, exist_ok=True) or (worker / "managed-agent" /
+                "terminal.json").write_text("{}"),
+            "receipt_malformed": lambda state, journal, worker, root: (worker /
+                "verify-receipt.json").unlink(),
+            "dirty_controller": lambda state, journal, worker, root: (root /
+                "unexpected-dirt.txt").write_text("dirty\n"),
+        }
+        for reason, mutate in cases.items():
+            with self.subTest(reason=reason):
+                with self.subTest(stage="fresh_fixture"):
+                    frozen = self.prepare_repair_predispatch_incident()
+                    state_path = self.controller / ".juno_task/state/tasks.json"
+                    state = json.loads(state_path.read_text())
+                    journal = json.loads(Path(frozen["journal"]).read_text())
+                    mutate(state, journal, frozen["worker_dir"], self.controller)
+                    state_path.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
+                    Path(frozen["journal"]).write_text(merge_runtime.canonical(journal) + "\n")
+                    values = {**frozen,
+                              "record_revision": merge_runtime.digest(state["tasks"]["X"]),
+                              "journal_sha256": hashlib.sha256(
+                                  Path(frozen["journal"]).read_bytes()).hexdigest()}
+                    if reason == "revision_mismatch":
+                        values["record_revision"] = frozen["record_revision"]
+                    if reason != "dirty_controller":
+                        git(self.controller, "add", "-A")
+                        git(self.controller, "commit", "-m", f"freeze {reason} refusal")
+                    before_state = state_path.read_bytes()
+                    before_journal = Path(frozen["journal"]).read_bytes()
+                    with self.assertRaisesRegex(merge_runtime.MergeQueueError, reason):
+                        self.recover_repair_predispatch(values)
+                    self.assertEqual(state_path.read_bytes(), before_state)
+                    self.assertEqual(Path(frozen["journal"]).read_bytes(), before_journal)
+                self.tearDown(); self.setUp()
+
+        frozen = self.prepare_repair_predispatch_incident()
+        arbiter_root = merge_runtime._arbiter_root(
+            self.controller.resolve(), self.repository.resolve(), "refs/heads/product")
+        before_state = (self.controller / ".juno_task/state/tasks.json").read_bytes()
+        before_journal = Path(frozen["journal"]).read_bytes()
+        with (arbiter_root / "owner.lock").open("a+b") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(merge_runtime.MergeQueueError, "live_producer"):
+                self.recover_repair_predispatch(frozen)
+        self.assertEqual((self.controller / ".juno_task/state/tasks.json").read_bytes(), before_state)
+        self.assertEqual(Path(frozen["journal"]).read_bytes(), before_journal)
+        self.tearDown(); self.setUp()
+
+        frozen = self.prepare_repair_predispatch_incident()
+        self.advance_target("docs/post-cas-drift.txt", "moved\n")
+        before_state = (self.controller / ".juno_task/state/tasks.json").read_bytes()
+        before_journal = Path(frozen["journal"]).read_bytes()
+        with self.assertRaisesRegex(merge_runtime.MergeQueueError, "conflict_or_post_cas"):
+            self.recover_repair_predispatch(frozen)
+        self.assertEqual((self.controller / ".juno_task/state/tasks.json").read_bytes(), before_state)
+        self.assertEqual(Path(frozen["journal"]).read_bytes(), before_journal)
+
     def test_failed_suite_then_success_uses_fresh_attempt_and_reaches_reviewers(self) -> None:
         flaky = (f"from pathlib import Path; import sys; p=Path({str(self.full_counter)!r}); "
                  "n=len(p.read_text().splitlines()) if p.exists() else 0; "
