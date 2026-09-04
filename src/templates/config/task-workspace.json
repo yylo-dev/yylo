@@ -51,7 +51,8 @@
     "README.md",
     "juno-benchmark",
     "juno-code",
-    "scripts"
+    "scripts",
+    "telegram_bot"
   ],
   "selectable_paths": [
     "frontend",
@@ -144,6 +145,52 @@
     ]
   },
   "validation_profiles": [
+    {
+      "id": "telegram-bot-suite",
+      "path_roots": [
+        "telegram_bot"
+      ],
+      "commands": [
+        {
+          "id": "telegram-bot-test",
+          "cwd": "telegram_bot",
+          "argv": [
+            "python3",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests",
+            "-p",
+            "test_*.py",
+            "-v"
+          ],
+          "timeout_seconds": 300,
+          "max_output_bytes": 32768,
+          "input_paths": [
+            "telegram_bot"
+          ]
+        },
+        {
+          "id": "telegram-bot-compile",
+          "cwd": "telegram_bot",
+          "argv": [
+            "python3",
+            "-m",
+            "compileall",
+            "-q",
+            "telegram_tmux",
+            "run.py"
+          ],
+          "timeout_seconds": 60,
+          "max_output_bytes": 16384,
+          "input_paths": [
+            "telegram_bot/telegram_tmux",
+            "telegram_bot/run.py"
+          ]
+        }
+      ]
+    },
     {
       "id": "benchmark-suite",
       "path_roots": [
