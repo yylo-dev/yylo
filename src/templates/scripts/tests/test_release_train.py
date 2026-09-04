@@ -369,7 +369,9 @@ raise SystemExit(2)
         return subprocess.check_output(["git", "commit-tree", tree, "-p", parent], cwd=self.root,
                                        env=environment, text=True, input=message + "\n").strip()
 
-    def prepare_serial_conflict_epoch(self, *, preserve_runtime: bool = False) -> tuple[str, str, list[str]]:
+    def prepare_serial_conflict_epoch(self, *, preserve_runtime: bool = False,
+                                      later_count: int = 4,
+                                      second_conflicts: bool = True) -> tuple[str, str, list[str]]:
         """Build the portable six-member rc7/rc8 order and two-conflict topology."""
         runtime_name = "release_train-fixture.py" if preserve_runtime else "release_train.py"
         conflict_paths = [".juno_task/managed-assets.json", f".juno_task/scripts/{runtime_name}",
@@ -384,7 +386,8 @@ raise SystemExit(2)
         run(self.root, "git", "commit", "-m", "rc7 rc8 conflict base")
         candidate_base = run(self.root, "git", "rev-parse", "HEAD")
         first = self.commit_files_tree(candidate_base, conflict_paths, "pA6M9l\n", "pA6M9l candidate")
-        second = self.commit_files_tree(candidate_base, conflict_paths, "0y4ljs\n", "0y4ljs candidate")
+        second_paths = conflict_paths if second_conflicts else ["src/0y4ljs.txt"]
+        second = self.commit_files_tree(candidate_base, second_paths, "0y4ljs\n", "0y4ljs candidate")
         for path in conflict_paths:
             (self.root / path).write_text("protected target\n")
         run(self.root, "git", "add", *conflict_paths)
@@ -417,13 +420,13 @@ raise SystemExit(2)
                  "task_id": "pA6M9l", "pre_sha": self.base, "candidate_tip": first,
                  "merge_commit": proven, "post_tree": proven_tree}]}}
         (epoch_root / "state.json").write_text(json.dumps(state, sort_keys=True) + "\n")
-        later_ids = ["U2rjMN", "znI3LO", "e99k0C", "GsKDx6"]
+        later_ids = ["U2rjMN", "znI3LO", "e99k0C", "GsKDx6"][:later_count]
         later = []
         for task_id in later_ids:
             path = f"src/{task_id}.txt"
             later.append((task_id, self.commit_files_tree(
                 candidate_base, [path], task_id + "\n", task_id + " candidate"), [path]))
-        members = [("pA6M9l", first, conflict_paths), ("0y4ljs", second, conflict_paths), *later]
+        members = [("pA6M9l", first, conflict_paths), ("0y4ljs", second, second_paths), *later]
         self.state["tasks"] = {}
         for sequence, (task_id, tip, changed_paths) in enumerate(members, 1):
             task_path = self.root / ".juno_task/tasks" / task_id[:2].lower() / f"{task_id}.md"
@@ -543,31 +546,31 @@ raise SystemExit(2)
         repeated = runtime.build_epoch_plan(self.root, self.declaration)
         manifest = plan["conflict_manifest"]
         self.assertEqual(plan, repeated)
-        self.assertEqual(["pA6M9l", "0y4ljs"], [row["task_id"] for row in manifest["conflicts"]])
-        self.assertEqual([sorted(conflict_paths), sorted(conflict_paths)],
+        self.assertEqual(["pA6M9l"], [row["task_id"] for row in manifest["conflicts"]])
+        self.assertEqual([sorted(conflict_paths)],
                          [row["conflict_paths"] for row in manifest["conflicts"]])
-        self.assertEqual([first, second], [row["candidate_tip"] for row in manifest["conflicts"]])
-        self.assertEqual(2, manifest["required_conflict_count"])
+        self.assertEqual([first], [row["candidate_tip"] for row in manifest["conflicts"]])
+        self.assertEqual(1, manifest["required_conflict_count"])
         self.assertTrue(manifest["member_accounting_complete"])
         self.assertTrue(manifest["forecast_complete"])
         self.assertFalse(manifest["exact_composition_complete"])
         self.assertTrue(manifest["policy_repair_budget_feasible"])
         self.assertTrue(manifest["repair_budget_feasible"])
         self.assertEqual(1, manifest["required_logical_repair_set_count"])
-        self.assertEqual(["U2rjMN", "znI3LO", "e99k0C", "GsKDx6"],
+        self.assertEqual(["0y4ljs", "U2rjMN", "znI3LO", "e99k0C", "GsKDx6"],
                          [row["task_id"] for row in manifest["indeterminate_members"]])
         self.assertEqual(["pA6M9l", "0y4ljs", "U2rjMN", "znI3LO", "e99k0C", "GsKDx6"],
                          [row["task_id"] for row in manifest["compositions"]])
-        self.assertEqual("0y4ljs", manifest["unresolved_boundary"]["task_id"])
+        self.assertEqual("pA6M9l", manifest["unresolved_boundary"]["task_id"])
         envelope = manifest["conservative_envelope"]
-        self.assertEqual(["0y4ljs", "U2rjMN", "znI3LO", "e99k0C", "GsKDx6"],
+        self.assertEqual(["pA6M9l", "0y4ljs", "U2rjMN", "znI3LO", "e99k0C", "GsKDx6"],
                          [row["task_id"] for row in envelope["ordered_members"]])
         self.assertTrue(envelope["complete"])
         self.assertEqual("authorization_neutral_logical_conflict_set.v1",
                          manifest["identity"]["forecast_policy"]["repair_unit"])
         self.assertEqual("frozen_unknown_suffix.v1",
                          manifest["identity"]["forecast_policy"]["logical_conflict_set_grouping"])
-        self.assertEqual("immutable_receipt_bound_composition",
+        self.assertEqual("explicit_replay_repair_required",
                          manifest["conflicts"][0]["forecast_resolution"])
         self.assertEqual(runtime.digest({key: value for key, value in manifest.items()
                                          if key != "manifest_sha256"}), manifest["manifest_sha256"])
@@ -581,6 +584,116 @@ raise SystemExit(2)
         self.assertTrue(runtime.epoch_state_path(self.root, "rc-1").is_file())
         self.assertEqual(before_refs, run(self.root, "git", "for-each-ref",
                                           "--format=%(refname) %(objectname)"))
+
+    def test_five_member_grouped_repair_refuses_unresolved_suffix_before_consumption(self) -> None:
+        self.prepare_serial_conflict_epoch(later_count=3)
+        sealed = runtime.seal_epoch(self.root, self.declaration)
+        token = sealed["lease_token"]
+        state = runtime.drive_epoch(self.root, "rc-1", token)
+        self.assertEqual("RECOVERING", state["state"])
+        packet = state["conflict"]
+        self.assertEqual(["pA6M9l", "0y4ljs", "U2rjMN", "znI3LO", "e99k0C"],
+                         packet["logical_conflict_set"]["ordered_task_ids"])
+        self.assertEqual(packet["logical_conflict_set"]["ordered_task_ids"],
+                         [row["task_id"] for row in packet["frozen_logical_members"]])
+        checkout = Path(state["composition"]["worktree"])
+        run(checkout, "git", "checkout", "--theirs", "--", *packet["conflict_paths"])
+        run(checkout, "git", "add", "-A")
+        run(checkout, "git", "-c", "user.name=Fixture", "-c",
+            "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "grouped repair")
+        receipt_path = self.root / "grouped-worker-receipt.json"
+        receipt_path.write_text(json.dumps({
+            "schema_version": "juno_managed_agent_runner.v1", "mode": "worker",
+            "state": "succeeded", "session_id": "one-model-session",
+            "identity": {"admission_kind": "sealed_release_epoch_conflict",
+                "epoch_id": "rc-1", "task_id": packet["task_id"],
+                "ours_sha": packet["ours_sha"], "theirs_sha": packet["theirs_sha"],
+                "conflict_sha256": runtime.digest(packet),
+                "logical_conflict_set": packet["logical_conflict_set"]}}, sort_keys=True) + "\n")
+        refused = runtime.apply_conflict_repair(self.root, "rc-1", receipt_path, token)
+        self.assertEqual("NEEDS_OPERATOR", refused["state"])
+        self.assertEqual("repair.grouped_suffix_unresolved",
+                         refused["operator_packet"]["reason_code"])
+        self.assertEqual("0y4ljs", refused["operator_packet"]["task_id"])
+        self.assertFalse(refused["operator_packet"]["receipt_consumed"])
+        self.assertNotIn("conflict_repair", refused)
+        self.assertNotIn("REPAIR_CONSUMED", [row["transition"] for row in refused["receipts"]])
+        projection = runtime.epoch_status_projection(self.root, "rc-1")
+        self.assertEqual("NEEDS_OPERATOR", projection["state"])
+        self.assertIn("fresh successor epoch", projection["next_action"])
+        self.assertIn("do not rerun repair", projection["next_action"])
+        self.assertEqual(self.base, run(self.root, "git", "rev-parse", "refs/heads/product"))
+        self.assertTrue(receipt_path.is_file())
+
+    def test_five_member_grouped_repair_consumes_only_after_complete_suffix_proof(self) -> None:
+        self.prepare_serial_conflict_epoch(later_count=3, second_conflicts=False)
+        sealed = runtime.seal_epoch(self.root, self.declaration)
+        token = sealed["lease_token"]
+        state = runtime.drive_epoch(self.root, "rc-1", token)
+        packet = state["conflict"]
+        checkout = Path(state["composition"]["worktree"])
+        run(checkout, "git", "checkout", "--theirs", "--", *packet["conflict_paths"])
+        run(checkout, "git", "add", "-A")
+        run(checkout, "git", "-c", "user.name=Fixture", "-c",
+            "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "grouped repair")
+        receipt_path = self.root / "complete-grouped-worker-receipt.json"
+        receipt_path.write_text(json.dumps({
+            "schema_version": "juno_managed_agent_runner.v1", "mode": "worker",
+            "state": "succeeded", "session_id": "one-model-session",
+            "identity": {"admission_kind": "sealed_release_epoch_conflict",
+                "epoch_id": "rc-1", "task_id": packet["task_id"],
+                "ours_sha": packet["ours_sha"], "theirs_sha": packet["theirs_sha"],
+                "conflict_sha256": runtime.digest(packet),
+                "logical_conflict_set": packet["logical_conflict_set"]}}, sort_keys=True) + "\n")
+        consumed = runtime.apply_conflict_repair(self.root, "rc-1", receipt_path, token)
+        proof = consumed["conflict_repair"]["suffix_validation"]
+        self.assertEqual("complete", proof["status"])
+        self.assertEqual(["0y4ljs", "U2rjMN", "znI3LO", "e99k0C"],
+                         proof["ordered_task_ids"])
+        self.assertEqual(1, consumed["conflict_repair"]["model_sessions"])
+        self.assertIn("REPAIR_CONSUMED", [row["transition"] for row in consumed["receipts"]])
+        composed = runtime.compose_epoch(self.root, consumed)
+        self.assertEqual("VALIDATING", composed["state"])
+        self.assertEqual(5, len(composed["composition"]["commits"]))
+        self.assertEqual(proof["final_tree"],
+                         run(Path(composed["composition"]["worktree"]), "git",
+                             "rev-parse", "HEAD^{tree}"))
+
+    def test_follow_on_conflict_after_consumed_budget_has_truthful_terminal_projection(self) -> None:
+        self.prepare_serial_conflict_epoch(later_count=3)
+        sealed = runtime.seal_epoch(self.root, self.declaration)
+        token = sealed["lease_token"]
+        state = runtime.drive_epoch(self.root, "rc-1", token)
+        packet = state["conflict"]
+        checkout = Path(state["composition"]["worktree"])
+        run(checkout, "git", "checkout", "--theirs", "--", *packet["conflict_paths"])
+        run(checkout, "git", "add", "-A")
+        run(checkout, "git", "-c", "user.name=Fixture", "-c",
+            "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "consumed repair")
+        head = run(checkout, "git", "rev-parse", "HEAD")
+        first = state["seal"]["members"][0]
+        state["composition"]["commits"].append({"task_id": first["task_id"],
+            "candidate_tip": first["tip_sha"], "pre_sha": packet["ours_sha"],
+            "pre_tree": run(checkout, "git", "rev-parse", f"{packet['ours_sha']}^{{tree}}"),
+            "merge_commit": head, "post_tree": run(checkout, "git", "rev-parse", "HEAD^{tree}"),
+            "parents": run(checkout, "git", "show", "-s", "--format=%P", head).split(),
+            "ordering_reason": "bounded_conflict_repair"})
+        state["composition"]["tip_sha"] = head
+        state["conflict_repair"] = {"schema_version": "juno_release_epoch_grouped_repair.v1",
+                                     "repair_commit": head, "model_sessions": 1}
+        state.pop("conflict")
+        state["state"] = "COMPOSING"
+        runtime.atomic_json(runtime.epoch_state_path(self.root, "rc-1"), state)
+        terminal = runtime.compose_epoch(self.root, state)
+        self.assertEqual("NEEDS_OPERATOR", terminal["state"])
+        self.assertEqual("repair.grouped_suffix_unresolved",
+                         terminal["operator_packet"]["reason_code"])
+        self.assertEqual(1, terminal["operator_packet"]["repair_budget_consumed"])
+        self.assertNotIn("conflict", terminal)
+        self.assertIn("fresh successor epoch",
+                      runtime.epoch_status_projection(self.root, "rc-1")["next_action"])
+        with self.assertRaisesRegex(runtime.ReleaseTrainError, "no bounded conflict repair"):
+            runtime.apply_conflict_repair(self.root, "rc-1", self.root / "unused.json", token)
 
     def test_legacy_epoch_identity_adapter_is_deterministic_typed_and_read_only(self) -> None:
         self.prepare_serial_conflict_epoch()
@@ -659,8 +772,9 @@ raise SystemExit(2)
         plan = runtime.build_epoch_plan(self.root, self.declaration)
         manifest = plan["conflict_manifest"]
         proven = next(row for row in manifest["compositions"]
-                      if row.get("decision") == "conflict_replayed")
-        receipt_path = Path(proven["proven_composition"]["receipt_path"])
+                      if isinstance(row.get("proven_composition"), dict))
+        proof = proven["proven_composition"]
+        receipt_path = Path(proof["receipt_path"])
         receipt = json.loads(receipt_path.read_text())
         fixture = {"schema_version": "juno_release_epoch_portable_topology.v2",
             "base_sha": plan["base_sha"], "order": plan["order"],
@@ -668,7 +782,7 @@ raise SystemExit(2)
                          "tree_sha": row["tree_sha"]} for row in plan["members"]],
             "serial_conflicts": [row["task_id"] for row in manifest["conflicts"]],
             "proven_compositions": [{"task_id": proven["task_id"],
-                "commit": proven["post_sha"], "tree": proven["post_tree"],
+                "commit": proof["commit"], "tree": proof["tree"],
                 "receipt": receipt,
                 "receipt_bytes_b64": base64.b64encode(receipt_path.read_bytes()).decode(),
                 "receipt_sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest()}]}
@@ -713,8 +827,9 @@ raise SystemExit(2)
         plan = runtime.build_epoch_plan(self.root, self.declaration)
         manifest = plan["conflict_manifest"]
         proven = next(row for row in manifest["compositions"]
-                      if row.get("decision") == "conflict_replayed")
-        receipt_path = Path(proven["proven_composition"]["receipt_path"])
+                      if isinstance(row.get("proven_composition"), dict))
+        proof = proven["proven_composition"]
+        receipt_path = Path(proof["receipt_path"])
         receipt = json.loads(receipt_path.read_text())
         fixture = {"schema_version": "juno_release_epoch_portable_topology.v2",
             "base_sha": plan["base_sha"], "order": plan["order"],
@@ -722,7 +837,7 @@ raise SystemExit(2)
                          "tree_sha": row["tree_sha"]} for row in plan["members"]],
             "serial_conflicts": [row["task_id"] for row in manifest["conflicts"]],
             "proven_compositions": [{"task_id": proven["task_id"],
-                "commit": proven["post_sha"], "tree": proven["post_tree"],
+                "commit": proof["commit"], "tree": proof["tree"],
                 "receipt": receipt,
                 "receipt_bytes_b64": base64.b64encode(receipt_path.read_bytes()).decode(),
                 "receipt_sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest()}]}
@@ -951,8 +1066,8 @@ raise SystemExit(2)
         before_refs = run(controller, "git", "for-each-ref", "--format=%(refname) %(objectname)")
         manifest = runtime.forecast_epoch_conflicts(controller, controller, rc8["seal"])
         self.assertEqual(rc8["seal"]["order"], [row["task_id"] for row in manifest["compositions"]])
-        self.assertEqual(["pA6M9l", "0y4ljs"], [row["task_id"] for row in manifest["conflicts"]])
-        self.assertEqual(["U2rjMN", "znI3LO", "e99k0C", "GsKDx6"],
+        self.assertEqual(["pA6M9l"], [row["task_id"] for row in manifest["conflicts"]])
+        self.assertEqual(["0y4ljs", "U2rjMN", "znI3LO", "e99k0C", "GsKDx6"],
                          [row["task_id"] for row in manifest["indeterminate_members"]])
         self.assertTrue(manifest["member_accounting_complete"])
         self.assertTrue(manifest["forecast_complete"])

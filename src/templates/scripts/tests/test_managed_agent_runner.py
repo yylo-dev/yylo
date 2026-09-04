@@ -816,13 +816,17 @@ print(json.dumps({'path':str(pathlib.Path.cwd().resolve()),'role':'controller',
         logical = {"set_id": "managed", "ordered_task_ids": ["T1"],
                    "permitted_paths": [managed_path], "classification": "authorization_neutral",
                    "authority_sha256": authority_ref["sha256"]}
-        conflict = {"schema_version": "juno_release_epoch_conflict.v2", "task_id": "T1",
+        frozen = [{"task_id": "T1", "tip_sha": theirs,
+                   "tree_sha": git(self.candidate, "rev-parse", f"{theirs}^{{tree}}"),
+                   "requirements_sha256": "1" * 64,
+                   "permitted_paths": [managed_path]}]
+        conflict = {"schema_version": "juno_release_epoch_conflict.v3", "task_id": "T1",
                     "base_sha": base, "ours_sha": ours, "theirs_sha": theirs,
                     "conflict_paths": [managed_path], "admitted_paths": [managed_path],
                     "dependency_edges": [], "requirements_sha256": "1" * 64,
                     "repair_budget": 1,
                     "authority": "declaration_bound_authorization_neutral_logical_set",
-                    "logical_conflict_set": logical,
+                    "logical_conflict_set": logical, "frozen_logical_members": frozen,
                     "validation_root": {"cwd": "juno-code", "timeout_seconds": 30}}
         manifest_body = {"authority_binding": {"path": str(authority),
                          "sha256": authority_ref["sha256"]}}
@@ -839,7 +843,10 @@ print(json.dumps({'path':str(pathlib.Path.cwd().resolve()),'role':'controller',
         state = {"schema_version": "juno_release_epoch_state.v1", "epoch_id": epoch_id,
                  "state": "RECOVERING", "seal": {"target_ref": "refs/heads/target",
                  "base_sha": base, "fencing_token_sha256": "2" * 64,
-                 "members": [{"task_id": "T1", "changed_paths": [managed_path,
+                 "members": [{"task_id": "T1", "tip_sha": theirs,
+                              "tree_sha": git(self.candidate, "rev-parse", f"{theirs}^{{tree}}"),
+                              "task_sha256": "1" * 64,
+                              "changed_paths": [managed_path,
                               ".juno_task/scripts/tests/test_task_workspace.py"]}],
                  "conflict_manifest": manifest},
                  "composition": {"worktree": str(self.candidate), "tip_sha": ours},
@@ -872,6 +879,10 @@ print(json.dumps({'path':str(pathlib.Path.cwd().resolve()),'role':'controller',
         self.assertEqual(before["head"], identity["composition_tip"])
         self.assertEqual(str((self.tmp / "conflict-worker").resolve()),
                          identity["worker_attempt"]["out_dir"])
+        contract = runner.conflict_prompt_contract(identity).decode()
+        self.assertIn('"task_id":"T1"', contract)
+        self.assertIn(identity["theirs_sha"], contract)
+        self.assertIn('"requirements_sha256":"' + "1" * 64 + '"', contract)
 
         original_state = state_path.read_bytes()
         cases = []
