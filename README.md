@@ -68,7 +68,7 @@ Next: [run an agent](#beginner-agent-workflow), [manage a typed task](#typed-tas
 | Repository topology | `info`, `where`, `doctor workspace`, `integration` | Read-only discovery is separate from guarded sync/repair/push. |
 | Feature lifecycle | `task start|run|status|checkpoint|preflight|finish` | Implementation belongs in the returned exact-base task worktree. |
 | Protected delivery | `merge status|plan|arbiter|drive|next|resolve` | One fenced target owner and expected-old-SHA CAS; dirt is preserved. |
-| Release epoch | `release train ...` | Readiness only; tag, publish, push, deploy, and cleanup need separate authority. |
+| Maintainer release | repository `scripts/release-cli.sh` | Prepare is read-only; publish needs separate authority. |
 | Records/evaluation | `ledger`, `benchmark` | Transparent delegation to independently installed canonical packages. |
 
 Run `yy --help` for the complete top-level inventory of your installed version; each listed command prints its own usage when invoked with `-h`. The old `lifecycle` command is removed; use typed `task` and `merge` commands.
@@ -299,21 +299,9 @@ status renders those same identifiers; pass `--json` to force structured output.
 
 `yy merge next` and `yy merge resolve` are explicit recovery mutations, not polling commands.
 
-## Sealed release epochs
+## Maintainer npm release
 
-A release wave can freeze all eligible pre-cutoff candidates, compose one private history-preserving train, run aggregate evidence once, and advance the protected target with one expected-old-SHA CAS.
-
-```bash
-yy release train inspect /absolute/path/to/train.json --json
-yy release train seal /absolute/path/to/train.json --json
-# Retain the epoch ID and one-time token returned by seal.
-yy release train drive EPOCH_ID --epoch-token TOKEN --json
-yy release train epoch-status EPOCH_ID --json
-```
-
-The declaration path, `EPOCH_ID`, and `TOKEN` are placeholders. `inspect`, `plan`, `status`, `epoch-status`, and `shadow` are observations. `seal`, `drive`, `eject`, `repair`, and `retry` are fenced mutations with command-specific authority.
-
-A successful epoch emits read-only release readiness after target CAS and member reconciliation. It does **not** authorize an RC, tag, push, npm/PyPI publication, deployment, production mutation, or worktree cleanup. Those remain separate explicit actions.
+Normal tasks and `yy merge` own integration. After an ordinary version bump is integrated, maintainers use `scripts/release-cli.sh prepare CLI_VERSION BENCHMARK_VERSION`, obtain explicit publication approval, and then run the separate `publish` command. The CLI has no release command.
 
 ## Workspace roles and recovery
 

@@ -41,7 +41,7 @@ MERGE_STATUS_DETAIL_ITEMS = 12
 MERGE_STATUS_STRING_CHARS = 512
 MERGE_STATUS_VISIBLE_STATES = {
     "QUEUED", "MERGING", "CONFLICT", "CONFLICT_RESOLVED", "AWAITING_RISK",
-    "AWAITING_RELEASE", "REVIEW_FINDINGS", "REVIEW_FINDINGS_EXHAUSTED",
+    "REVIEW_FINDINGS", "REVIEW_FINDINGS_EXHAUSTED",
     "REOPENING", "REQUEUING_STALE", "MERGED", "WITHDRAWN",
 }
 MERGE_STATUS_ACTIVE_STATES = MERGE_STATUS_VISIBLE_STATES - {"MERGED", "WITHDRAWN"}
@@ -65,7 +65,7 @@ LIFECYCLE_SUPERSESSION_SCHEMA = "juno_merge_lifecycle_journal_supersession.v1"
 FULL_SUITE_REPAIR_SCHEMA = "juno_merge_deterministic_full_suite_repair.v1"
 FULL_SUITE_REPAIR_ROOT = ".juno_task/runtime/merge-queue/full-suite-repair"
 REPAIR_PREDISPATCH_RECOVERY_SCHEMA = "juno_merge_repair_predispatch_recovery.v1"
-WITHDRAWABLE_STATES = {"QUEUED", "AWAITING_RISK", "AWAITING_RELEASE", "REVIEW_FINDINGS",
+WITHDRAWABLE_STATES = {"QUEUED", "AWAITING_RISK", "REVIEW_FINDINGS",
                        "REVIEW_FINDINGS_EXHAUSTED", "CONFLICT", "CONFLICT_RESOLVED",
                        "REOPENING", "REQUEUING_STALE"}
 OWNER_SCHEMA = "juno_merge_queue_candidate_owner.v1"
@@ -738,7 +738,7 @@ def merge_plan(controller: Path, task_id: str, against: Optional[str] = None,
                                  {"base_sha": base_sha, "target_sha": target_sha},
                                  f"yy task refresh {task_id}"))
 
-    eligible = ({"next": {"QUEUED", "AWAITING_RISK", "AWAITING_RELEASE", "REQUEUING_STALE"}, "resolve": {"CONFLICT", "CONFLICT_RESOLVED"},
+    eligible = ({"next": {"QUEUED", "AWAITING_RISK", "REQUEUING_STALE"}, "resolve": {"CONFLICT", "CONFLICT_RESOLVED"},
                  "reopen": {"REVIEW_FINDINGS", "REVIEW_FINDINGS_EXHAUSTED",
                             "CONFLICT_RESOLVED", "QUEUED", "AWAITING_RISK",
                             "REOPENING", "REQUEUING_STALE"},
@@ -2278,8 +2278,6 @@ def review_candidate(controller: Path, record: dict[str, Any], candidate_sha: st
             risk = {**risk, "evidence": None}
         if verified["eligible"]:
             return {**risk, "status": "ELIGIBLE", "evidence": reference}
-    if plan["release_gate_required"]:
-        return {**risk, "status": "AWAITING_RELEASE"}
     if semantic_decision["code"] != "hit" and (plan["min_reviews"] or plan["full_suite_required"]):
         return {**risk, "status": "AWAITING_RISK"}
     try:
@@ -2457,7 +2455,7 @@ def _authority_task_projection(task: dict[str, Any]) -> dict[str, Any]:
 
 def _authority_fifo(state: dict[str, Any], target_ref: str,
                     task_id: str) -> dict[str, Any]:
-    eligible_states = {"QUEUED", "AWAITING_RISK", "AWAITING_RELEASE",
+    eligible_states = {"QUEUED", "AWAITING_RISK",
                        "REVIEW_FINDINGS", "CONFLICT_RESOLVED", "REQUEUING_STALE",
                        "MERGING"}
     rows = sorted((row for row in state.get("tasks", {}).values()
@@ -2724,13 +2722,7 @@ def finalize_kanban_task(controller: Path, attempt: dict[str, Any]) -> dict[str,
                 "lifecycle_projection": lifecycle.get("outcome")}
     response = task.get("agent_response")
     if not isinstance(response, str) or not response.strip():
-        terminal_evidence = attempt.get("terminal_evidence")
-        if isinstance(terminal_evidence, dict) and terminal_evidence.get("epoch_id"):
-            response = (f"Integrated through receipt-proven release epoch "
-                        f"{terminal_evidence['epoch_id']} at {candidate}; "
-                        f"CAS receipt {terminal_evidence.get('cas_receipt_id', 'unknown')}.")
-        else:
-            response = f"Integrated through the guarded merge queue at {candidate}."
+        response = f"Integrated through the guarded merge queue at {candidate}."
     receipt_path = (controller / ".juno_task/runtime/merge-queue/finalization"
                     / task_id / f"{candidate}.json")
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2907,7 +2899,7 @@ def merge_next(controller: Path, task_id: Optional[str] = None,
             with task_runtime.state_lock(controller):
                 record = task_runtime.read_state(controller)["tasks"].get(task_id)
             if not isinstance(record, dict) or record.get("state") not in {
-                    "AWAITING_RISK", "AWAITING_RELEASE", "REQUEUING_STALE"}:
+                    "AWAITING_RISK", "REQUEUING_STALE"}:
                 raise MergeQueueError("explicit next task is not awaiting risk or release evidence")
             assert_static_plan(controller, task_id, "next", expected_plan_id)
             return resume_awaiting(controller, config, repository, record)
@@ -4700,7 +4692,7 @@ def merge_review(controller: Path, task_id: str, *, overlap_suite: bool = False)
                 "unchanged deterministic full-suite failure cannot be rerun; use the "
                 "typed safe_next_command from yy merge status")
         if not isinstance(record, dict) or record.get("state") not in {
-                "AWAITING_RISK", "AWAITING_RELEASE", "REQUEUING_STALE"}:
+                "AWAITING_RISK", "REQUEUING_STALE"}:
             raise MergeQueueError("task has no frozen candidate awaiting risk evidence")
         if record.get("state") == "REQUEUING_STALE":
             return requeue_stale_candidate(
@@ -4709,8 +4701,6 @@ def merge_review(controller: Path, task_id: str, *, overlap_suite: bool = False)
         attempt = record.get("queue_attempt")
         if not isinstance(attempt, dict):
             raise MergeQueueError("awaiting task has no queue attempt")
-        if record["state"] == "AWAITING_RELEASE":
-            raise MergeQueueError("release candidate requires separate owner-authorized release gate evidence")
         candidate_sha, expected = attempt.get("candidate_sha"), attempt.get("expected_target_sha")
         if task_runtime.ref_sha(repository, config["target_ref"]) != expected:
             return requeue_stale_candidate(
@@ -4731,8 +4721,6 @@ def merge_review(controller: Path, task_id: str, *, overlap_suite: bool = False)
                     or stored.get("policy_identity") != plan["policy_identity"]
                     or stored.get("plan") != plan):
                 raise MergeQueueError("stored awaiting-risk plan does not match fresh Git policy")
-            if plan["release_gate_required"]:
-                raise MergeQueueError("release candidate cannot use semantic review as release authority")
             progress = stored.get("review_progress")
             if progress is None:
                 prior_admission = None
@@ -7012,7 +7000,7 @@ def status(controller: Path) -> dict[str, Any]:
                 for task_id, row in sorted(tasks.items()) if isinstance(row, dict)
                 and row.get("target_ref") == config["target_ref"]
                 and row.get("state") in {"QUEUED", "MERGING", "CONFLICT", "CONFLICT_RESOLVED",
-                                         "AWAITING_RISK", "AWAITING_RELEASE", "REVIEW_FINDINGS",
+                                         "AWAITING_RISK", "REVIEW_FINDINGS",
                                          "REVIEW_FINDINGS_EXHAUSTED",
                                          "REOPENING", "REQUEUING_STALE", "MERGED", "WITHDRAWN"}]
     for projection in rows:
@@ -7258,7 +7246,7 @@ MERGE_DRIVE_ROOT = ".juno_task/runtime/lifecycle-runs/merge"
 # drive instead of a clean empty-scope completion. Mid-drive exhaustion still
 # pauses through the loop's own state check.
 MERGE_DRIVE_ELIGIBLE_STATES = frozenset({
-    "QUEUED", "AWAITING_RISK", "AWAITING_RELEASE", "REQUEUING_STALE",
+    "QUEUED", "AWAITING_RISK", "REQUEUING_STALE",
     "CONFLICT", "CONFLICT_RESOLVED", "REVIEW_FINDINGS",
     "REOPENING", "MERGING", "MERGED",
 })
@@ -7632,9 +7620,6 @@ def _merge_drive_claimed(controller: Path, through: Optional[str] = None) -> dic
                                        "authority_required": "explicit conflict resolution"}; break
                         operation = {"phase": "resolve-continue", "task_id": task_id,
                                      "pre_state": state, "post_state": None}
-                    elif state == "AWAITING_RELEASE":
-                        blocker = {"category": "external_authority", "task_id": task_id,
-                                   "authority_required": "release gate owner"}; break
                     elif state == "REVIEW_FINDINGS_EXHAUSTED":
                         blocker = {"category": "review_findings_exhausted", "task_id": task_id}; break
                     elif state == "REVIEW_FINDINGS":
@@ -7839,35 +7824,6 @@ def _arbiter_observation(state: Optional[dict[str, Any]]) -> dict[str, str]:
     return {"status": observation.status, "detail": observation.detail}
 
 
-def _epoch_delivery_selections(controller: Path, target_ref: str,
-                               eligible_task_ids: list[str]) -> list[dict[str, Any]]:
-    """Return immutable explicit train routing that overlaps ordinary FIFO."""
-    root = controller / ".juno_task/runtime/epoch-delivery-selections"
-    eligible = set(eligible_task_ids)
-    selected: list[dict[str, Any]] = []
-    if not root.is_dir():
-        return selected
-    for path in sorted(root.glob("*.json")):
-        try:
-            value = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-        identity = value.get("selection_id") if isinstance(value, dict) else None
-        unsigned = {key: item for key, item in value.items() if key != "selection_id"} if isinstance(value, dict) else {}
-        members = value.get("member_task_ids") if isinstance(value, dict) else None
-        if (value.get("schema_version") != "juno_epoch_delivery_selection.v1"
-                or value.get("target_ref") != target_ref
-                or identity != digest(unsigned) or not isinstance(members, list)):
-            continue
-        overlap = sorted(eligible & set(members))
-        if overlap:
-            selected.append({"epoch_id": value.get("epoch_id"), "selection_id": identity,
-                             "base_sha": value.get("base_sha"), "task_ids": overlap,
-                             "declaration_path": (value.get("declaration") or {}).get("path"),
-                             "path": str(path.resolve())})
-    return selected
-
-
 def target_arbiter_status(controller: Path) -> dict[str, Any]:
     config = task_runtime.load_config(controller)
     repository = task_runtime.product_repository(controller, config)
@@ -7881,15 +7837,8 @@ def target_arbiter_status(controller: Path) -> dict[str, Any]:
                 and row.get("target_ref") == config["target_ref"]
                 and row.get("state") in TARGET_ARBITER_WORK_STATES]
     eligible.sort(key=lambda item: item["task_id"])
-    selections = _epoch_delivery_selections(
-        controller, config["target_ref"], [row["task_id"] for row in eligible])
     if state and state.get("state") == "ACTIVE" and observation["status"] == "alive":
         reason_code, next_action = "arbiter_running", "observe with: yy merge arbiter status"
-    elif selections:
-        reason_code = "epoch_delivery_selected"
-        declaration_path = selections[0].get("declaration_path") or "DECLARATION.json"
-        next_action = ("inspect selected epoch with: yy release train inspect "
-                       + str(declaration_path) + "; explicit seal remains required")
     elif eligible:
         reason_code, next_action = "eligible_work", "yy merge arbiter run"
     else:
@@ -7901,7 +7850,6 @@ def target_arbiter_status(controller: Path) -> dict[str, Any]:
             "current_fifo": (current_fifo_identity(controller, config, None)
                              if eligible else None),
             "eligible_task_ids": [row["task_id"] for row in eligible],
-            "epoch_delivery_selections": selections,
             "reason_code": reason_code, "next_action": next_action}
 
 
@@ -8456,8 +8404,6 @@ def merge_drive(controller: Path, through: Optional[str] = None) -> dict[str, An
     repository = task_runtime.product_repository(controller, config)
     # Admission is read-only. No worker attempt is created for an idle queue.
     admission = target_arbiter_status(controller)
-    if admission.get("reason_code") == "epoch_delivery_selected":
-        return {**admission, "outcome": "REFUSED", "mutated": False}
     if not admission["eligible_task_ids"]:
         # Preserve immutable terminal-drive replay for observers without
         # creating a new arbiter attempt. A never-used empty queue is plain IDLE.
@@ -8478,8 +8424,6 @@ def merge_drive(controller: Path, through: Optional[str] = None) -> dict[str, An
         # Recheck after ownership acquisition so two arrivals cannot create an
         # idle attempt after the first worker drains the queue.
         admission = target_arbiter_status(controller)
-        if admission.get("reason_code") == "epoch_delivery_selected":
-            return {**admission, "outcome": "REFUSED", "mutated": False}
         if not admission["eligible_task_ids"]:
             if not (controller / MERGE_DRIVE_ROOT / "latest.json").is_file():
                 return {**admission, "outcome": "IDLE"}
@@ -8548,11 +8492,9 @@ def parser() -> argparse.ArgumentParser:
     next_command = sub.add_parser("next")
     next_command.add_argument("task_id", nargs="?")
     next_command.add_argument("--plan-id")
-    next_command.add_argument("--train-plan")
     resolve = sub.add_parser("resolve")
     resolve.add_argument("task_id")
     resolve.add_argument("--plan-id")
-    resolve.add_argument("--train-plan")
     review = sub.add_parser("review")
     review.add_argument("task_id")
     reopen = sub.add_parser("reopen")
@@ -8644,16 +8586,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             result = merge_plan(controller, args.task_id, args.against)
             print(canonical(result) if args.json else human_plan(result))
             return 0
-        train_plan = getattr(args, "train_plan", None)
-        if args.operation in {"next", "resolve"} and train_plan:
-            # One shared stale-identity/FIFO/dependency gate; merge_queue remains
-            # the sole composition, validation, and target-CAS engine.
-            import release_train
-            try:
-                release_train.check_plan(
-                    controller, Path(train_plan), "merge", getattr(args, "task_id", None))
-            except release_train.ReleaseTrainError as exc:
-                raise MergeQueueError(str(exc)) from exc
         audit_operation = args.operation
         if args.operation == "arbiter":
             audit_operation = "status" if args.arbiter_operation == "status" else "drive"
