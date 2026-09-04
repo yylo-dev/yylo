@@ -1,1 +1,1 @@
-# Retired: release trains are not an executable surface.
+# Retired compatibility tombstone: release trains have no executable surface.
