@@ -13,6 +13,7 @@ export type TaskWorkspaceOperation =
   | 'recover-predispatch'
   | 'recover-wall-budget'
   | 'status'
+  | 'admission'
   | 'hydrate'
   | 'preflight'
   | 'finish'
@@ -43,7 +44,7 @@ export type TaskRuntimeBootstrapOptions = { dryRun?: boolean; apply?: string };
 export type TaskRuntimeBootstrapInvoker = (options: TaskRuntimeBootstrapOptions) => Promise<void>;
 
 export function taskWorkspaceControlOperation(operation: TaskWorkspaceOperation): 'kanban' | 'orchestration' {
-  return ['status', 'preflight', 'recovery-plan', 'evidence-status', 'doctor', 'lease-status'].includes(operation) ? 'kanban' : 'orchestration';
+  return ['status', 'admission', 'preflight', 'recovery-plan', 'evidence-status', 'doctor', 'lease-status'].includes(operation) ? 'kanban' : 'orchestration';
 }
 
 export function packagedTaskRuntimeCandidates(): string[] {
@@ -138,7 +139,7 @@ export async function checkpointTaskWorkspaceAfterFinalization(
   checkpoint: TaskWorkspaceCheckpointer = checkpointControllerAfterFinalization,
   taskId?: string,
 ): Promise<void> {
-  if (['status', 'preflight', 'recovery-plan', 'checkpoint', 'evidence-run', 'evidence-status', 'evidence-await', 'doctor', 'lease-status'].includes(operation)) return;
+  if (['status', 'admission', 'preflight', 'recovery-plan', 'checkpoint', 'evidence-run', 'evidence-status', 'evidence-await', 'doctor', 'lease-status'].includes(operation)) return;
   if (taskId) await checkpoint(controllerRoot, exitCode, taskId);
   else await checkpoint(controllerRoot, exitCode);
 }
@@ -214,7 +215,7 @@ export function configureTaskWorkspaceCommand(
   task
     .command('start')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
-    .option('--path <path>', 'Additional selectable product root; omit for baseline/default paths', (value, values: string[]) => [...values, value], [])
+    .option('--path <path>', 'Exact tracked authored file or additional selectable product root; repeat for exact scope', (value, values: string[]) => [...values, value], [])
     .option('--umbrella-admission <file>', 'Versioned ordered-child exact-scope input')
     .option('--lease-token <token>', 'Current fencing lease token for this gated mutation')
     .action((taskId: string, options: { path: string[]; umbrellaAdmission?: string; leaseToken?: string }) => {
@@ -222,6 +223,10 @@ export function configureTaskWorkspaceCommand(
       if (options.leaseToken) admission.push('--lease-token', options.leaseToken);
       return invoke('start', taskId, options.path, admission);
     });
+  task.command('admission')
+    .description('Read-only exact authored-path and dirty-path admission check')
+    .argument('<task-id>', 'Canonical YYLO Ledger task ID')
+    .action((taskId: string) => invoke('admission', taskId, []));
   task.command('preflight')
     .description('Read-only finish/admission check before expensive validation')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')

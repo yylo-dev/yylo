@@ -207,6 +207,21 @@ class MergeQueueTests(unittest.TestCase):
         modules.mkdir(exist_ok=True)
         (modules / ".package-lock.json").write_text("hydrated\n")
 
+    def test_live_authority_projects_only_unmet_dependency_blockers(self) -> None:
+        satisfied = merge_runtime._authority_task_projection({
+            "id": "X", "status": "in_progress", "blocked_by": ["A"],
+            "_dependency_info": {"unmet_blockers": [],
+                                 "met_blockers": [{"id": "A", "status": "done"}]},
+        })
+        unmet = merge_runtime._authority_task_projection({
+            "id": "X", "status": "in_progress", "blocked_by": ["A", "B"],
+            "_dependency_info": {"unmet_blockers": [{"id": "B", "status": "todo"}],
+                                 "met_blockers": [{"id": "A", "status": "done"}]},
+        })
+
+        self.assertEqual([], satisfied["blockers"])
+        self.assertEqual(["B"], unmet["blockers"])
+
     def test_live_authority_reread_rejects_blocker_drift_without_rerunning_validation(self) -> None:
         self.commit_feature("X", "docs/authority.txt", "authority\n")
         config = task_runtime.load_config(self.controller)
@@ -1587,6 +1602,10 @@ class MergeQueueTests(unittest.TestCase):
         self.assertTrue(first["ready"])
         self.assertEqual(merge_runtime.canonical(first), merge_runtime.canonical(second))
         self.assertEqual(first["schema_version"], merge_runtime.PLAN_SCHEMA)
+        origin = first["composition"]["origin_projection"]
+        self.assertEqual(origin["schema_version"], "juno_path_origin_projection.v1")
+        self.assertEqual(origin["authored_paths"], ["docs/plan.txt"])
+        self.assertEqual(origin["ambiguous_paths"], [])
         self.assertEqual([row["id"] for row in first["validation_commands"]],
                          ["affected", "full-suite"])
         self.assertEqual(state_path.read_bytes(), before["state"])
