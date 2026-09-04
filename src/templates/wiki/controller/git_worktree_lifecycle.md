@@ -142,7 +142,18 @@ candidate and one delta review group; another material
 finding stops as `REVIEW_FINDINGS_EXHAUSTED` instead of spawning an autonomous
 loop. A changed product candidate invalidates prior semantic evidence, while a
 byte-identical metadata/harness retry may reuse evidence only when all bound
-policy/runtime/closure identities remain exact. After CAS, only deterministic identity/readback and bounded smoke checks run.
+policy/runtime/closure identities remain exact. A repeated deterministic
+`FAILED_FULL_SUITE` is never rerun unchanged. `yy merge status` returns
+`deterministic_full_suite_repair_available` and one exact
+`yy merge recover-full-suite-failure TASK ...` command binding the lifecycle
+journal/revision, failed suite and finding, candidate/tree, target, producer, and
+predecessor arbiter. That transition authorizes the existing queue-owned single
+repair worker; only the failing router contract and its exact CLI/router
+counterparts may change. The repaired delta runs focused validation before the
+required policy suite and one delta review group. Any environmental failure,
+live producer, moved identity, unrelated delta, malformed receipt, post-CAS
+state, or spent repair/delta budget refuses without mutation. After CAS, only
+deterministic identity/readback and bounded smoke checks run.
 Release waves close admission explicitly and compose every eligible pre-cutoff
 candidate into one private history-preserving epoch; one aggregate gate and one
 protected-target CAS produce read-only release readiness.

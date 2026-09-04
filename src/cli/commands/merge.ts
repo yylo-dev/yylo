@@ -5,7 +5,7 @@ import { Command } from 'commander';
 import { routeControlPlane } from '../../utils/control-plane-router.js';
 import { checkpointControllerAfterFinalization } from '../../utils/controller-checkpoint.js';
 
-export type MergeQueueOperation = 'status' | 'drive' | 'arbiter-status' | 'arbiter-run' | 'plan' | 'next' | 'resolve' | 'review' | 'reopen' | 'recover-authority-drift' | 'supersede-lifecycle-journal' | 'reconcile' | 'refresh' | 'withdraw';
+export type MergeQueueOperation = 'status' | 'drive' | 'arbiter-status' | 'arbiter-run' | 'plan' | 'next' | 'resolve' | 'review' | 'reopen' | 'recover-full-suite-failure' | 'recover-authority-drift' | 'supersede-lifecycle-journal' | 'reconcile' | 'refresh' | 'withdraw';
 export type MergeQueueInvoker = (
   operation: MergeQueueOperation,
   taskId?: string,
@@ -201,6 +201,28 @@ export function configureMergeQueueCommand(
     .action((taskId: string, options: { planId?: string }) => options.planId
       ? invoke('reopen', taskId, ['--plan-id', options.planId])
       : invoke('reopen', taskId));
+  merge.command('recover-full-suite-failure')
+    .description('Explicit receipt-bound authorization for one deterministic failed-suite repair')
+    .argument('<task-id>', 'AWAITING_RISK task bound by unchanged deterministic failure evidence')
+    .requiredOption('--attempt <number>', 'Exact terminal target-arbiter attempt')
+    .requiredOption('--terminal-receipt <path>', 'Canonical terminal failed-arbiter receipt')
+    .requiredOption('--terminal-receipt-sha256 <sha256>', 'Exact terminal receipt byte identity')
+    .requiredOption('--expected-revision <sha256>', 'Exact current lifecycle record revision')
+    .requiredOption('--run-id <id>', 'Exact managed merge-drive run identity')
+    .requiredOption('--scope-sha256 <sha256>', 'Exact frozen FIFO scope identity')
+    .requiredOption('--journal-sha256 <sha256>', 'Exact nonterminal lifecycle journal bytes')
+    .action((taskId: string, options: {
+      attempt: string; terminalReceipt: string; terminalReceiptSha256: string;
+      expectedRevision: string; runId: string; scopeSha256: string; journalSha256: string;
+    }) => invoke('recover-full-suite-failure', taskId, [
+      '--attempt', options.attempt,
+      '--terminal-receipt', options.terminalReceipt,
+      '--terminal-receipt-sha256', options.terminalReceiptSha256,
+      '--expected-revision', options.expectedRevision,
+      '--run-id', options.runId,
+      '--scope-sha256', options.scopeSha256,
+      '--journal-sha256', options.journalSha256,
+    ]));
   merge.command('recover-authority-drift')
     .description('Explicit receipt-bound recovery from terminal pre-CAS authority drift to fenced editable WORKING')
     .argument('<task-id>', 'MERGING task bound by the failed arbiter receipt')

@@ -6540,6 +6540,13 @@ steps:
 
     def test_merge_recover_authority_drift_audit_is_exact_and_unknown_operations_refuse(self) -> None:
         audit_root = self.controller / ".juno_task/runtime/control-audit/merge"
+        repair_receipt = task_runtime.record_control_audit(
+            self.controller, "merge", "recover-full-suite-failure", "X")
+        repair_payload = json.loads(Path(repair_receipt["path"]).read_text())
+        self.assertEqual(
+            (repair_payload["surface"], repair_payload["operation"],
+             repair_payload["task_id"], repair_payload["policy_operation"]),
+            ("merge", "recover-full-suite-failure", "X", "orchestration"))
         receipt = task_runtime.record_control_audit(
             self.controller, "merge", "recover-authority-drift", "X")
         audit = json.loads(Path(receipt["path"]).read_text())
