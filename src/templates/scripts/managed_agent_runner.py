@@ -257,6 +257,23 @@ def structured_review_result(data: bytes, binding: dict[str, Any]) -> dict[str, 
     return value
 
 
+def conflict_prompt_contract(identity: dict[str, Any]) -> bytes:
+    """Append the immutable complete logical-set scope to every conflict-worker prompt."""
+    scope = {"schema_version": "juno_release_epoch_grouped_worker_prompt.v1",
+             "epoch_id": identity["epoch_id"],
+             "current_task_id": identity["task_id"],
+             "ours_sha": identity["ours_sha"], "theirs_sha": identity["theirs_sha"],
+             "logical_conflict_set": identity["logical_conflict_set"],
+             "frozen_logical_members": identity["frozen_logical_members"]}
+    return ("\n\n# Managed grouped release-train repair contract\n"
+            "Resolve only the current conflict and create its exact both-parent merge commit. "
+            "This single model session represents the complete frozen ordered logical set below; "
+            "do not omit, reorder, retip, or expand any member or permitted path. The controller "
+            "will refuse this receipt before consumption unless an isolated deterministic "
+            "composition proves that the repaired tree drains every remaining member without "
+            "another model repair.\n" + json.dumps(scope, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
 def receipt_review_result(receipt: dict[str, Any], binding: dict[str, Any]) -> dict[str, Any]:
     artifacts = receipt.get("artifacts")
     response = artifacts.get("response") if isinstance(artifacts, dict) else None
@@ -814,9 +831,21 @@ def release_conflict_admission(args: argparse.Namespace, controller: dict[str, A
     member = next((row for row in seal.get("members", []) if isinstance(row, dict)
                    and row.get("task_id") == args.task_id), None)
     expected_changed = sorted((member or {}).get("changed_paths") or [])
+    frozen_by_id = {row.get("task_id"): row for row in seal.get("members", [])
+                    if isinstance(row, dict)}
+    ordered_ids = (logical_set or {}).get("ordered_task_ids") or []
+    expected_frozen = [{"task_id": task_id,
+        "tip_sha": frozen_by_id[task_id]["tip_sha"],
+        "tree_sha": frozen_by_id[task_id]["tree_sha"],
+        "requirements_sha256": frozen_by_id[task_id]["task_sha256"],
+        "permitted_paths": sorted(set(frozen_by_id[task_id].get("changed_paths") or [])
+                                  & set(admitted))}
+        for task_id in ordered_ids if task_id in frozen_by_id]
     observed_changed = sorted(filter(None, git(root, "diff", "--name-only",
                                                conflict["ours_sha"]).splitlines()))
-    if (conflict.get("schema_version") != "juno_release_epoch_conflict.v2"
+    if (conflict.get("schema_version") != "juno_release_epoch_conflict.v3"
+            or conflict.get("frozen_logical_members") != expected_frozen
+            or len(expected_frozen) != len(ordered_ids)
             or not isinstance(logical_set, dict)
             or logical_set.get("classification") != "authorization_neutral"
             or logical_set.get("ordered_task_ids", [None])[0] != args.task_id
@@ -887,7 +916,9 @@ def release_conflict_admission(args: argparse.Namespace, controller: dict[str, A
                  "target_ref": target_ref,
                  "base_sha": base_sha, "composition_tip": composition.get("tip_sha"),
                  "ours_sha": conflict["ours_sha"], "theirs_sha": conflict["theirs_sha"],
-                 "logical_conflict_set": logical_set, "validation_root": validation_root,
+                 "logical_conflict_set": logical_set,
+                 "frozen_logical_members": conflict["frozen_logical_members"],
+                 "validation_root": validation_root,
                  "worker_attempt": worker_attempt}
     return admission, mark
 
@@ -1652,6 +1683,8 @@ def run(args: argparse.Namespace) -> int:
     prompt_data = source_prompt.read_bytes()
     if binding is not None:
         prompt_data += review_prompt_contract(binding)
+    elif identity.get("admission_kind") == "sealed_release_epoch_conflict":
+        prompt_data += conflict_prompt_contract(identity)
     if not prompt_data or len(prompt_data) > CAPTURE_LIMIT:
         raise RunnerError("prompt must be nonempty and bounded")
     try: prompt_echo = prompt_data.decode("utf-8")

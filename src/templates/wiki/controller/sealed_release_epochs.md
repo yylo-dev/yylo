@@ -119,16 +119,19 @@ are never squashed, rebased, or rewritten. Ejected tips must be absent.
 
 Before seal, read-only inspection precomposes the exact prefix and records every
 remaining member after the first unresolved repair in one deterministic conservative
-envelope. Seal refuses unless that complete envelope fits one frozen, declaration-
-bound authorization-neutral logical set. Member accounting and forecast completion
-do not claim unknown post-repair trees are exact.
+envelope. Historical both-parent proof is diagnostic only during inspection: it does
+not advance the forecast unless drive has consumed it through the explicit narrow
+`replay-repair` transition. Seal refuses unless that complete envelope fits one frozen,
+declaration-bound authorization-neutral logical set. Member accounting and forecast
+completion do not claim unknown post-repair trees are exact.
 
 A conflict preserves the dirty checkout and writes one bounded repair packet with
-base/ours/theirs, the authority hash, ordered logical-set members, exact permitted
-paths, and the selected validation root. The canonical managed worker verifies and
-hydrates that root from its exact lock before model launch, then atomically finalizes
-an exact successful capture when provider capture is missing or stale. Run one model
-session for the whole frozen set and consume its one immutable receipt:
+base/ours/theirs, the authority hash, and every ordered logical-set member's task ID,
+tip, tree, requirement digest, exact permitted paths, and selected validation root.
+The canonical managed worker verifies and hydrates that root from its exact lock and
+appends this complete frozen scope to the model prompt before launch, then atomically
+finalizes an exact successful capture when provider capture is missing or stale. Run
+one model session for the whole frozen set and submit its one immutable receipt:
 
 ```bash
 yy release train repair EPOCH --receipt RECEIPT --epoch-token TOKEN
@@ -143,6 +146,15 @@ parents, ancestry, and resulting tree are exact:
 yy release train replay-repair EPOCH --predecessor-epoch PREDECESSOR \
   --receipt RECEIPT --epoch-token TOKEN --json
 ```
+
+Before receipt consumption, the controller clones an isolated checkout at the
+both-parent repair commit and deterministically composes the complete remaining frozen
+suffix. It consumes the repair only when every member drains without another model
+repair and records the exact per-member trees in the immutable repair reference; drive
+revalidates those trees while composing. A remaining conflict refuses consumption as
+`NEEDS_OPERATOR` with `repair.grouped_suffix_unresolved`. Any later conflict after a
+consumed repair reaches the same truthful terminal reason and offers only fresh
+successor inspection/seal—not an impossible second repair command.
 
 Replay never edits predecessor evidence and records `model_rerun=false`. Missing or
 ambiguous legacy evidence returns a typed incompatibility; deterministic adaptation
