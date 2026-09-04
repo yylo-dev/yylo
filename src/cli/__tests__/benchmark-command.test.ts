@@ -424,7 +424,7 @@ describe('benchmark delegate', () => {
     }
   });
 
-  it.each(['yylo-benchmark 0.1.0', 'yylo-benchmark 1.0.0', 'yylo-benchmark 0.1.1-alpha.1'])(
+  it.each(['yylo-benchmark 0.1.0-rc.9', 'yylo-benchmark 1.0.0', 'yylo-benchmark 0.1.1-alpha.1'])(
     'refuses incompatible version %s before forwarding user arguments',
     async (reportedVersion) => {
       const { root, bin, record } = await fixture();
