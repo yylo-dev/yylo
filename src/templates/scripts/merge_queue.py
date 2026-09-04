@@ -6465,15 +6465,44 @@ def _merge_drive_claimed(controller: Path, through: Optional[str] = None) -> dic
                 selector_latest.unlink(missing_ok=True)
             projection_path = Path(str(pointer.get("projection_path", "")))
             if journal.get("terminal"):
-                # Terminal reuse is bound to the current requested FIFO scope:
-                # after one completed unscoped drive, a later eligible task must
-                # open a fresh immutable lineage instead of replaying the old
-                # MERGED_THROUGH result.
+                # SUPERSEDED is terminal history, never a resumable successful
+                # drive. Validate its receipt-backed terminal artifacts before
+                # retiring the pointer, including when the frozen/current IDs
+                # happen to be equal (the attempt-229 incident shape).
+                if journal.get("state") == "SUPERSEDED":
+                    supersession = journal.get("supersession")
+                    journal_refs = [ref for ref in journal.get("projections", [])
+                                    if isinstance(ref, dict) and ref.get("path")]
+                    if (not isinstance(supersession, dict) or not journal_refs
+                            or supersession.get("projection") != journal_refs[-1]):
+                        raise MergeQueueError(
+                            "terminal SUPERSEDED merge-drive evidence is malformed")
+                    final_ref = journal_refs[-1]
+                    projection_value = lifecycle_runtime.verified_projection_bytes(
+                        Path(str(final_ref["path"])),
+                        expected_sha256=final_ref.get("sha256"),
+                        kind="merge-drive", run_id=journal.get("run_id"))
+                    summary_ref = supersession.get("summary")
+                    summary_path = Path(str(
+                        summary_ref.get("path", "") if isinstance(summary_ref, dict) else ""))
+                    expected_summary = lifecycle_runtime.deterministic_summary(projection_value)
+                    if (projection_value.get("state") != "SUPERSEDED"
+                            or not isinstance(summary_ref, dict)
+                            or not summary_path.is_file()
+                            or hashlib.sha256(summary_path.read_bytes()).hexdigest()
+                            != summary_ref.get("sha256")
+                            or summary_path.read_bytes()
+                            != lifecycle_runtime.canonical_bytes(expected_summary)):
+                        raise MergeQueueError(
+                            "terminal SUPERSEDED merge-drive evidence is malformed")
+                    selector_latest.unlink(missing_ok=True)
+                # Terminal MERGED_THROUGH reuse is bound to the current requested
+                # FIFO scope. A changed scope opens a fresh immutable lineage.
                 frozen_ids = [row.get("task_id") for row in scope if isinstance(row, dict)]
                 current_scope = (_drive_scope(controller, config, through)
                                  if through is None else scope)
                 current_ids = [row.get("task_id") for row in current_scope if isinstance(row, dict)]
-                if frozen_ids == current_ids:
+                if journal.get("state") != "SUPERSEDED" and frozen_ids == current_ids:
                     # The journal is the authority: derive the authoritative
                     # terminal projection from it and repair stale pointers
                     # (crash between the terminal journal write and publication)

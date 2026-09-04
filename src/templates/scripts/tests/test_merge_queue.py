@@ -2010,9 +2010,17 @@ class MergeQueueTests(unittest.TestCase):
                 "budgets": {"total_wall_seconds": 14400}}
         plan_ref = merge_runtime.lifecycle_runtime.atomic_json(
             run_dir / "compiled-plan.json", plan, exclusive=True)
+        selector_identity = merge_runtime.digest({
+            "repository_identity": merge_runtime.repository_identity(self.repository.resolve()),
+            "target_ref": target_ref, "through": None})
+        current_plan = merge_runtime.lifecycle_runtime.compile_lifecycle_template(
+            self.controller.resolve(), "merge-drive", None,
+            model_identity=os.environ.get("JUNO_MODEL"))
+        execution_identity = merge_runtime._merge_plan_execution_identity(current_plan)
         journal = {
             "schema_version": "juno_managed_merge_drive_journal.v2", "run_id": run_id,
-            "selector_identity_sha256": "d" * 64, "execution_identity_sha256": "e" * 64,
+            "selector_identity_sha256": selector_identity,
+            "execution_identity_sha256": execution_identity,
             "scope_sha256": scope["scope_sha256"], "initial_target_sha": self.base,
             "compiled_plan": plan_ref, "fifo_scope": scope_ref,
             "started_at_unix_ns": 1788467754908927000,
@@ -2110,6 +2118,43 @@ class MergeQueueTests(unittest.TestCase):
         fresh = merge_runtime._drive_scope(
             self.controller.resolve(), task_runtime.load_config(self.controller.resolve()), None)
         self.assertEqual(fresh[0]["task_id"], "2jYk9e")
+
+    def test_attempt_229_superseded_equal_scope_compiles_fresh_current_fifo(self) -> None:
+        incident = self.freeze_wxk4xy_stale_lifecycle_incident()
+        result = merge_runtime.supersede_stale_lifecycle_journal(
+            self.controller.resolve(), incident["run_id"], incident["journal_revision"],
+            incident["journal_sha256"], incident["scope_sha256"], 227,
+            incident["terminal_ref"]["path"], incident["terminal_ref"]["sha256"],
+            "WxK4xy", incident["recovery_ref"]["path"],
+            incident["recovery_ref"]["sha256"], incident["target_sha"],
+            incident["fifo_sha256"])
+        self.assertEqual(result["state"], "SUPERSEDED")
+
+        # Attempt 229 observed the same actionable ID in the frozen and current
+        # scopes. A valid SUPERSEDED terminal must retire that lineage before the
+        # equal-scope MERGED_THROUGH resume path is considered.
+        state_path = self.controller / ".juno_task/state/tasks.json"
+        state = json.loads(state_path.read_text())
+        state["tasks"]["2jYk9e"]["state"] = "WORKING"
+        state["tasks"]["5R1aY8"]["state"] = "WORKING"
+        state["tasks"]["WxK4xy"]["state"] = "CONFLICT"
+        state_path.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
+        config = task_runtime.load_config(self.controller.resolve())
+        repository = task_runtime.product_repository(self.controller.resolve(), config)
+        selector_identity = merge_runtime.digest({
+            "repository_identity": merge_runtime.repository_identity(repository),
+            "target_ref": config["target_ref"], "through": None})
+        selector_latest = (self.controller / merge_runtime.MERGE_DRIVE_ROOT / "scopes"
+                           / selector_identity / "latest.json")
+        selector_latest.parent.mkdir(parents=True, exist_ok=True)
+        global_latest = self.controller / merge_runtime.MERGE_DRIVE_ROOT / "latest.json"
+        selector_latest.write_bytes(global_latest.read_bytes())
+
+        fresh = merge_runtime._merge_drive_claimed(self.controller.resolve())
+        self.assertEqual(fresh["state"], "PAUSED")
+        self.assertNotEqual(fresh["run_id"], incident["run_id"])
+        fresh_scope = json.loads(Path(fresh["artifacts"][1]["path"]).read_text())
+        self.assertEqual([row["task_id"] for row in fresh_scope["tasks"]], ["WxK4xy"])
 
     def test_stale_journal_supersession_typed_refusals_are_non_mutating(self) -> None:
         cases = {
