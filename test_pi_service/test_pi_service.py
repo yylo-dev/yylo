@@ -2025,8 +2025,8 @@ class TestRunPiRawToolOutputBuffering:
         # Raw lines appear once, inside the structured tool result block.
         assert out.count("RAW-LINE-1") == 1
         assert out.count("RAW-LINE-2") == 1
-        assert "result:\nRAW-LINE-1\nRAW-LINE-2" in out
-        assert out.find("result:\nRAW-LINE-1\nRAW-LINE-2") < out.find('"type":"turn_end"')
+        assert "[TOOL_RESPONSE]\n  RAW-LINE-1\n  RAW-LINE-2\n[/TOOL_RESPONSE]" in out
+        assert '"type":"turn_end"' not in out
 
     def test_turn_end_is_deferred_until_late_raw_tool_lines_flush(self, monkeypatch, capsys):
         """Late non-JSON tool lines should still print before turn_end metadata."""
@@ -2049,11 +2049,9 @@ class TestRunPiRawToolOutputBuffering:
         out = capsys.readouterr().out
         assert out.count("RAW-LATE-1") == 1
         assert out.count("RAW-LATE-2") == 1
-        # Both late lines should appear before turn_end so transcript flow stays readable.
-        turn_idx = out.find('"type":"turn_end"')
-        assert turn_idx != -1
-        assert out.find("RAW-LATE-1") < turn_idx
-        assert out.find("RAW-LATE-2") < turn_idx
+        # Ordinary turn_end is hidden and late raw lines remain inside one tool block.
+        assert '"type":"turn_end"' not in out
+        assert "[TOOL_RESPONSE]\n  RAW-LATE-1\n  RAW-LATE-2\n[/TOOL_RESPONSE]" in out
 
     def test_toolcall_end_is_suppressed_when_tool_finishes_within_delay(self, monkeypatch, capsys):
         """Fallback toolcall_end should be hidden when tool finishes before delay threshold."""
@@ -2074,29 +2072,32 @@ class TestRunPiRawToolOutputBuffering:
 
         out = capsys.readouterr().out
         assert '"event":"toolcall_end"' not in out
-        assert '"type":"tool"' in out
-        assert "result:\nhi" in out
+        assert out.count("[TOOL]") == 1
+        assert "[TOOL_RESPONSE]\n  hi\n[/TOOL_RESPONSE]" in out
 
-    def test_toolcall_end_is_emitted_when_tool_exceeds_delay(self, monkeypatch, capsys):
-        """Fallback toolcall_end should appear when tool_execution_end arrives after delay."""
+    def test_slow_tool_emits_running_then_completion_without_repeating_input(self, monkeypatch, capsys):
+        """A tool active past 500 ms gets append-only running and completion blocks."""
         scheduled_lines = [
             (0.0, '{"type":"message_update","assistantMessageEvent":{"type":"toolcall_end","toolCall":{"name":"bash","arguments":{"command":"echo hi"}}}}\n'),
-            (0.08, '{"type":"tool_execution_start","toolCallId":"tc-slow","toolName":"bash","args":{"command":"echo hi"}}\n'),
-            (0.0, '{"type":"tool_execution_end","toolCallId":"tc-slow","toolName":"bash","result":"hi"}\n'),
+            (0.0, '{"type":"tool_execution_start","toolCallId":"tc-slow","toolName":"bash","args":{"command":"echo hi"}}\n'),
+            (0.55, '{"type":"tool_execution_end","toolCallId":"tc-slow","toolName":"bash","result":"hi"}\n'),
             (0.0, '{"type":"turn_end","message":{},"toolResults":[]}\n'),
         ]
 
         fake = self._FakeDelayedProcess(scheduled_lines)
         monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: fake)
-        monkeypatch.setenv("PI_TOOLCALL_END_DELAY_SECONDS", "0.02")
-
         args = _make_args(pretty="true", verbose=False)
         rc = self.svc.run_pi(["pi", "--mode", "json"], args)
         assert rc == 0
 
         out = capsys.readouterr().out
-        assert '"event":"toolcall_end"' in out
-        assert '"type":"tool"' in out
+        assert out.count("[TOOL]") == 2
+        assert '"status":"running"' in out
+        assert '"status":"done"' in out
+        running, completed = out.split("\n\n", 1)
+        assert "[INPUT]\n  echo hi\n[/INPUT]" in running
+        assert "[INPUT]" not in completed
+        assert "[TOOL_RESPONSE]\n  hi\n[/TOOL_RESPONSE]" in completed
 
     def test_error_event_sets_error_result_and_forces_nonzero_exit(self, monkeypatch):
         """JSON type=error stream events must become structured error results."""
@@ -2441,13 +2442,8 @@ class TestRunPiRawToolOutputBuffering:
         assert rc == 0
 
         out = capsys.readouterr().out
-        agent_end_events = [
-            json.loads(line)
-            for line in out.splitlines()
-            if line.strip().startswith("{") and '"type":"agent_end"' in line
-        ]
-        assert agent_end_events
-        assert agent_end_events[-1]["total_cost_usd"] == pytest.approx(0.0011)
+        assert '"type":"agent_end"' not in out
+        assert out.count("[ANSWER]") == 2
 
         assert self.svc.last_result_event is not None
         assert self.svc.last_result_event["total_cost_usd"] == pytest.approx(0.0011)
@@ -2690,8 +2686,8 @@ class TestPiPrettifierToolCallArgs:
             },
         })
         parsed = json.loads(result)
-        assert parsed["args"]["content"].endswith("...")
-        assert len(parsed["args"]["content"]) <= 403  # 400 + "..."
+        assert parsed["args"]["content"].endswith("[100 input characters truncated]")
+        assert not parsed["args"]["content"].endswith("...")
 
     def test_toolcall_end_empty_args(self):
         """Empty arguments dict should remain an empty object."""
@@ -3566,8 +3562,8 @@ class TestBufferToolCallEnd:
         tc = {"toolCallId": "tc-004", "name": "write", "arguments": {"content": long_content}}
         self.svc._buffer_tool_call_end(tc, "12:00:00 PM")
         pending = self.svc._pending_tool_calls["tc-004"]
-        assert pending["args"]["content"].endswith("...")
-        assert len(pending["args"]["content"]) <= 403
+        assert pending["args"]["content"].endswith("[100 input characters truncated]")
+        assert not pending["args"]["content"].endswith("...")
 
     def test_empty_dict_not_treated_as_toolcall(self):
         """Empty dict (no toolCallId) returns False."""
@@ -4343,3 +4339,134 @@ class TestClaudeWrapperPromptTransport:
         assert large_prompt not in captured["args"][0]
         assert fake_process.stdin.value == svc._stdin_prompt
         assert fake_process.stdin.closed is True
+
+
+class TestSemanticHeadlessRenderer:
+    @pytest.fixture(autouse=True)
+    def service(self):
+        self.svc = _load_pi_service()
+
+    def test_empty_thinking_is_suppressed_and_nonempty_is_timed(self, monkeypatch):
+        _services_dir()
+        import pi
+        ticks = iter([10.0, 20.0, 20.5])
+        monkeypatch.setattr(pi.time, "perf_counter", lambda: next(ticks))
+        start = {"type": "message_update", "assistantMessageEvent": {"type": "thinking_start"}}
+        empty = {"type": "message_update", "assistantMessageEvent": {"type": "thinking_end", "content": ""}}
+        done = {"type": "message_update", "assistantMessageEvent": {"type": "thinking_end", "content": "plan"}}
+        assert self.svc._format_semantic_event(start) is None
+        assert self.svc._format_semantic_event(empty) is None
+        assert self.svc._format_semantic_event(start) is None
+        output = self.svc._format_semantic_event(done)
+        assert output.startswith("[THINKING] ")
+        assert "\n  plan\n[/THINKING : 0.50s]" in output
+
+    def test_turn_end_is_hidden_unless_authoritative_cost_is_notable(self):
+        assert self.svc._format_semantic_event({"type": "turn_end", "toolResults": [{}]}) is None
+        assert self.svc._format_semantic_event({
+            "type": "turn_end", "message": {"usage": {"cost": {"total": 0.5}}}
+        }) is None
+        output = self.svc._format_semantic_event({
+            "type": "turn_end", "message": {"usage": {"cost": {"total": 0.5001}}}
+        })
+        assert output.startswith("[STATUS] ")
+        assert '"cost_usd":0.5001' in output
+        assert output.endswith("[/STATUS]")
+
+    def test_fast_tool_is_one_complete_semantic_block(self):
+        self.svc._format_semantic_event({
+            "type": "tool_execution_start", "toolCallId": "fast", "toolName": "bash",
+            "args": {"command": "printf 'a\\nb'"},
+        })
+        output = self.svc._format_semantic_event({
+            "type": "tool_execution_end", "toolCallId": "fast", "toolName": "bash",
+            "durationMs": 80, "result": "a\nb", "isError": False,
+        })
+        assert output.count("[TOOL]") == 1
+        assert '"status":"done","duration":"0.08s"' in output
+        assert "[INPUT]\n  printf 'a\n  b'\n[/INPUT]" in output
+        assert "[TOOL_RESPONSE]\n  a\n  b\n[/TOOL_RESPONSE]" in output
+        assert "command:" not in output and "result:" not in output
+
+    def test_missing_id_fallback_and_parallel_ids_are_correlated(self):
+        self.svc._format_semantic_event({
+            "type": "message_update", "assistantMessageEvent": {
+                "type": "toolcall_end", "toolCall": {"name": "read", "arguments": {"path": "a"}}
+            }
+        })
+        self.svc._format_semantic_event({
+            "type": "tool_execution_start", "toolCallId": "later", "toolName": "read", "args": {"path": "a"}
+        })
+        self.svc._format_semantic_event({
+            "type": "tool_execution_start", "toolCallId": "other", "toolName": "bash", "args": {"command": "pwd"}
+        })
+        other = self.svc._format_semantic_event({
+            "type": "tool_execution_end", "toolCallId": "other", "toolName": "bash", "result": "/tmp"
+        })
+        read = self.svc._format_semantic_event({
+            "type": "tool_execution_end", "toolCallId": "later", "toolName": "read", "result": "A"
+        })
+        assert '"tool":"bash"' in other and "  pwd" in other and "  /tmp" in other
+        assert '"tool":"read"' in read and '"path":"a"' in read and "  A" in read
+        assert _parse_display_header(other.split("\n", 1)[0].replace("[TOOL] ", ""))["id"] != \
+               _parse_display_header(read.split("\n", 1)[0].replace("[TOOL] ", ""))["id"]
+
+    def test_completion_wins_timer_race(self, monkeypatch):
+        callbacks = []
+
+        class FakeTimer:
+            def __init__(self, delay, callback):
+                assert delay == 0.5
+                callbacks.append(callback)
+            def start(self): pass
+            def cancel(self): pass
+
+        class Sink:
+            blocks = []
+            def emit(self, block): self.blocks.append(block)
+
+        _services_dir()
+        import pi
+        monkeypatch.setattr(pi.threading, "Timer", FakeTimer)
+        sink = Sink()
+        self.svc._ordered_output = sink
+        self.svc._format_semantic_event({
+            "type": "tool_execution_start", "toolCallId": "race", "toolName": "bash", "args": {"command": "true"}
+        })
+        completed = self.svc._format_semantic_event({
+            "type": "tool_execution_end", "toolCallId": "race", "toolName": "bash", "result": "ok"
+        })
+        callbacks[0]()
+        assert '"status":"done"' in completed
+        assert sink.blocks == []
+
+    def test_structured_error_alone_selects_red_and_semantic_contrast(self, monkeypatch):
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+        self.svc._format_semantic_event({
+            "type": "tool_execution_start", "toolCallId": "ok", "toolName": "bash", "args": {"command": "echo error failed blocked"}
+        })
+        success = self.svc._format_semantic_event({
+            "type": "tool_execution_end", "toolCallId": "ok", "toolName": "bash", "result": "error failed blocked", "isError": False
+        })
+        assert self.svc.ANSI_RED not in success
+        assert self.svc.ANSI_BOLD + self.svc.ANSI_CYAN in success
+        assert self.svc.ANSI_DIM + self.svc.ANSI_MUTED_GREEN in success
+
+        self.svc._format_semantic_event({
+            "type": "tool_execution_start", "toolCallId": "bad", "toolName": "bash", "args": {"command": "false"}
+        })
+        failed = self.svc._format_semantic_event({
+            "type": "tool_execution_end", "toolCallId": "bad", "toolName": "bash", "result": "no", "isError": True
+        })
+        plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", failed)
+        assert '"status":"error","isError":true' in plain
+        assert self.svc.ANSI_BOLD + self.svc.ANSI_RED in failed
+
+    def test_no_color_preserves_exact_plain_layout(self, monkeypatch):
+        monkeypatch.setenv("NO_COLOR", "1")
+        output = self.svc._format_semantic_event({
+            "type": "message_update", "assistantMessageEvent": {"type": "text_end", "content": "answer"}
+        })
+        assert "\x1b" not in output
+        assert re.fullmatch(r'\[ANSWER\] \{"id":1,"time":"\d\d:\d\d:\d\d"\}\n  answer\n\[/ANSWER\]', output)
