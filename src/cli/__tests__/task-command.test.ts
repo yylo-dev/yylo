@@ -27,6 +27,7 @@ describe('task workspace CLI', () => {
     { operation: 'run', expected: undefined },
     { operation: 'start', expected: [] },
     { operation: 'status', expected: undefined },
+    { operation: 'admission', expected: undefined },
     { operation: 'hydrate', expected: [] },
     { operation: 'preflight', expected: undefined },
     { operation: 'checkpoint', expected: [] },
@@ -52,7 +53,7 @@ describe('task workspace CLI', () => {
     configureTaskWorkspaceCommand(program, async () => undefined);
     const task = program.commands.find((command) => command.name() === 'task');
     expect(task?.commands.map((command) => command.name())).toEqual([
-      'run', 'recover-predispatch', 'recover-wall-budget', 'start', 'preflight', 'checkpoint',
+      'run', 'recover-predispatch', 'recover-wall-budget', 'start', 'admission', 'preflight', 'checkpoint',
       'child-checkpoint', 'hydrate', 'status', 'finish', 'doctor', 'sync', 'lease-status',
       'lease-heartbeat', 'lease-handoff', 'lease-successor', 'lease-revoke', 'lease-release',
       'recovery-plan', 'recovery-authorize', 'recovery-apply', 'runtime-bootstrap',
@@ -78,7 +79,7 @@ describe('task workspace CLI', () => {
     expect(bootstrap).toHaveBeenCalledWith(expected);
   });
 
-  it('documents baseline scope separately from repeatable selectable product roots', () => {
+  it('documents repeatable exact files while retaining legacy baseline omission', () => {
     const program = new Command();
     configureTaskWorkspaceCommand(program, async () => undefined);
     const task = program.commands.find((command) => command.name() === 'task');
@@ -86,12 +87,12 @@ describe('task workspace CLI', () => {
     const pathOption = start?.options.find((option) => option.long === '--path');
 
     expect(pathOption?.description).toBe(
-      'Additional selectable product root; omit for baseline/default paths',
+      'Exact tracked authored file or additional selectable product root; repeat for exact scope',
     );
     const help = start?.helpInformation();
     expect(help).toContain('--path <path>');
-    expect(help).toContain('Additional selectable product root; omit for');
-    expect(help).toContain('baseline/default paths (default: [])');
+    expect(help).toContain('Exact tracked authored file or');
+    expect(help).toContain('repeat for exact scope');
   });
 
   it('uses baseline paths by default and forwards repeatable additional roots only for task start', async () => {

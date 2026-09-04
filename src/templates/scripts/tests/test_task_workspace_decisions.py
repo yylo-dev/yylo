@@ -687,6 +687,32 @@ class LeaseSuccessorTables(unittest.TestCase):
         self.assertEqual(empty.code, decisions.LEASE_CODE_NOT_ACTIVE)
 
 
+class CanonicalPathOriginProjectionTests(unittest.TestCase):
+    def test_projection_is_versioned_and_altered_inherited_bytes_are_authored(self) -> None:
+        projection = decisions.project_path_origins(
+            base_tree={"target.txt": "b0", "feature.txt": "f0"},
+            source_tree={"target.txt": "tampered", "feature.txt": "f1"},
+            target_tree={"target.txt": "t1", "feature.txt": "f0"},
+            candidate_tree={"target.txt": "tampered", "feature.txt": "f1"},
+            admitted_paths=["feature.txt"], generated_bindings=[], conflict_paths=[])
+        self.assertEqual(projection["schema_version"], "juno_path_origin_projection.v1")
+        self.assertEqual(projection["authored_paths"], ["feature.txt", "target.txt"])
+        self.assertEqual(projection["target_derived_paths"], [])
+        self.assertEqual(projection["candidate_delta_paths"], ["feature.txt", "target.txt"])
+
+    def test_projection_accepts_unchanged_target_bytes_and_fails_ambiguous_legacy_admission(self) -> None:
+        projection = decisions.project_path_origins(
+            base_tree={"target.txt": "b0"}, source_tree={"target.txt": "t1"},
+            target_tree={"target.txt": "t1"}, candidate_tree={"target.txt": "t1"},
+            admitted_paths=[], generated_bindings=[], conflict_paths=[])
+        self.assertEqual(projection["target_derived_paths"], ["target.txt"])
+        ambiguous = decisions.project_path_origins(
+            base_tree={"same.txt": "x"}, source_tree={"same.txt": "x"},
+            target_tree={"same.txt": "x"}, candidate_tree={"same.txt": "x"},
+            admitted_paths=["same.txt"], generated_bindings=[], conflict_paths=[])
+        self.assertEqual(ambiguous["ambiguous_paths"], ["same.txt"])
+
+
 def tearDownModule() -> None:
     elapsed = time.monotonic() - MODULE_STARTED
     if elapsed >= PURE_BUDGET_SECONDS:

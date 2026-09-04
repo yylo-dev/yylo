@@ -848,6 +848,17 @@ def merge_plan(controller: Path, task_id: str, against: Optional[str] = None,
                                   "unexpected_authored": unexpected_authored},
                                  f"yy task status {task_id}"))
 
+    origin_projection = task_runtime.decisions.project_path_origins(
+        base_tree=base_tree, source_tree=feature_tree, target_tree=target_tree,
+        candidate_tree=prospective_tree, admitted_paths=admitted,
+        generated_bindings=generated_bindings, conflict_paths=conflicts)
+    if origin_projection["ambiguous_paths"]:
+        findings.append(_finding(
+            "admission.ambiguous_legacy_paths", "error", "path_admission",
+            {"paths": origin_projection["ambiguous_paths"],
+             "projection_schema": origin_projection["schema_version"]},
+            f"yy task status {task_id}"))
+
     package_paths = sorted(path for path in set(target_tree) | set(feature_tree)
                            if path.endswith(("package.json", "package-lock.json")))
     packages = {"target": [_json_file_identity(repository, target_sha, path)
@@ -950,6 +961,7 @@ def merge_plan(controller: Path, task_id: str, against: Optional[str] = None,
     body = {"schema_version": PLAN_SCHEMA, "task_id": task_id, "operation": operation,
             "ready": not blocking, "identities": identities,
             "composition": {"paths": classifications, "conflict_paths": conflicts,
+                            "origin_projection": origin_projection,
                             "refresh_eligible": target_descends_base,
                             "target_moved_from_base": target_sha != base_sha},
             "validation_commands": validation_commands, "findings": findings,
@@ -5317,13 +5329,24 @@ def target_refresh_plan(controller: Path, task_id: str) -> dict[str, Any]:
                 "queue_entry_sha256": digest(queue_entry),
                 "queue_attempt": record.get("queue_attempt"),
                 "prior_queue_failure": record.get("prior_queue_failure")}
+    origin_projection = task_runtime.decisions.project_path_origins(
+        base_tree=trees["base"], source_tree=trees["refreshed"],
+        target_tree=trees["target"], candidate_tree=trees["refreshed"],
+        admitted_paths=admitted, generated_bindings=(
+            creation.get("generated_output_admission", {}).get("bindings", [])
+            if isinstance(creation.get("generated_output_admission"), dict) else []),
+        conflict_paths=[])
+    if origin_projection["ambiguous_paths"]:
+        raise MergeQueueError("target refresh has ambiguous legacy changed_paths: "
+                              + ", ".join(origin_projection["ambiguous_paths"][:12]))
     body = {"schema_version": REFRESH_SCHEMA, "task_id": task_id,
             "operation": "target-refresh", "repository_identity": repository_identity(repository),
             "repository": str(repository), "target_ref": config["target_ref"],
             "target_sha": target_sha, "base_sha": base_sha, "source_tip": source_tip,
             "refreshed_tip": new_tip, "branch_ref": record["branch_ref"],
             "worktree": str(worktree), "source_state": record["state"],
-            "authored_paths": admitted, "classifications": rows, "evidence": evidence}
+            "authored_paths": admitted, "classifications": rows,
+            "origin_projection": origin_projection, "evidence": evidence}
     return {**body, "plan_id": digest({"schema_version": REFRESH_ID_SCHEMA, "plan": body})}
 
 

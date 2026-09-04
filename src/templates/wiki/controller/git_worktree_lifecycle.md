@@ -32,9 +32,10 @@ metadata controller
 ## Public commands
 
 ```text
-yy task start TASK_ID                    # baseline/default paths (including juno-code)
-yy task start TASK_ID --path juno_kanban  # add a selectable root; repeat for more
+yy task start TASK_ID                    # omit --path only for legacy baseline admission
+yy task start TASK_ID --path exact/file   # repeat exact files; policy trees also supported
 yy task status TASK_ID
+yy task admission TASK_ID                # read-only dirty/committed scope gate
 yy task preflight TASK_ID
 yy task checkpoint TASK_ID
 yy task finish TASK_ID
@@ -73,11 +74,10 @@ evidence, and repeated recovery. It never validates, reviews, composes, launches
 a worker, cleans a candidate, or changes the protected target. Do not use
 `yy merge next` to repeat the unchanged deterministic attempt.
 
-Task start always admits the policy's baseline/default paths and freezes the
-exact configured product target SHA. Omit `--path` for ordinary Juno Code work;
-`juno-code` is already in baseline scope and is not a selectable value. Use
-repeatable `--path` only to add roots listed by the policy's `selectable_paths`,
-such as `juno_kanban` or `frontend`. Task start then creates one branch/worktree.
+Task start freezes the exact target SHA. Omitting `--path` retains the legacy
+baseline envelope. Repeated tracked files freeze only those exact files plus
+declared generated destinations; explicitly selected policy trees remain
+supported, but exact-file requests never silently inherit baseline roots.
 Before editing or testing there, the worker follows [task dependency hydration](task_dependency_hydration.md)
 for each configured validation cwd and stops on provisioning or clean-tree
 failure. Runtime identity is validated before any Juno-specific generated-output
@@ -127,7 +127,9 @@ receipts, package mismatch, non-older inventory generations, and consumer target
 customization without exact managed-inventory provenance also refuse.
 
 One on-demand target arbiter serializes mutation with a fencing token, per-target
-kernel lock, and expected-old-SHA update, then exits when idle or blocked. Lease
+kernel lock, and expected-old-SHA update, then exits when idle or blocked.
+All task/merge consumers use `juno_path_origin_projection.v1` from complete Git
+blob maps: altered inherited bytes are authored and ambiguity fails closed. Lease
 age alone never transfers ownership: successor attempts require controller proof
 of producer death or explicit handoff. Agents observe rather than poll. Dirty
 conflict bytes are preserved for one bounded managed repair. Exact complete-input
@@ -151,7 +153,6 @@ restart, and post-deploy E2E are never implied by merge completion.
 
 Historical local-integration receipts remain readable by Workflow Runner doctor.
 Their executors are retired and must not be adapted into the Bolt path.
-
 ## Umbrella-owned sequential children
 
 Approved consolidated delivery may admit one umbrella worktree that executes
