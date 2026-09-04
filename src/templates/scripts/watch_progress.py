@@ -16,7 +16,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, TextIO
 
 MAX_TAIL_BYTES = 64 * 1024
 EVENT_SCHEMA = "juno.watch-event.v1"
@@ -332,6 +332,132 @@ def watch(
 
 
 RUN_SCHEMA = "juno.watch-run.v1"
+SEMANTIC_TAGS = {"THINKING", "TOOL", "INPUT", "TOOL_RESPONSE", "ANSWER", "STATUS"}
+ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+ANSI_RESET = "\x1b[0m"
+ANSI_DIM_ITALIC = "\x1b[2m\x1b[3m"
+ANSI_INPUT = "\x1b[1m\x1b[38;5;44m"
+ANSI_RESPONSE = "\x1b[2m\x1b[38;5;108m"
+ANSI_ERROR = "\x1b[1m\x1b[38;5;203m"
+ANSI_ANSWER = "\x1b[1m"
+ANSI_METADATA = "\x1b[2m\x1b[38;5;75m"
+OPEN_TAG = re.compile(r"^\[(THINKING|TOOL|INPUT|TOOL_RESPONSE|ANSWER|STATUS)\](?: (\{.*\}))?(\n?)$")
+CLOSE_TAG = re.compile(r"^\[/(TOOL|INPUT|TOOL_RESPONSE|ANSWER|STATUS)\](\n?)$")
+THINKING_CLOSE = re.compile(r"^\[/THINKING : [0-9]+(?:\.[0-9]+)?s\](\n?)$")
+
+
+class SemanticFollowFormatter:
+    """Color only the frozen semantic grammar; pass everything else through."""
+
+    def __init__(self, stream: TextIO, color: bool):
+        self.stream = stream
+        self.color = color
+        self.pending = ""
+        self.stack: list[str] = []
+        self.tool_errors: list[bool] = []
+
+    def feed(self, data: bytes, *, final: bool = False) -> None:
+        self.pending += data.decode("utf-8", errors="replace")
+        lines = self.pending.splitlines(keepends=True)
+        if lines and not lines[-1].endswith(("\n", "\r")) and not final:
+            self.pending = lines.pop()
+        else:
+            self.pending = ""
+        for line in lines:
+            self._line(line)
+        if final and self.pending:
+            value, self.pending = self.pending, ""
+            self._line(value)
+        self.stream.flush()
+
+    def _styled(self, text: str, code: str) -> str:
+        clean = ANSI_RE.sub("", text)
+        return f"{code}{clean.rstrip(chr(10))}{ANSI_RESET}" + ("\n" if text.endswith("\n") else "")
+
+    def _line(self, line: str) -> None:
+        opening = OPEN_TAG.fullmatch(line)
+        if opening:
+            tag, raw_metadata, newline = opening.groups()
+            metadata = None
+            if tag in {"THINKING", "TOOL", "ANSWER", "STATUS"} and raw_metadata is None:
+                self.stream.write(line); return
+            if raw_metadata is not None:
+                try: metadata = json.loads(raw_metadata)
+                except json.JSONDecodeError: metadata = None
+                if not isinstance(metadata, dict):
+                    self.stream.write(line); return
+            if tag == "TOOL":
+                self.tool_errors.append(bool(metadata and metadata.get("isError") is True))
+            self.stack.append(tag)
+            if not self.color:
+                self.stream.write(line); return
+            label = f"[{tag}]"
+            rendered = self._styled(label, ANSI_DIM_ITALIC)
+            if raw_metadata is not None:
+                rendered = rendered.rstrip("\n") + " " + self._styled(raw_metadata, ANSI_METADATA)
+            if newline and not rendered.endswith("\n"): rendered += "\n"
+            self.stream.write(rendered)
+            return
+
+        closing = CLOSE_TAG.fullmatch(line)
+        thinking_close = THINKING_CLOSE.fullmatch(line)
+        if closing or thinking_close:
+            tag = "THINKING" if thinking_close else closing.group(1)
+            if not self.stack or self.stack[-1] != tag:
+                self.stream.write(line); return
+            self.stack.pop()
+            if tag == "TOOL" and self.tool_errors: self.tool_errors.pop()
+            self.stream.write(self._styled(line, ANSI_DIM_ITALIC) if self.color else line)
+            return
+
+        if not self.color or not self.stack:
+            self.stream.write(line); return
+        current = self.stack[-1]
+        if current == "INPUT": code = ANSI_INPUT
+        elif current == "TOOL_RESPONSE": code = ANSI_ERROR if self.tool_errors and self.tool_errors[-1] else ANSI_RESPONSE
+        elif current == "THINKING": code = ANSI_DIM_ITALIC
+        elif current == "ANSWER": code = ANSI_ANSWER
+        else:
+            self.stream.write(line); return
+        self.stream.write(self._styled(line, code))
+
+
+def follow_run(root: Path, run_id: str, *, poll_interval: float = 0.05,
+               sleep: Callable[[float], None] = time.sleep,
+               stream: Optional[TextIO] = None, color: Optional[bool] = None) -> int:
+    """Read a run log from byte zero and stop only on strict footer truth."""
+    _run_dir, _metadata, _pid, log_file, footer_file = _run_paths(root, run_id)
+    output = stream or sys.stdout
+    use_color = (hasattr(output, "isatty") and output.isatty()
+                 and os.environ.get("NO_COLOR") is None) if color is None else color
+    formatter = SemanticFollowFormatter(output, bool(use_color))
+    offset = 0
+    while True:
+        try:
+            with log_file.open("rb") as handle:
+                handle.seek(offset)
+                chunk = handle.read()
+        except FileNotFoundError:
+            chunk = b""
+        except OSError as exc:
+            raise WatchError(f"cannot read run log {log_file}: {exc}") from exc
+        if chunk:
+            formatter.feed(chunk)
+            offset += len(chunk)
+        footer = observe_footer(footer_file)
+        if footer.valid:
+            # Drain bytes published immediately before the atomic footer rename.
+            try:
+                with log_file.open("rb") as handle:
+                    handle.seek(offset); final_chunk = handle.read()
+            except FileNotFoundError:
+                final_chunk = b""
+            if final_chunk:
+                formatter.feed(final_chunk); offset += len(final_chunk)
+            formatter.feed(b"", final=True)
+            assert footer.exit_code is not None
+            return footer.exit_code
+        sleep(poll_interval)
 
 
 def _atomic_json(path: Path, value: dict[str, object]) -> None:
@@ -345,7 +471,10 @@ def _atomic_json(path: Path, value: dict[str, object]) -> None:
 
 
 def _run_root(value: Optional[str]) -> Path:
-    root = Path(value).expanduser() if value else Path.cwd() / ".juno_task/runtime/watch-runs"
+    controller = os.environ.get("JUNO_TASK_ROOT")
+    root = (Path(value).expanduser() if value else
+            Path(controller).expanduser() / ".juno_task/runtime/watch-runs" if controller else
+            Path.cwd() / ".juno_task/runtime/watch-runs")
     root = root.absolute()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     return root
@@ -480,6 +609,8 @@ def run_command_cli(argv: list[str]) -> int:
     if command == "status":
         print(json.dumps(record, sort_keys=True)); return 0
     run_dir, _metadata, pid_file, log_file, footer_file = _run_paths(root, args.run_id)
+    if command == "follow":
+        return follow_run(root, args.run_id)
     if command == "await":
         if record.get("state") != "COMPLETED":
             watch_args = argparse.Namespace(pid_file=str(pid_file), log_file=str(log_file),
@@ -513,9 +644,11 @@ def main() -> int:
             return _producer(Path(sys.argv[2]), float(sys.argv[3]), sys.argv[separator + 1:])
         except (WatchError, OSError, ValueError) as exc:
             print(f"watch producer: error: {exc}", file=sys.stderr); return 2
-    if len(sys.argv) > 1 and sys.argv[1] in {"exec", "status", "await"}:
+    if len(sys.argv) > 1 and sys.argv[1] in {"exec", "status", "await", "follow"}:
         try:
             return run_command_cli(sys.argv[1:])
+        except KeyboardInterrupt:
+            return 130
         except (WatchError, OSError) as exc:
             print(f"watch command: error: {exc}", file=sys.stderr); return 2
 
