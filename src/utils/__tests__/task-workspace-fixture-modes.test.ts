@@ -182,7 +182,11 @@ describe('task-workspace supported profiler and runner', () => {
     });
     const elapsed = performance.now() - started;
     expect(result.status).not.toBe(0);
-    expect(elapsed).toBeLessThan(1_000);
+    // The grandchild sleeps 2s, so a runner that waits for it lands at
+    // startup+2000ms; this budget only proves the runner did not wait. Full
+    // node+python startup measures ~1.15s on a loaded host, so keep headroom
+    // above startup yet strictly below the sleep.
+    expect(elapsed).toBeLessThan(1_800);
     const value = JSON.parse(fs.readFileSync(receipt, 'utf8')) as Record<string, any>;
     expect(value.exit_code).toBe(result.status);
     expect(value.processes).toEqual({
@@ -266,7 +270,10 @@ describe('task-workspace supported profiler and runner', () => {
       '--timeout-ms', '100', '--command', path.join(root, 'does-not-exist')], {
       cwd: path.join(repository, 'juno-code'), encoding: 'utf8', timeout: 5_000,
     });
-    expect(performance.now() - started).toBeLessThan(1_000);
+    // Prompt-failure budget: a missing command fails at spawn time, but the
+    // round trip still pays full node startup, which exceeds 1s on a loaded
+    // host. 1.8s stays far below the 5s spawnSync bound.
+    expect(performance.now() - started).toBeLessThan(1_800);
     expect(result.status).not.toBe(0);
     expect(fs.existsSync(receipt)).toBe(true);
     const value = JSON.parse(fs.readFileSync(receipt, 'utf8')) as Record<string, any>;
