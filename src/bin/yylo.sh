@@ -261,7 +261,7 @@ route_registered_product_control() {
     local effective_operation resolution fields controller invocation role branch source runtime
     case "$operation:$PREBOOTSTRAP_SUBCOMMAND" in
         ledger:*|kanban:*) effective_operation=kanban ;;
-        task:status|task:preflight|task:recovery-plan|task:doctor|task:lease-status|task:|task:-h|task:--help) effective_operation=kanban ;;
+        task:status|task:admission|task:preflight|task:recovery-plan|task:doctor|task:lease-status|task:|task:-h|task:--help) effective_operation=kanban ;;
         task:start|task:run|task:recover-predispatch|task:recover-wall-budget|task:hydrate|task:finish|task:checkpoint|task:child-checkpoint|task:sync|task:recovery-authorize|task:recovery-apply|task:runtime-bootstrap|task:lease-heartbeat|task:lease-handoff|task:lease-successor|task:lease-revoke|task:lease-release) effective_operation=orchestration ;;
         merge:status|merge:plan|merge:|merge:-h|merge:--help) effective_operation=kanban ;;
         merge:next|merge:resolve|merge:review|merge:reopen|merge:reconcile|merge:refresh|merge:drive|merge:withdraw|merge:arbiter|merge:recover-full-suite-failure|merge:recover-repair-predispatch|merge:recover-authority-drift|merge:supersede-lifecycle-journal) effective_operation=orchestration ;;
