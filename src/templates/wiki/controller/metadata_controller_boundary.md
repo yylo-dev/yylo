@@ -22,7 +22,11 @@ Migration hash-binds config, plan, prompt, environment-source, and Git identity;
 every field receives a disposition. `agentProfile.roleHooks` selects controller
 hooks only for controllers and product hooks only for task/integration roles.
 `environmentBinding` requires explicit authority plus an absolute regular 0600
-file. Product paths stay product-only and lifecycle retires; the large plan
+file. Without a binding, the controller-root `.env.yylo` loads automatically as
+an ambient source under the same regular non-symlink 0600 checks; an unsafe
+file warns once and is skipped, a missing file stays silent, and an explicit
+binding stays authoritative without an ambient double load.
+Product paths stay product-only and lifecycle retires; the large plan
 survives behind a compact landing page, and exact prepare retry is idempotent.
 
 ## Ownership
