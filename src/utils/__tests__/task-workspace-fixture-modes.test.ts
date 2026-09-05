@@ -272,7 +272,8 @@ describe('task-workspace supported profiler and runner', () => {
     });
     // Prompt-failure budget: a missing command fails at spawn time, but the
     // round trip still pays full node startup, which exceeds 1s on a loaded
-    // host. 1.8s stays far below the 5s spawnSync bound.
+    // host. 1.8s stays far below the 5s spawnSync bound and still proves the
+    // failure is reported by the runner rather than by the outer timeout.
     expect(performance.now() - started).toBeLessThan(1_800);
     expect(result.status).not.toBe(0);
     expect(fs.existsSync(receipt)).toBe(true);
