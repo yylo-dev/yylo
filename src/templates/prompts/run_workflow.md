@@ -26,6 +26,6 @@ most one, and high risk gets Reviewer A then Reviewer B on one frozen candidate.
 It permits at most one repair candidate; a second material finding terminalizes
 as `REVIEW_FINDINGS_EXHAUSTED`, with no third autonomous review or silently
 created repair task. Post-merge work is deterministic identity/readback, not a
-second review. A release wave uses one explicit immutable epoch seal, private
-history-preserving train, aggregate gate, and expected-old-SHA CAS; release and
-external publication remain separately authorized.
+second review. Version changes use the same ordinary task/merge lifecycle;
+maintainer package preparation, release, and external publication remain outside
+`yy` and separately authorized.

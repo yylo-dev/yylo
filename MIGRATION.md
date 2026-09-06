@@ -1,6 +1,6 @@
 # Managed instruction bundle migration
 
-## Sealed-lifecycle instruction generation 1.0.0
+## Typed-lifecycle instruction bundle
 
 YYLO now treats controller guidance, lifecycle prompts, skills, wiki, workflows,
 and managed runtime scripts as one instruction bundle. The installed
@@ -21,15 +21,16 @@ Before rollout:
 ```bash
 yy scripts update
 yy doctor workspace
-yy release train shadow /absolute/train.json --baseline /absolute/baseline.json --json
+npm run test:managed-assets
+npm run test:skill-contracts
 ```
 
-Rollback or disable by stopping release-epoch drive and reinstalling the prior
-exact YYLO package; retain immutable receipts and review any preserved
+Rollback by reinstalling the prior exact YYLO package; retain immutable receipts
+and review any preserved
 customizations before rerunning `yy scripts update`. Schema-1 instruction
 receipts remain upgrade-compatible for this release only. Once a runtime declares
 instruction semantic version `1.0.0` mandatory, missing, mixed, or older bundles
-are unsupported and managed agent dispatch/shadow rollout must remain blocked.
+are unsupported and managed agent dispatch must remain blocked.
 
-This migration grants no seal, target CAS, RC/tag, push, publication, deployment,
+This migration grants no target CAS, RC/tag, push, publication, deployment,
 production mutation, or cleanup authority.
