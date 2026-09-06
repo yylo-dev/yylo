@@ -49,15 +49,14 @@ task's workspace.
 
 Stop after queueing. Read-only delivery observation uses `yy merge status` or
 `yy merge arbiter status`. One fenced target owner runs `yy merge arbiter run`
-(or typed `yy merge drive`) and exits when idle or blocked; implementation agents
+(or typed `yy merge drive`) through the expected-SHA CAS gate and exits when idle
+or blocked; implementation agents
 do not poll, steal on timeout, discard dirty bytes, or invoke `next|resolve`
 except under explicit recovery authority. The merge owner applies the bounded
 risk-based review sequence and permits at most one repair candidate. A second
 material finding terminalizes as `REVIEW_FINDINGS_EXHAUSTED`.
 
-A release wave explicitly seals every eligible pre-cutoff candidate into one
-immutable epoch, preserves one merge commit per task, reuses exact complete-input
-closures, validates/reviews the aggregate once, and advances the target with one
-expected-old-SHA CAS (the expected-SHA CAS gate) plus readback. Release readiness is observational. Never
-push, publish, deploy, mutate production, restart services, run post-deploy E2E,
-or clean worktrees without separate authority.
+Release-version changes use this same ordinary task/merge lifecycle. Package
+preparation is maintainer-only and outside `yy`. Never create a tag, push,
+publish, deploy, mutate production, restart services, run post-deploy E2E, or
+clean worktrees without separate authority.

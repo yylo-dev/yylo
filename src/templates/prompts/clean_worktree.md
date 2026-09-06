@@ -29,9 +29,8 @@ Independent agents and reviewers use fresh `yy pi` contexts. Bare `pi` and indir
    candidate. It permits at most one repair candidate; a second material finding
    terminalizes as `REVIEW_FINDINGS_EXHAUSTED`, with no third autonomous review
    or silently created repair task.
-8. A release wave closes admission with one explicit immutable epoch seal,
-   composes one merge commit per task, reuses exact complete-input evidence,
-   validates/reviews the train once, and advances the target with one CAS.
+8. Release-version changes follow the same ordinary task/merge lifecycle.
+   Maintainer package preparation remains separately authorized outside `yy`.
 9. After expected-SHA CAS, verify identity/readback only; do not redispatch a
    semantic reviewer for byte-identical delivery.
 10. Cleanup is reachability-safe. Push, release, publish, deploy, production

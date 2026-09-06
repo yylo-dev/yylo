@@ -1,7 +1,7 @@
 ---
 juno_prompt_schema: juno.life_cycle.v1
 public_macro: "@@life_cycle"
-revision: 5
+revision: 6
 ---
 
 # Observable Juno task lifecycle
@@ -48,17 +48,16 @@ Use the installed Juno control plane; do not create another workflow engine.
    run read-only `yy task preflight TASK_ID`, repair closure defects while
    `WORKING`, then run separately authorized `yy task finish TASK_ID`. Observe
    delivery with `yy merge status|arbiter status`; one fenced target owner uses
-   `yy merge arbiter run` or typed `yy merge drive`, while `next|resolve` remain
-   explicit recovery mutations. Never steal on elapsed time or discard dirty
+   `yy merge arbiter run` or typed `yy merge drive` for expected-old-SHA delivery,
+   while `next|resolve` remain explicit recovery mutations. Never steal on elapsed time or discard dirty
    recovery bytes. For integration-owner drift use `yy integration status`, then
    receipt-bound `repair --dry-run/--apply`.
-8. **Keep release authority explicit.** For a wave, inspect then explicitly seal
-   one immutable epoch containing every eligible pre-cutoff candidate. Compose a
-   private train with one merge commit per task, reuse exact complete-input
-   evidence, run aggregate validation/review once, and perform one expected-old-
-   SHA target CAS. `epoch-status` and readiness are observations; `seal`, fenced
-   `drive`, ejection, repair, CAS, RC cut, push, publication, deployment,
-   production mutation, cleanup, and post-deploy E2E are distinct authorities.
+8. **Keep release authority explicit.** Integrate every change through the ordinary
+   task and merge lifecycle. Package preparation uses the repository maintainer
+   release script only after the version-bump task is integrated. RC/tag creation,
+   push, publication, deployment, production mutation, cleanup, and post-deploy
+   E2E remain distinct authorities outside `yy`; the removed release-train CLI
+   must not be invoked or emulated.
 9. **Hand off truth.** Report ordered task outcomes, exact commits and SHAs,
    sessions, costs where available, durations, tests, PID/log/footer paths,
    Kanban updates/new bugs, blockers, contention waits, canary limitations, and
@@ -66,7 +65,7 @@ Use the installed Juno control plane; do not create another workflow engine.
 
 ## Evolution
 
-This is schema `juno.life_cycle.v1`, revision 5. Change the canonical source in
+This is schema `juno.life_cycle.v1`, revision 6. Change the canonical source in
 `juno-code/src/templates/prompts/life_cycle.md`, update this revision and release
 notes when behavior changes, and validate source/dist/tarball plus managed-install
 parity. Project customizations are user-owned: managed update must preserve or
