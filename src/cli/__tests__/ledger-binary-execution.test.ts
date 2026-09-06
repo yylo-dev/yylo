@@ -17,7 +17,7 @@ async function fixture() {
   const executable = path.join(bin, 'yylo-ledger');
   await writeFile(executable, `#!/usr/bin/env node
 const fs=require('node:fs');
-if(process.argv[2]==='--version'){console.log('yylo-ledger 0.1.0rc1');process.exit(0);}
+if(process.argv[2]==='--version'){console.log('yylo-ledger 0.2.0');process.exit(0);}
 const input=fs.readFileSync(0,'utf8');fs.writeFileSync(process.env.FAKE_RECORD,JSON.stringify({argv:process.argv.slice(2),cwd:process.cwd(),input}));
 if(process.env.FAKE_SIGNAL)process.kill(process.pid,process.env.FAKE_SIGNAL);
 process.stdout.write('standalone stdout\\n');process.stderr.write('standalone stderr\\n');process.exit(Number(process.env.FAKE_EXIT||0));

@@ -1,21 +1,18 @@
 ### Check once
 
-Perform these check once, to make sure about the git logic. There is no need to keep running this on every execution.
+Before editing, verify the task worktree, clean starting state, and frozen admitted
+path scope. Inspect ignore files only when the assigned task requires an ignore
+rule or the task's validation would otherwise produce untracked generated output.
 
-**Detection & Creation Logic**:
+Modify an ignore file only when all of the following are true:
 
-- Check if the following command succeeds to determine if the repository is a git repo (create/verify .gitignore if so):
+- the change is necessary for the assigned task;
+- the exact file is included in the task's admitted paths;
+- existing project conventions support the rule; and
+- the change is included in focused validation and the task commit.
 
-  ```sh
-  git rev-parse --git-dir 2>/dev/null
-  ```
-
-- Check if Dockerfile\* exists or the assigned task requires Docker → create/verify .dockerignore
-- Check if .eslintrc* or eslint.config.* exists → create/verify .eslintignore
-- Check if .prettierrc\* exists → create/verify .prettierignore
-- Check if .npmrc or package.json exists → create/verify .npmignore (if publishing)
-- Check if terraform files (\*.tf) exist → create/verify .terraformignore
-- Check if .helmignore needed (helm charts present) → create/verify .helmignore
-
-**If ignore file already exists**: Verify it contains essential patterns, append missing critical patterns only
-**If ignore file missing**: Create with full pattern set for detected technology
+Do not create or expand `.gitignore`, `.dockerignore`, `.eslintignore`,
+`.prettierignore`, `.npmignore`, `.terraformignore`, or `.helmignore` merely
+because a related tool is present. If a useful ignore-file change is outside the
+assigned scope, record a bounded related follow-up and continue only when the
+current task remains valid without it.

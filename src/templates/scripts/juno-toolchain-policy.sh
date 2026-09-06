@@ -3,7 +3,7 @@
 # Keep consumers executable-agnostic: they source this file and validate output.
 
 JUNO_KANBAN_COMPAT_RANGE='>=2.0.5,<3.0.0'
-YYLO_LEDGER_COMPAT_RANGE='>=0.1.0,<0.2.0'
+YYLO_LEDGER_COMPAT_RANGE='0.2.0'
 
 juno_kanban_parse_compatible_version() {
     local output="${1-}"
@@ -36,8 +36,8 @@ if not match:
     print("expected exactly one full-line yylo-ledger identity in --version output", file=sys.stderr)
     raise SystemExit(2)
 major, minor, patch = (int(part) for part in match.groups()[:3])
-if (major, minor, patch) < (0, 1, 0) or (major,) >= (0, 2):
-    print(f"unsupported yylo-ledger version {major}.{minor}.{patch}; required >=0.1.0,<0.2.0", file=sys.stderr)
+if (major, minor, patch) != (0, 2, 0) or "rc" in output:
+    print(f"unsupported yylo-ledger version {output.strip()}; required 0.2.0", file=sys.stderr)
     raise SystemExit(3)
 print(f"{major}.{minor}.{patch}")
 PY
