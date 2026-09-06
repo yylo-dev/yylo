@@ -1208,7 +1208,7 @@ class MergeQueueTests(unittest.TestCase):
                 planned["receipt"]["sha256"])
         self.assertEqual(state_path.read_bytes(), before)
 
-    def test_target_refresh_ignores_unchanged_absent_admission_tombstones(self) -> None:
+    def test_target_refresh_fails_closed_on_absent_admission_tombstones(self) -> None:
         self.install_merge_planner_runtime()
         self.commit_feature("X", "docs/feature.txt", "feature\n")
         state_path = self.controller / ".juno_task/state/tasks.json"
@@ -1218,9 +1218,12 @@ class MergeQueueTests(unittest.TestCase):
         state_path.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
         self.advance_target()
         self.merge_target_into("X")
-        planned = merge_runtime.persist_target_refresh_plan(self.controller.resolve(), "X")
-        self.assertNotIn("docs/renamed-away.txt",
-                         {row["path"] for row in planned["classifications"]})
+        before = state_path.read_bytes()
+        with self.assertRaisesRegex(
+                merge_runtime.MergeQueueError,
+                "ambiguous legacy changed_paths: docs/renamed-away.txt"):
+            merge_runtime.persist_target_refresh_plan(self.controller.resolve(), "X")
+        self.assertEqual(state_path.read_bytes(), before)
 
     def test_target_refresh_keeps_both_sides_of_task_authored_renames(self) -> None:
         self.install_merge_planner_runtime()
@@ -3058,6 +3061,7 @@ steps:
         task_runtime.write_state(self.controller, state)
 
         summary = merge_runtime.status_projection(self.controller.resolve())
+        self.assertNotIn("tasks", summary)
         encoded = (merge_runtime.canonical(summary) + "\n").encode()
         self.assertLessEqual(len(encoded), merge_runtime.MERGE_STATUS_MAX_BYTES)
         self.assertEqual(summary["schema_version"], merge_runtime.MERGE_STATUS_SCHEMA)
@@ -3072,7 +3076,9 @@ steps:
         self.assertNotIn("post_integration", encoded.decode())
         cli = self.command(QUEUE, ["status"])
         self.assertLessEqual(len(cli.stdout.encode()), merge_runtime.MERGE_STATUS_MAX_BYTES)
-        self.assertEqual(json.loads(cli.stdout)["next_action"], "yy merge resolve X")
+        cli_payload = json.loads(cli.stdout)
+        self.assertNotIn("tasks", cli_payload)
+        self.assertEqual(cli_payload["next_action"], "yy merge resolve X")
 
     def test_merge_status_detail_is_richer_bounded_and_full_is_legacy_compatible(self) -> None:
         state = task_runtime.read_state(self.controller)
@@ -3660,8 +3666,8 @@ steps:
         self.assertEqual(calls, [("reviewer_a", 1), ("reviewer_b", 1)])
         self.assertEqual(retry_calls, [("reviewer_b", 2)])
         self.assertEqual(ready["outcome"], "RISK_EVIDENCE_READY")
-        status_row = next(row for row in self.queue_payload("status")["tasks"]
-                          if row["task_id"] == "X")
+        status_row = next(row for row in merge_runtime.status(
+            self.controller.resolve())["tasks"] if row["task_id"] == "X")
         self.assertEqual(status_row["review_attempt_counter"], 2)
         self.assertEqual(merge_runtime.merge_next(self.controller.resolve(), "X")["candidate_sha"], tip)
 
@@ -5429,7 +5435,7 @@ steps:
                             if row["decision"] == "invalidated")
         self.assertIn("observable_tree",
                       {row["field"] for row in invalidation["invalidation"]})
-        status = self.queue_payload("status")
+        status = merge_runtime.status(self.controller.resolve())
         self.assertEqual([row["state"] for row in status["tasks"]], ["MERGED", "MERGED"])
 
     def test_parallel_x_y_then_moved_target_uses_one_two_parent_composition(self) -> None:
@@ -5459,7 +5465,7 @@ steps:
         self.assertEqual(git(self.repository, "show", "refs/heads/product:src/x.txt"), "x")
         self.assertEqual(git(self.repository, "show", "refs/heads/product:src/y.txt"), "y")
         self.assertEqual(len(self.counter.read_text().splitlines()), 3)  # two finish rows + one invalid moved closure
-        status = self.queue_payload("status")
+        status = merge_runtime.status(self.controller.resolve())
         self.assertEqual([row["state"] for row in status["tasks"]], ["MERGED", "MERGED"])
 
     def test_composition_candidate_disables_inherited_common_sparse_checkout(self) -> None:
@@ -6039,7 +6045,7 @@ steps:
         self.assertEqual(
             hashlib.sha256(Path(reference["receipt_path"]).read_bytes()).hexdigest(),
             reference["receipt_sha256"])
-        status = self.queue_payload("status")
+        status = merge_runtime.status(self.controller.resolve())
         row = next(item for item in status["tasks"] if item["task_id"] == "X")
         self.assertEqual(row["state"], "WITHDRAWN")
         again = self.queue("withdraw", "X", check=False)
