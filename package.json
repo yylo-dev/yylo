@@ -95,7 +95,9 @@
     "deploy:minor": "bash scripts/publish-all.sh minor",
     "deploy:major": "bash scripts/publish-all.sh major",
     "deploy:dry-run": "bash scripts/publish-all.sh patch --dry-run",
-    "test:ledger-release-artifacts": "node scripts/verify-ledger-release-artifacts.mjs"
+    "test:ledger-release-artifacts": "node scripts/verify-ledger-release-artifacts.mjs",
+    "test:path-portability": "node scripts/check-path-portability.mjs ..",
+    "workspace:relocate": "node scripts/workspace-relocation.mjs"
   },
   "dependencies": {
     "chalk": "^5.3.0",
