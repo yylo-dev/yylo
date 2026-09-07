@@ -303,6 +303,22 @@ status renders those same identifiers; pass `--json` to force structured output.
 
 Normal tasks and `yy merge` own integration. After an ordinary version bump is integrated, maintainers use `scripts/release-cli.sh prepare CLI_VERSION BENCHMARK_VERSION`, obtain explicit publication approval, and then run the separate `publish` command. The CLI has no release command.
 
+## Receipt-bound workspace relocation
+
+When an entire controller is moved between machines, do not rewrite lifecycle JSON or historical receipts by hand. From a clean physical controller checkout, create and review an external plan, apply it once, then verify its immutable receipt:
+
+```bash
+node juno-code/scripts/workspace-relocation.mjs plan --controller "$PWD" \
+  --map /old/controller=/new/controller --map /old/worktrees=/new/worktrees \
+  --output /secure/relocation-plan.json
+node juno-code/scripts/workspace-relocation.mjs apply --controller "$PWD" \
+  --plan /secure/relocation-plan.json --receipt /secure/relocation-receipt.json
+node juno-code/scripts/workspace-relocation.mjs verify --controller "$PWD" \
+  --receipt /secure/relocation-receipt.json
+```
+
+The plan binds the Git common directory, HEAD/ref, task-state hash, exact JSON pointers, and old/new physical roots. Apply refuses dirty, stale, tampered, symlinked, replayed, or missing-commit inputs and preserves historical evidence. Scan shipped active surfaces separately with `node juno-code/scripts/check-path-portability.mjs`; fixtures, immutable receipts, logs, generated output, lockfiles, and security canaries are explicitly excluded rather than rewritten.
+
 ## Workspace roles and recovery
 
 | Workspace | Use it for | Do not use it for |

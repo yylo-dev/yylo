@@ -136,9 +136,9 @@ OITTWR_CREATION_PATHS = [*VHC90C_CREATION_PATHS[:41], "juno_kanban",
                          *VHC90C_CREATION_PATHS[41:]]
 HISTORICAL_CREATION_SHAPES = (
     ("Vhc90c", VHC90C_CREATION_PATHS,
-     "199f964b6100769ed318556f4b77aeb8a4942523d7c6944e476f8ef8bb042ac9"),
+     "9a03ddb75fcd07e7a8600e583de192da02e0394f09a4c53e8b5862f8ed9a4bb8"),
     ("0IttWR", OITTWR_CREATION_PATHS,
-     "f17804f989bbc5549eded74406983cee8c9529638cf2ae4b513b67b29cbbea12"),
+     "7ace90b985ae7fc735b23a9d92c13cbe9070291dc7fa931a0adb64a02dd6f313"),
 )
 
 
@@ -819,6 +819,15 @@ class ValidationProfilesRoundTripTests(unittest.TestCase):
         second = task_runtime.load_config(self.controller)
         self.assertNotIn("validation_profiles", second)
         self.assertEqual(first, second)
+
+    def test_portable_state_workspace_root_uses_environment(self) -> None:
+        config = self.base_config()
+        config["workspace_root"] = "@state/yylo/task-worktrees"
+        self.write_config(config)
+        state_home = self.controller / "state home ü"
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state_home)}):
+            loaded = task_runtime.load_config(self.controller)
+        self.assertEqual(loaded["workspace_root"], str(state_home / "yylo/task-worktrees"))
 
     def test_authored_profiles_survive_renormalization(self) -> None:
         config = self.base_config()

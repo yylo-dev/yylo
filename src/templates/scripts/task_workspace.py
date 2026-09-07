@@ -449,9 +449,15 @@ def load_config(controller: Path) -> dict[str, Any]:
         raise TaskWorkspaceError("target_ref must be a full local branch ref")
     if not isinstance(prefix, str) or not prefix.startswith("refs/heads/") or not prefix.endswith("-"):
         raise TaskWorkspaceError("branch_prefix must be a full local branch prefix ending in '-'")
-    workspace = Path(value["workspace_root"]).expanduser()
+    configured_workspace = value["workspace_root"]
+    if configured_workspace == "@state/yylo/task-worktrees":
+        state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")).expanduser()
+        workspace = state_home / "yylo/task-worktrees"
+        value["workspace_root"] = str(workspace)
+    else:
+        workspace = Path(configured_workspace).expanduser()
     if not workspace.is_absolute() or workspace == Path("/"):
-        raise TaskWorkspaceError("workspace_root must be an explicit absolute directory")
+        raise TaskWorkspaceError("workspace_root must be an explicit absolute directory or @state/yylo/task-worktrees")
     for field in ("allowed_paths", "selectable_paths", "controller_private_paths"):
         items = value[field]
         if not isinstance(items, list) or (field != "selectable_paths" and not items):
