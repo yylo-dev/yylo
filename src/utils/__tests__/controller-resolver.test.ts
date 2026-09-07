@@ -499,7 +499,8 @@ def inspect(root, _policy):
   it('routes the task wrapper mutation process to controller storage', async () => {
     const bin = path.join(controller, '.venv_juno', 'bin');
     const policy = await fs.readFile(policyTemplate, 'utf8');
-    const ledgerVersion = policy.match(/^YYLO_LEDGER_REQUIRED_VERSION='([^']+)'/m)?.[1] ?? '0.1.0';
+    const ledgerVersion = policy.match(/^YYLO_LEDGER_COMPAT_RANGE='([^']+)'/m)?.[1];
+    expect(ledgerVersion).toBeDefined();
     await fs.ensureDir(bin);
     await fs.writeFile(path.join(bin, 'activate'), `export VIRTUAL_ENV=${JSON.stringify(path.join(controller, '.venv_juno'))}\nexport PATH=${JSON.stringify(bin)}:$PATH\n`);
     await fs.writeFile(path.join(bin, 'yylo-ledger'), `#!/usr/bin/env python3\nimport os,sys\nif sys.argv[1:] == ["--version"]: print("yylo-ledger ${ledgerVersion}")\nelse: print(os.environ["JUNO_TASK_ROOT"] + "|" + " ".join(sys.argv[1:]))\n`);
