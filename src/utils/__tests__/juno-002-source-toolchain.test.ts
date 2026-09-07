@@ -80,11 +80,13 @@ describe('Juno 2 shipped guidance', () => {
       expect(prompt).not.toContain('../wiki/task_dependency_hydration.md');
       expect(prompt).toMatch(/never (switches|silently switch)|never clean or switch/i);
     }
-    for (const guidance of [cleanWorktree, parallelReview, reviewPrompt, agents]) {
+    for (const guidance of [cleanWorktree, parallelReview, reviewPrompt]) {
       expect(guidance).toContain('yy pi');
       expect(guidance).toMatch(/bare `pi`|bare pi/i);
       expect(guidance).toMatch(/provider\/model|provider and model/);
     }
+    expect(agents).toContain('Implementation and repair agents never launch lifecycle-semantic reviewers');
+    expect(agents).toContain('yy task preflight TASK_ID');
 
     const skillPaths = [
       '.pi/skills/kanban-workflow/SKILL.md',
