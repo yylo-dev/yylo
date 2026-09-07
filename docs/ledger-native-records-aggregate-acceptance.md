@@ -70,7 +70,7 @@ and byte-identical canonical files before/after reads.
 
 | Command | Result |
 |---|---|
-| `cd juno_kanban && /Users/mahdiyar/Code/CA_JUNOAI/playground/juno-mono/.venv_juno/bin/python3 -m pytest -q` | PASS: **712 passed, 1 skipped**, 1 deprecation warning, 246.28 s. No `YYLO_LEDGER_INVOCATION_ROOT` override. |
+| `cd juno_kanban && python3 -m pytest -q` | PASS: **712 passed, 1 skipped**, 1 deprecation warning, 246.28 s. No `YYLO_LEDGER_INVOCATION_ROOT` override. |
 | Exact archive replacement, complete receipt, positional archive, and three project-registry test nodes | PASS: **6 passed**, 1 warning, 2.67 s |
 | `pytest -q tests/acceptance/test_record_storage_invariants.py tests/acceptance/test_public_record_surfaces.py` | PASS: **13 passed**, 2.65 s |
 | Focused `juno-code` Ledger command/binary/facade/runtime tests | PASS: **3 files, 14 tests**, 5.37 s |

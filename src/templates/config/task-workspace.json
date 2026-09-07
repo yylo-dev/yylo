@@ -2,7 +2,7 @@
   "schema_version": "juno_task_workspace_config.v1",
   "repository": ".",
   "target_ref": "refs/heads/juno-mono-002",
-  "workspace_root": "/private/tmp/yylo/task-worktrees",
+  "workspace_root": "@state/yylo/task-worktrees",
   "branch_prefix": "refs/heads/juno/task-",
   "hydration_workflow": ".juno_task/config/worktree-hydration.yaml",
   "allowed_paths": [
