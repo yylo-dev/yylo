@@ -47,12 +47,6 @@ def git(root: Path, *args: str, check: bool = True) -> str:
 
 class MergeQueueTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.runtime_refresh_patcher = mock.patch.object(
-            merge_runtime, "refresh_managed_controller",
-            return_value={"schema_version": "juno_managed_controller_runtime.v1",
-                          "outcome": "completed"},
-        )
-        self.runtime_refresh = self.runtime_refresh_patcher.start()
         self.kanban_finalization_patcher = mock.patch.object(
             merge_runtime, "finalize_kanban_task",
             wraps=merge_runtime.finalize_kanban_task,
@@ -133,7 +127,6 @@ class MergeQueueTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.kanban_finalization_patcher.stop()
-        self.runtime_refresh_patcher.stop()
         self.temporary.cleanup()
 
     def write_policy(self, code: Optional[str] = None, full_code: Optional[str] = None) -> None:
@@ -1427,7 +1420,7 @@ class MergeQueueTests(unittest.TestCase):
                 self.controller.resolve(), "X", planned["receipt"]["path"],
                 planned["receipt"]["sha256"])
 
-    def test_next_reconciles_fifo_tip_already_integrated_in_target_without_validation(self) -> None:
+    def test_next_refuses_fifo_tip_containment_without_terminal_evidence(self) -> None:
         tip = self.commit_feature("X", "docs/feature.txt", "feature\n")
         checkout = self.root / "external-integration"
         git(self.repository, "worktree", "add", str(checkout), "product")
@@ -1436,14 +1429,11 @@ class MergeQueueTests(unittest.TestCase):
         git(self.repository, "worktree", "remove", str(checkout))
         validation_before = self.counter.read_bytes() if self.counter.exists() else b""
 
-        reconciled = merge_runtime.merge_next(self.controller.resolve())
+        with self.assertRaisesRegex(merge_runtime.MergeQueueError,
+                                    "ancestry alone cannot prove delivery"):
+            merge_runtime.merge_next(self.controller.resolve())
 
-        self.assertEqual(reconciled["outcome"], "ALREADY_IN_TARGET")
-        self.assertEqual(reconciled["strategy"], "already_in_target")
-        self.assertEqual((reconciled["feature_sha"], reconciled["candidate_sha"]),
-                         (tip, target))
-        self.assertEqual(reconciled["validation"], [])
-        self.assertEqual(self.task("status", "X")["state"], "MERGED")
+        self.assertEqual(self.task("status", "X")["state"], "QUEUED")
         self.assertEqual(self.counter.read_bytes() if self.counter.exists() else b"", validation_before)
 
     def test_target_refresh_composed_authored_repair_and_retry_are_idempotent(self) -> None:
@@ -3219,86 +3209,125 @@ steps:
         self.assertEqual(status_row["outcome"], "PRE_CAS_FAILED")
         self.assertEqual(status_row["recovery_command"], "yy merge next")
 
-    def test_target_advanced_refresh_failure_retries_only_incomplete_post_integration_phases(self) -> None:
+    def test_legacy_post_integration_refresh_state_imports_without_second_engine(self) -> None:
+        pending = merge_runtime.post_integration_phases({
+            "candidate_sha": self.base,
+            "post_integration": {
+                "schema_version": "juno_post_integration.v1",
+                "target_advancement": {"status": "complete", "sha": self.base},
+                "integration_owner": {"status": "complete"},
+                "managed_runtime_refresh": {"status": "failed"},
+                "kanban_finalization": {"status": "pending"},
+            },
+        })
+        self.assertEqual(pending["schema_version"], "juno_post_integration.v2")
+        self.assertEqual(pending["runtime_maintenance"], {
+            "status": "pending", "outcome": "legacy_refresh_retired"})
+        self.assertEqual(pending["kanban_finalization"]["status"], "pending")
+        completed = merge_runtime.post_integration_phases({
+            "candidate_sha": self.base,
+            "post_integration": {**pending, "schema_version": "juno_post_integration.v1",
+                                 "managed_runtime_refresh": {"status": "complete"}},
+        })
+        self.assertEqual(completed["runtime_maintenance"]["status"], "complete")
+
+    def test_post_cas_finalization_never_invokes_runtime_upgrade(self) -> None:
         candidate = self.commit_feature("X", "docs/post-integration.md", "recover\n")
-        completed_refresh = {"schema_version": "juno_managed_controller_runtime.v1",
-                             "outcome": "completed", "receipt": {"sha256": "a" * 64}}
-        self.runtime_refresh.side_effect = [
-            merge_runtime.MergeQueueError("injected managed runtime refresh failure receipt=/tmp/failure.json"),
-            completed_refresh,
-        ]
+        original_cas = merge_runtime.cas_target
+        with (mock.patch.object(merge_runtime, "cas_target", wraps=original_cas) as cas,
+              mock.patch.object(merge_runtime.integration_runtime,
+                                "managed_runtime_refresh") as refresh):
+            merged = merge_runtime.merge_next(self.controller.resolve())
+
+        self.assertEqual(cas.call_count, 1)
+        self.assertEqual(merged["outcome"], "MERGED")
+        self.assertEqual(git(self.repository, "rev-parse", "refs/heads/product"), candidate)
+        refresh.assert_not_called()
+        final = self.task("status", "X")
+        phases = final["queue_attempt"]["post_integration"]
+        self.assertEqual(phases["schema_version"], "juno_post_integration.v2")
+        self.assertEqual(phases["kanban_finalization"]["status"], "complete")
+        self.assertEqual(phases["runtime_maintenance"]["status"], "complete")
+        self.assertEqual(final["queue_attempt"]["landed_delivery"]["commit_sha"], candidate)
+
+    def test_runtime_generation_change_is_reported_after_truthful_completion(self) -> None:
+        candidate = self.commit_feature("X", "docs/runtime-generation.md", "new generation\n")
+        self.commit_feature("Y", "docs/runtime-successor.md", "blocked\n")
+        real_generation = merge_runtime.task_runtime.runtime_generation
+
+        def generation(repository: Path, sha: str) -> dict:
+            value = real_generation(repository, self.base)
+            if sha == candidate:
+                return {**value, "target_sha256": "f" * 64, "current": False}
+            return value
+
+        with mock.patch.object(merge_runtime.task_runtime, "runtime_generation",
+                               side_effect=generation):
+            merged = merge_runtime.merge_next(self.controller.resolve())
+            validation_before = self.counter.read_bytes() if self.counter.exists() else b""
+            with self.assertRaisesRegex(merge_runtime.MergeQueueError,
+                                        "supported action: yy integration runtime-refresh"):
+                merge_runtime.merge_next(self.controller.resolve())
+            self.assertEqual(self.counter.read_bytes() if self.counter.exists() else b"",
+                             validation_before)
+
+        self.assertEqual(merged["outcome"], "MERGED")
+        self.assertEqual(self.task("status", "X")["state"], "MERGED")
+        maintenance = merged["post_integration"]["runtime_maintenance"]
+        self.assertEqual(maintenance["status"], "maintenance_needed")
+        self.assertIn("yy integration runtime-refresh --previous-sha", maintenance["safe_next_action"])
+        board = json.loads(self.board.read_text())
+        self.assertEqual(board["X"]["status"], "done")
+        self.assertEqual(board["X"]["terminal_done_mutation_count"], 1)
+
+    def test_finalization_crash_before_ledger_cas_resumes_without_second_target_cas(self) -> None:
+        candidate = self.commit_feature("X", "docs/finalization-crash.md", "recover\n")
         original_cas = merge_runtime.cas_target
         with mock.patch.object(merge_runtime, "cas_target", wraps=original_cas) as cas:
-            with self.assertRaisesRegex(merge_runtime.PostIntegrationError,
-                                        "recover with: yy merge next"):
-                merge_runtime.merge_next(self.controller.resolve())
-            self.assertEqual(cas.call_count, 1)
-            self.assertEqual(git(self.repository, "rev-parse", "refs/heads/product"), candidate)
-            failed = self.task("status", "X")
-            self.assertEqual((failed["state"], failed["last_queue_outcome"]),
-                             ("MERGING", "POST_INTEGRATION_RUNTIME_FAILED"))
-            phases = failed["queue_attempt"]["post_integration"]
-            self.assertEqual(phases["target_advancement"]["status"], "complete")
-            self.assertEqual(phases["integration_owner"]["status"], "complete")
-            self.assertEqual(phases["managed_runtime_refresh"]["status"], "failed")
-            self.assertEqual(phases["kanban_finalization"]["status"], "pending")
-            self.assertEqual(phases["recovery_command"], "yy merge next")
-            status_row = next(row for row in merge_runtime.status(self.controller.resolve())["tasks"]
-                              if row["task_id"] == "X")
-            self.assertEqual(status_row["outcome"], "POST_INTEGRATION_RUNTIME_FAILED")
-            self.assertEqual(status_row["recovery_command"], "yy merge next")
-            self.assertEqual(status_row["post_integration"]["managed_runtime_refresh"]["status"],
-                             "failed")
+            with mock.patch.object(merge_runtime, "finalize_kanban_task",
+                                   side_effect=merge_runtime.MergeQueueError("injected projection crash")):
+                with self.assertRaisesRegex(merge_runtime.PostIntegrationError,
+                                            "post-integration Kanban finalization failed"):
+                    merge_runtime.merge_next(self.controller.resolve())
+            pending = self.task("status", "X")
+            self.assertEqual(pending["state"], "MERGING")
+            self.assertEqual(pending["last_queue_outcome"], "INTEGRATED_FINALIZATION_PENDING")
+            self.assertEqual(pending["queue_attempt"]["landed_delivery"]["commit_sha"], candidate)
+            recovered = merge_runtime.merge_next(self.controller.resolve())
 
+        self.assertEqual(cas.call_count, 1)
+        self.assertEqual((recovered["outcome"], recovered["recovered"]), ("MERGED", True))
+        board = json.loads(self.board.read_text())
+        self.assertEqual(board["X"]["terminal_done_mutation_count"], 1)
+        self.assertEqual(git(self.repository, "rev-parse", "refs/heads/product"), candidate)
+
+    def test_crash_after_ledger_cas_adopts_done_readback_once(self) -> None:
+        candidate = self.commit_feature("X", "docs/result-crash.md", "recover\n")
+        original_persist = merge_runtime.persist_attempt
+        injected = False
+
+        def crash_before_result(controller: Path, attempt: dict, **kwargs: object) -> None:
+            nonlocal injected
+            finalization = (attempt.get("post_integration") or {}).get("kanban_finalization", {})
+            if finalization.get("status") == "complete" and not injected:
+                injected = True
+                raise OSError("injected result persistence crash")
+            original_persist(controller, attempt, **kwargs)
+
+        original_cas = merge_runtime.cas_target
+        with mock.patch.object(merge_runtime, "cas_target", wraps=original_cas) as cas:
+            with mock.patch.object(merge_runtime, "persist_attempt", side_effect=crash_before_result):
+                with self.assertRaisesRegex(OSError, "result persistence crash"):
+                    merge_runtime.merge_next(self.controller.resolve())
+            board = json.loads(self.board.read_text())
+            self.assertEqual(board["X"]["terminal_done_mutation_count"], 1)
             recovered = merge_runtime.merge_next(self.controller.resolve())
 
         self.assertEqual(cas.call_count, 1)
         self.assertEqual(recovered["outcome"], "MERGED")
-        self.assertTrue(recovered["recovered"])
-        self.assertEqual(git(self.repository, "rev-parse", "refs/heads/product"), candidate)
-        self.assertEqual(self.runtime_refresh.call_count, 2)
-        self.kanban_finalization.assert_called_once()
-        final = self.task("status", "X")
-        self.assertEqual(final["state"], "MERGED")
-        final_phases = final["queue_attempt"]["post_integration"]
-        self.assertEqual(final_phases["managed_runtime_refresh"]["status"], "complete")
-        self.assertEqual(final_phases["kanban_finalization"]["status"], "complete")
-
-    def test_public_next_recovers_rc32_bootstrap_post_cas_idempotently(self) -> None:
-        previous = self.bootstrap_policyless_product_generation("2.1.3-rc.0.32")
-        candidate = self.commit_feature("X", "docs/policyless-recovery.md", "recover\n")
-        self.runtime_refresh.side_effect = merge_runtime.MergeQueueError(
-            "injected post-CAS runtime interruption")
-
-        with self.assertRaisesRegex(merge_runtime.PostIntegrationError,
-                                    "recover with: yy merge next"):
-            merge_runtime.merge_next(self.controller.resolve())
-        self.assertEqual(git(self.repository, "rev-parse", "refs/heads/product"), candidate)
-        failed = self.task("status", "X")
-        self.assertEqual(failed["last_queue_outcome"], "POST_INTEGRATION_RUNTIME_FAILED")
-        self.assertEqual(failed["queue_attempt"]["expected_target_sha"], previous)
-
-        # The script CLI is the public yy merge-next implementation. Its fresh
-        # process uses the real compatibility engine, not this test's mock.
-        recovered = self.queue_payload("next")
-        self.assertEqual((recovered["task_id"], recovered["outcome"]), ("X", "MERGED"))
-        board_path = self.controller / ".juno_task/runtime/fake-kanban.json"
-        board = json.loads(board_path.read_text())
-        self.assertEqual(board["X"]["status"], "done")
-        self.assertGreaterEqual(board["X"]["update_mutation_count"], 4)
+        board = json.loads(self.board.read_text())
         self.assertEqual(board["X"]["terminal_done_mutation_count"], 1)
-        x_update_mutations = board["X"]["update_mutation_count"]
-
-        successor = self.commit_feature("Y", "docs/policyless-successor.md", "advance\n")
-        advanced = self.queue_payload("next")
-        self.assertEqual((advanced["task_id"], advanced["outcome"]), ("Y", "MERGED"))
-        self.assertEqual(git(self.repository, "rev-parse", "refs/heads/product"), successor)
-        board = json.loads(board_path.read_text())
-        self.assertEqual(board["Y"]["status"], "done")
-        self.assertGreaterEqual(board["Y"]["update_mutation_count"], 1)
-        self.assertEqual(board["Y"]["terminal_done_mutation_count"], 1)
-        self.assertEqual(board["X"]["update_mutation_count"], x_update_mutations)
-        self.assertEqual(board["X"]["terminal_done_mutation_count"], 1)
+        self.assertEqual(git(self.repository, "rev-parse", "refs/heads/product"), candidate)
 
     def test_kanban_finalization_is_readback_idempotent_and_preserves_response(self) -> None:
         board = self.controller / ".juno_task/runtime/fake-board.json"
@@ -3309,6 +3338,7 @@ steps:
         }}) + "\n")
         test_task_workspace.install_fake_kanban_wrapper(self.controller, board)
         attempt = {"task_id": "X", "candidate_sha": self.base}
+        attempt = merge_runtime.prepare_kanban_finalization_intent(self.controller, attempt)
 
         first = merge_runtime.finalize_kanban_task(self.controller, attempt)
         second = merge_runtime.finalize_kanban_task(self.controller, attempt)
@@ -3337,10 +3367,9 @@ steps:
             "agent_response": "reviewed evidence", "fields": {},
         }}) + "\n")
         test_task_workspace.install_fake_kanban_wrapper(self.controller, board)
-        revision = merge_runtime.task_runtime.kanban_board_revision(self.controller, "X")
+        attempt = {"task_id": "X", "candidate_sha": self.base}
+        attempt = merge_runtime.prepare_kanban_finalization_intent(self.controller, attempt)
         board.with_name(board.name + ".mutate-once").write_text("armed\n")
-        attempt = {"task_id": "X", "candidate_sha": self.base,
-                   "expected_kanban_revision": revision}
         with self.assertRaisesRegex(merge_runtime.MergeQueueError, "stale task revision"):
             merge_runtime.finalize_kanban_task(self.controller, attempt)
         persisted = json.loads(board.read_text())["X"]
@@ -3350,6 +3379,51 @@ steps:
         receipt = (self.controller / ".juno_task/runtime/merge-queue/finalization"
                    / "X" / f"{self.base}.json")
         self.assertFalse(receipt.exists())
+
+        rebased = merge_runtime.prepare_kanban_finalization_intent(self.controller, attempt)
+        self.assertEqual(rebased["kanban_finalization_intent"]["revision_rebased_from"],
+                         attempt["kanban_finalization_intent"]["expected_revision"])
+        recovered = merge_runtime.finalize_kanban_task(self.controller, rebased)
+        self.assertEqual(recovered["outcome"], "completed")
+        persisted = json.loads(board.read_text())["X"]
+        self.assertEqual(persisted["fields"]["owner_note"], "manual")
+        self.assertEqual(persisted["status"], "done")
+
+    def test_finalization_intent_ignores_other_task_drift_and_refuses_relevant_drift(self) -> None:
+        board = self.controller / ".juno_task/runtime/fake-board-concurrency.json"
+        board.parent.mkdir(parents=True, exist_ok=True)
+        board.write_text(json.dumps({
+            "X": {"id": "X", "status": "in_progress", "commit_hash": None,
+                  "agent_response": "X", "fields": {}},
+            "Y": {"id": "Y", "status": "in_progress", "commit_hash": None,
+                  "agent_response": "Y", "fields": {}},
+        }) + "\n")
+        test_task_workspace.install_fake_kanban_wrapper(self.controller, board)
+        attempt = merge_runtime.prepare_kanban_finalization_intent(
+            self.controller, {"task_id": "X", "candidate_sha": self.base})
+        value = json.loads(board.read_text())
+        value["Y"]["fields"]["owner_note"] = "unrelated task edit"
+        board.write_text(json.dumps(value) + "\n")
+        completed = merge_runtime.finalize_kanban_task(self.controller, attempt)
+        self.assertEqual(completed["outcome"], "completed")
+        self.assertEqual(json.loads(board.read_text())["Y"]["fields"]["owner_note"],
+                         "unrelated task edit")
+
+        board2 = self.controller / ".juno_task/runtime/fake-board-relevant.json"
+        board2.write_text(json.dumps({"X": {
+            "id": "X", "status": "in_progress", "commit_hash": None,
+            "agent_response": "X", "fields": {},
+        }}) + "\n")
+        test_task_workspace.install_fake_kanban_wrapper(self.controller, board2)
+        pending = merge_runtime.prepare_kanban_finalization_intent(
+            self.controller, {"task_id": "X", "candidate_sha": self.base})
+        value = json.loads(board2.read_text())
+        value["X"]["status"] = "todo"
+        board2.write_text(json.dumps(value) + "\n")
+        with self.assertRaisesRegex(merge_runtime.MergeQueueError,
+                                    "relevant Kanban task fields changed"):
+            merge_runtime.prepare_kanban_finalization_intent(self.controller, pending)
+        self.assertEqual(json.loads(board2.read_text())["X"]["status"], "todo")
 
     def test_persist_attempt_projects_queue_states_onto_the_board(self) -> None:
         tip = self.commit_feature("X", "src/feature.txt", "feature\n")

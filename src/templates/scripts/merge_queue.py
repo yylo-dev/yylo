@@ -397,12 +397,17 @@ def _project_queue_board_state(controller: Path, task_id: str, state_name: str) 
     recorded as an explicit pending sync on the record without destroying the
     queue state machine, then fails closed with one exact recovery command.
     """
-    if state_name == "MERGED":
-        # Verified merge finalization exclusively owns the done mutation and
-        # its terminal lifecycle fields.
-        return
     with task_runtime.state_lock(controller):
         record = task_runtime.read_state(controller)["tasks"].get(task_id)
+    finalization = (((record or {}).get("queue_attempt") or {}).get("post_integration") or {}).get(
+        "kanban_finalization") if isinstance(record, dict) else None
+    landed = ((record or {}).get("queue_attempt") or {}).get("landed_delivery") \
+        if isinstance(record, dict) else None
+    if (state_name == "MERGED" or isinstance(landed, dict)
+            or (isinstance(finalization, dict) and finalization.get("status") == "complete")):
+        # After landed proof is journaled, the outbox exclusively owns board
+        # finalization. Queue-state projection must not race it or overwrite done.
+        return
     if not isinstance(record, dict):
         raise MergeQueueError(f"queue board projection lost task {task_id}")
     try:
@@ -2204,16 +2209,6 @@ def resume_awaiting(controller: Path, config: dict[str, Any], repository: Path,
         attempt.get("candidate_token"))}
 
 
-def refresh_managed_controller(controller: Path, repository: Path, previous_sha: str,
-                               target_sha: str, task_id: str) -> dict[str, Any]:
-    try:
-        return integration_runtime.managed_runtime_refresh(
-            controller, repository, previous_sha, target_sha, task_id=task_id)
-    except integration_runtime.ManagedRuntimeError as exc:
-        receipt = f" receipt={exc.receipt['path']}" if exc.receipt else ""
-        raise MergeQueueError(f"post-integration managed runtime refresh failed: {exc}{receipt}") from exc
-
-
 def cas_target(repository: Path, target_ref: str, candidate_sha: str,
                expected_sha: str) -> dict[str, Any]:
     owner, owner_before = registered_owner_preflight(repository, expected_sha, candidate_sha)
@@ -2232,16 +2227,113 @@ def cas_target(repository: Path, target_ref: str, candidate_sha: str,
         repository, expected_sha, candidate_sha, owner, owner_before)
 
 
+def attempt_runtime_pin(repository: Path, target_sha: str) -> dict[str, Any]:
+    """Freeze the executing lifecycle generation before any attempt mutation."""
+    generation = task_runtime.runtime_generation(repository, target_sha)
+    if not generation["current"]:
+        raise MergeQueueError(
+            "managed lifecycle runtime is incompatible with the current target; "
+            "complete the reported runtime maintenance before starting new merge work")
+    body = {
+        "schema_version": "juno_merge_runtime_pin.v1",
+        "target_sha": target_sha,
+        "running_sha256": generation["running_sha256"],
+        "target_sha256": generation["target_sha256"],
+    }
+    return {**body, "pin_sha256": digest(body)}
+
+
+def verify_attempt_runtime_pin(repository: Path, attempt: dict[str, Any]) -> dict[str, Any]:
+    pin = attempt.get("runtime_pin")
+    if pin is None:
+        # Finite legacy readback: an attempt persisted by the previous engine is
+        # pinned to the exact pre-CAS target whose runtime is still executing.
+        pin = attempt_runtime_pin(repository, attempt["expected_target_sha"])
+        pin = {**pin, "legacy_import": True}
+    body = {key: value for key, value in pin.items()
+            if key not in {"pin_sha256", "legacy_import"}}
+    if (not isinstance(pin, dict)
+            or body.get("schema_version") != "juno_merge_runtime_pin.v1"
+            or body.get("target_sha") != attempt.get("expected_target_sha")
+            or body.get("running_sha256") != hashlib.sha256(
+                Path(task_runtime.__file__).resolve().read_bytes()).hexdigest()
+            or pin.get("pin_sha256") != digest(body)):
+        raise MergeQueueError("merge attempt runtime pin is missing, stale, or tampered")
+    return pin
+
+
+def runtime_maintenance_projection(repository: Path, attempt: dict[str, Any]) -> dict[str, Any]:
+    previous, candidate = attempt["expected_target_sha"], attempt["candidate_sha"]
+    generation = task_runtime.runtime_generation(repository, candidate)
+    previous_assets = integration_runtime.managed_script_assets(repository, previous)
+    candidate_assets = integration_runtime.managed_script_assets(repository, candidate)
+    changed_scripts = []
+    for relative in sorted(set(previous_assets) | set(candidate_assets)):
+        old = (integration_runtime.managed_script_source_bytes(
+            repository, previous, previous_assets, relative)
+               if relative in previous_assets else None)
+        new = (integration_runtime.managed_script_source_bytes(
+            repository, candidate, candidate_assets, relative)
+               if relative in candidate_assets else None)
+        if old != new:
+            changed_scripts.append(relative)
+    if generation["current"] and not changed_scripts:
+        return {"status": "complete", "outcome": "not_required",
+                "running_sha256": generation["running_sha256"]}
+    command = ("yy integration runtime-refresh --previous-sha "
+               f"{previous} --target-sha {candidate}")
+    return {"status": "maintenance_needed", "outcome": "separate_authority_required",
+            "running_sha256": generation["running_sha256"],
+            "target_sha256": generation["target_sha256"],
+            "changed_scripts": changed_scripts[:64],
+            "safe_next_action": command}
+
+
+def require_runtime_before_new_work(controller: Path, repository: Path,
+                                    config: dict[str, Any]) -> None:
+    target_sha = task_runtime.ref_sha(repository, config["target_ref"])
+    generation = task_runtime.runtime_generation(repository, target_sha)
+    with task_runtime.state_lock(controller):
+        state = task_runtime.read_state(controller)
+        attempts = [row.get("queue_attempt") for row in state.get("tasks", {}).values()
+                    if isinstance(row, dict) and row.get("state") == "MERGED"]
+    maintenance = next((attempt.get("runtime_maintenance") for attempt in attempts
+                        if isinstance(attempt, dict) and attempt.get("candidate_sha") == target_sha
+                        and isinstance(attempt.get("runtime_maintenance"), dict)), None)
+    action = maintenance.get("safe_next_action") if isinstance(maintenance, dict) \
+        and maintenance.get("status") == "maintenance_needed" else None
+    evidence = (f"running_sha256={generation['running_sha256']} "
+                f"target_sha256={generation['target_sha256']}")
+    if isinstance(action, str) and action:
+        raise MergeQueueError(
+            f"runtime maintenance needed before incompatible new work; {evidence}; "
+            f"supported action: {action}")
+    if not generation["current"]:
+        task_runtime.require_current_runtime(repository, target_sha, controller)
+
+
 def post_integration_phases(attempt: dict[str, Any]) -> dict[str, Any]:
     existing = attempt.get("post_integration")
-    if isinstance(existing, dict) and existing.get("schema_version") == "juno_post_integration.v1":
+    if isinstance(existing, dict) and existing.get("schema_version") == "juno_post_integration.v2":
         return existing
+    if isinstance(existing, dict) and existing.get("schema_version") == "juno_post_integration.v1":
+        # Read old attempts, but never invoke their delivery-owned refresh phase.
+        old_runtime = existing.get("managed_runtime_refresh", {})
+        maintenance = ({"status": "complete", "outcome": "legacy_refresh_already_complete"}
+                       if isinstance(old_runtime, dict) and old_runtime.get("status") == "complete"
+                       else {"status": "pending", "outcome": "legacy_refresh_retired"})
+        return {"schema_version": "juno_post_integration.v2",
+                "target_advancement": existing.get("target_advancement", {"status": "complete"}),
+                "integration_owner": existing.get("integration_owner", {"status": "pending"}),
+                "kanban_finalization": existing.get("kanban_finalization", {"status": "pending"}),
+                "runtime_maintenance": maintenance,
+                "recovery_command": "yy merge next"}
     return {
-        "schema_version": "juno_post_integration.v1",
+        "schema_version": "juno_post_integration.v2",
         "target_advancement": {"status": "complete", "sha": attempt["candidate_sha"]},
         "integration_owner": {"status": "pending"},
-        "managed_runtime_refresh": {"status": "pending"},
         "kanban_finalization": {"status": "pending"},
+        "runtime_maintenance": {"status": "pending"},
         "recovery_command": "yy merge next",
     }
 
@@ -2551,30 +2643,68 @@ def persist_advisory_followups(controller: Path, task_id: str, candidate_sha: st
     return created
 
 
+def _kanban_protected_projection(task: dict[str, Any]) -> dict[str, Any]:
+    fields = task.get("fields") if isinstance(task.get("fields"), dict) else {}
+    return {"status": task.get("status"), "commit_hash": task.get("commit_hash"),
+            "lifecycle_state": fields.get("lifecycle_state"),
+            "lifecycle_projection": fields.get("lifecycle_projection")}
+
+
+def prepare_kanban_finalization_intent(controller: Path,
+                                       attempt: dict[str, Any]) -> dict[str, Any]:
+    """Create/rebase one journaled outbox intent before the external Ledger CAS."""
+    task_id, candidate = attempt["task_id"], attempt["candidate_sha"]
+    task = read_kanban_task(controller, task_id)
+    current_revision = task_runtime.kanban_board_revision(controller, task_id)
+    intent = attempt.get("kanban_finalization_intent")
+    identity = digest({"operation": "merge-finalization", "task_id": task_id,
+                       "candidate_sha": candidate})
+    if isinstance(intent, dict):
+        if (intent.get("schema_version") != "juno_kanban_finalization_intent.v1"
+                or intent.get("idempotency_key") != identity
+                or intent.get("candidate_sha") != candidate):
+            raise MergeQueueError("Kanban finalization intent is malformed or mismatched")
+        if task.get("status") != "done" and (
+                _kanban_protected_projection(task) != intent.get("expected_projection")):
+            raise MergeQueueError(
+                "relevant Kanban task fields changed after finalization intent; "
+                f"preserve user edits and recover with: yy merge next")
+        if intent.get("expected_revision") == current_revision:
+            return attempt
+        # Revision drift confined to response or unrelated fields is safe: keep
+        # those bytes, bind the fresh whole-task CAS, and journal the rebase.
+        intent = {**intent, "expected_revision": current_revision,
+                  "revision_rebased_from": intent.get("expected_revision")}
+    else:
+        intent = {"schema_version": "juno_kanban_finalization_intent.v1",
+                  "idempotency_key": identity, "task_id": task_id,
+                  "candidate_sha": candidate, "expected_revision": current_revision,
+                  "expected_projection": _kanban_protected_projection(task)}
+    return {**attempt, "kanban_finalization_intent": intent}
+
+
 def finalize_kanban_task(controller: Path, attempt: dict[str, Any]) -> dict[str, Any]:
     task_id, candidate = attempt["task_id"], attempt["candidate_sha"]
     task = read_kanban_task(controller, task_id)
-    # The final external mutation is always revision-CAS bound. A supplied
-    # revision is retained for crash/resume; otherwise bind the fresh live
-    # ledger revision immediately before constructing the update.
-    expected_revision = attempt.get("expected_kanban_revision")
-    if expected_revision is None:
-        expected_revision = task_runtime.kanban_board_revision(controller, task_id)
+    intent = attempt.get("kanban_finalization_intent")
+    if not isinstance(intent, dict):
+        raise MergeQueueError("Kanban finalization requires a persisted outbox intent")
+    expected_revision = intent.get("expected_revision")
+    idempotency_key = intent.get("idempotency_key")
     if (not isinstance(expected_revision, str)
-            or not re.fullmatch(r"[0-9a-f]{16,128}", expected_revision)):
-        raise MergeQueueError("Kanban finalization expected revision is malformed")
+            or not re.fullmatch(r"[0-9a-f]{16,128}", expected_revision)
+            or not isinstance(idempotency_key, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", idempotency_key)):
+        raise MergeQueueError("Kanban finalization intent revision or identity is malformed")
     if task.get("status") == "done":
         if task.get("commit_hash") != candidate:
             raise MergeQueueError("Kanban task is already done with a different commit")
         fields = task.get("fields") if isinstance(task.get("fields"), dict) else {}
         if (fields.get("lifecycle_state") == "MERGED"
                 and fields.get("lifecycle_projection") == task_runtime.KANBAN_LIFECYCLE_PROJECTION):
-            return {"outcome": "already_complete", "commit_hash": candidate}
-        lifecycle = task_runtime.project_kanban_lifecycle(
-            controller, task_id, "MERGED", allow_done=True,
-            phase="merge-finalized", record={"tip_sha": candidate})
-        return {"outcome": "already_complete", "commit_hash": candidate,
-                "lifecycle_projection": lifecycle.get("outcome")}
+            return {"outcome": "already_complete", "commit_hash": candidate,
+                    "idempotency_key": idempotency_key}
+        raise MergeQueueError("done task lacks exact merge finalization proof")
     response = task.get("agent_response")
     if not isinstance(response, str) or not response.strip():
         response = f"Integrated through the guarded merge queue at {candidate}."
@@ -2594,7 +2724,8 @@ def finalize_kanban_task(controller: Path, attempt: dict[str, Any]) -> dict[str,
             "--commit", candidate,
             "--field", f"lifecycle_projection={json.dumps(task_runtime.KANBAN_LIFECYCLE_PROJECTION)}",
             "--field", f"lifecycle_state={json.dumps('MERGED')}",
-            *(["--expected-revision", expected_revision] if expected_revision else []),
+            "--field", f"lifecycle_finalization_key={json.dumps(idempotency_key)}",
+            "--expected-revision", expected_revision,
             "--receipt-file", str(receipt_path),
         ], cwd=controller, stdin=subprocess.DEVNULL, text=True, capture_output=True)
     finally:
@@ -2606,9 +2737,11 @@ def finalize_kanban_task(controller: Path, attempt: dict[str, Any]) -> dict[str,
         raise MergeQueueError("Kanban finalization readback mismatched")
     fields = readback.get("fields") if isinstance(readback.get("fields"), dict) else {}
     if (fields.get("lifecycle_state") != "MERGED"
-            or fields.get("lifecycle_projection") != task_runtime.KANBAN_LIFECYCLE_PROJECTION):
+            or fields.get("lifecycle_projection") != task_runtime.KANBAN_LIFECYCLE_PROJECTION
+            or fields.get("lifecycle_finalization_key") != idempotency_key):
         raise MergeQueueError("Kanban finalization lifecycle readback mismatched")
     return {"outcome": "completed", "commit_hash": candidate,
+            "idempotency_key": idempotency_key,
             "receipt": evidence_reference(receipt_path),
             "lifecycle_projection": "completed"}
 
@@ -2616,61 +2749,78 @@ def finalize_kanban_task(controller: Path, attempt: dict[str, Any]) -> dict[str,
 def complete_post_integration(controller: Path, repository: Path,
                               attempt: dict[str, Any],
                               authority: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    pin = verify_attempt_runtime_pin(repository, attempt)
     phases = post_integration_phases(attempt)
-    attempt = {**attempt, "post_integration": phases,
-               "outcome": "POST_INTEGRATION_PENDING", "recovery_command": "yy merge next"}
+    candidate = attempt["candidate_sha"]
+    observed = task_runtime.ref_sha(repository, attempt["target_ref"])
+    observed_tree = task_runtime.git(repository, "rev-parse", f"{observed}^{{tree}}")
+    if observed != candidate or observed_tree != attempt.get("candidate_tree"):
+        raise PostIntegrationError("landed target readback does not match the persisted candidate")
+    landed = {"schema_version": "juno_landed_delivery.v1", "commit_sha": observed,
+              "tree_sha": observed_tree, "runtime_pin_sha256": pin["pin_sha256"],
+              "owner_registration": task_runtime.git(
+                  repository, "config", "--local", "--get", INTEGRATION_OWNER_CONFIG,
+                  check=False) or None}
+    # Persist landed product truth before any projection. This intent boundary
+    # makes a pending board write evidence to resume, never permission to redo CAS.
+    phases = {**phases, "target_advancement": {"status": "complete", "result": landed}}
+    attempt = {**attempt, "runtime_pin": pin, "landed_delivery": landed,
+               "post_integration": phases,
+               "outcome": "INTEGRATED_FINALIZATION_PENDING",
+               "recovery_command": "yy merge next"}
     persist_attempt(controller, attempt, state_name="MERGING")
     if phases["integration_owner"].get("status") != "complete":
         if authority is None:
             owner, before = registered_owner_preflight(
-                repository, attempt["expected_target_sha"], attempt["candidate_sha"])
+                repository, attempt["expected_target_sha"], candidate)
             authority = advance_registered_owner(
-                repository, attempt["expected_target_sha"], attempt["candidate_sha"], owner, before)
+                repository, attempt["expected_target_sha"], candidate, owner, before)
         phases = {**phases, "integration_owner": {
             "status": "complete" if authority.get("status") != "partial" else "failed",
             "result": authority,
         }}
         attempt = {**attempt, "post_integration": phases,
-                   "outcome": ("POST_INTEGRATION_RUNTIME_PENDING"
+                   "integration_owner_authority": authority,
+                   "outcome": ("INTEGRATED_FINALIZATION_PENDING"
                                if authority.get("status") != "partial"
                                else "POST_INTEGRATION_OWNER_FAILED")}
         persist_attempt(controller, attempt, state_name="MERGING")
         if authority.get("status") == "partial":
             raise PostIntegrationError(
                 "target integrated but integration-owner advancement failed; recover with: yy merge next")
-    if phases["managed_runtime_refresh"].get("status") != "complete":
-        try:
-            runtime_result = refresh_managed_controller(
-                controller, repository, attempt["expected_target_sha"],
-                attempt["candidate_sha"], attempt["task_id"])
-        except MergeQueueError as exc:
-            phases = {**phases, "managed_runtime_refresh": {
-                "status": "failed", "error": str(exc)}}
-            attempt = {**attempt, "post_integration": phases,
-                       "outcome": "POST_INTEGRATION_RUNTIME_FAILED"}
-            persist_attempt(controller, attempt, state_name="MERGING")
-            raise PostIntegrationError(f"{exc}; recover with: yy merge next") from exc
-        phases = {**phases, "managed_runtime_refresh": {
-            "status": "complete", "result": runtime_result}}
-        attempt = {**attempt, "post_integration": phases,
-                   "managed_runtime_refresh": runtime_result,
-                   "outcome": "POST_INTEGRATION_KANBAN_PENDING"}
-        persist_attempt(controller, attempt, state_name="MERGING")
     if phases["kanban_finalization"].get("status") != "complete":
         try:
+            attempt = prepare_kanban_finalization_intent(controller, attempt)
+            phases = {**phases, "kanban_finalization": {
+                "status": "pending", "intent": attempt["kanban_finalization_intent"]}}
+            attempt = {**attempt, "post_integration": phases,
+                       "outcome": "INTEGRATED_FINALIZATION_PENDING"}
+            persist_attempt(controller, attempt, state_name="MERGING")
             kanban_result = finalize_kanban_task(controller, attempt)
         except MergeQueueError as exc:
             phases = {**phases, "kanban_finalization": {
-                "status": "failed", "error": str(exc)}}
+                "status": "failed", "intent": attempt.get("kanban_finalization_intent"),
+                "error": str(exc)}}
             attempt = {**attempt, "post_integration": phases,
-                       "outcome": "POST_INTEGRATION_KANBAN_FAILED"}
+                       "outcome": "INTEGRATED_FINALIZATION_PENDING"}
             persist_attempt(controller, attempt, state_name="MERGING")
             raise PostIntegrationError(
                 f"post-integration Kanban finalization failed: {exc}; recover with: yy merge next") from exc
         phases = {**phases, "kanban_finalization": {
-            "status": "complete", "result": kanban_result}}
+            "status": "complete", "intent": attempt["kanban_finalization_intent"],
+            "result": kanban_result}}
         attempt = {**attempt, "post_integration": phases,
                    "kanban_finalization": kanban_result}
+        persist_attempt(controller, attempt, state_name="MERGING")
+    if phases["runtime_maintenance"].get("status") not in {
+            "complete", "maintenance_needed"}:
+        maintenance = runtime_maintenance_projection(repository, attempt)
+        phases = {**phases, "runtime_maintenance": maintenance}
+        attempt = {**attempt, "post_integration": phases,
+                   "runtime_maintenance": maintenance,
+                   "outcome": ("MERGED_MAINTENANCE_NEEDED"
+                               if maintenance["status"] == "maintenance_needed" else "MERGED")}
+        persist_attempt(controller, attempt, state_name="MERGING")
     return attempt
 
 
@@ -2748,6 +2898,7 @@ def merge_next(controller: Path, task_id: Optional[str] = None,
         recovered = recover_incomplete(controller, config, repository)
         if recovered is not None:
             return recovered
+        require_runtime_before_new_work(controller, repository, config)
         if task_id is not None:
             if not task_runtime.TASK_RE.fullmatch(task_id):
                 raise MergeQueueError("unsafe task id")
@@ -2766,21 +2917,17 @@ def merge_next(controller: Path, task_id: Optional[str] = None,
             ["git", "-C", str(repository), "merge-base", "--is-ancestor",
              feature_sha, target_sha], repository, check=False).returncode == 0
         if feature_already_integrated:
-            attempt = {
-                "schema_version": ATTEMPT_SCHEMA, "task_id": record["task_id"],
-                "target_ref": config["target_ref"], "expected_target_sha": target_sha,
-                "feature_sha": feature_sha, "strategy": "already_in_target",
-                "candidate_sha": target_sha,
-                "candidate_tree": task_runtime.git(repository, "rev-parse", f"{target_sha}^{{tree}}"),
-                "candidate_checkout": None, "candidate_token": None,
-                "validation": [], "review": None, "outcome": "ALREADY_IN_TARGET",
-                "observed_target_sha": target_sha,
-            }
-            persist_attempt(controller, attempt, state_name="MERGED", remove_conflict=True)
-            return attempt
+            # Containment is useful diagnosis, not acceptance or integration
+            # evidence. Only the explicit receipt-bound reconciliation path may
+            # convert historical terminal proof into queue completion.
+            raise MergeQueueError(
+                f"queued tip {feature_sha} is already contained in {target_sha}, but ancestry "
+                f"alone cannot prove delivery; recover with: yy merge reconcile plan {record['task_id']}")
         assert_static_plan(controller, record["task_id"], "next", expected_plan_id)
+        runtime_pin = attempt_runtime_pin(repository, target_sha)
         attempt = {"schema_version": ATTEMPT_SCHEMA, "task_id": record["task_id"],
                    "target_ref": config["target_ref"], "expected_target_sha": target_sha,
+                   "runtime_pin": runtime_pin,
                    "feature_sha": feature_sha, "strategy": None, "candidate_sha": None,
                    "candidate_tree": None, "candidate_checkout": None, "candidate_token": None, "validation": [],
                    "review": None, "outcome": "MERGING"}
@@ -3008,6 +3155,7 @@ def merge_resolve(controller: Path, task_id: str,
             raise MergeQueueError("resolved candidate does not have exact target/feature parents")
         attempt = {"schema_version": ATTEMPT_SCHEMA, "task_id": task_id,
                    "target_ref": config["target_ref"], "expected_target_sha": conflict["expected_target_sha"],
+                   "runtime_pin": attempt_runtime_pin(repository, conflict["expected_target_sha"]),
                    "feature_sha": conflict["feature_sha"], "strategy": "resolved_merge",
                    "candidate_sha": candidate_sha,
                    "candidate_tree": task_runtime.git(checkout, "rev-parse", "HEAD^{tree}"),
