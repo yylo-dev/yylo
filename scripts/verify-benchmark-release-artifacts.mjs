@@ -109,7 +109,8 @@ try {
     throw new Error('Packed yy --help does not list benchmark');
   }
 
-  for (const args of [['--version'], ['--help'], ['plan', '--help'], ['run', '--help'], ['recover', '--help'], ['rejudge', '--help']]) {
+  for (const args of [['--version'], ['--help'], ['plan', '--help'], ['run', '--help'], ['recover', '--help'], ['rejudge', '--help'],
+    ['workflow', '--help'], ['workflow', 'plan', '--help'], ['workflow', 'run', '--help'], ['workflow', 'doctor', '--help']]) {
     const standalone = run(benchmark, args, { cwd: fixtureRoot, env });
     const delegated = run(yy, ['benchmark', ...args], { cwd: fixtureRoot, env });
     if (standalone.status !== delegated.status ||
@@ -118,7 +119,7 @@ try {
         JSON.stringify({ standalone, delegated }, null, 2));
     }
     if (args.length === 1 && args[0] === '--help') {
-      for (const command of ['plan', 'run', 'recover', 'rejudge']) {
+      for (const command of ['plan', 'run', 'recover', 'rejudge', 'workflow']) {
         if (!new RegExp(`(^|\\s)${command}(\\s|$)`, 'm').test(standalone.stdout)) throw new Error(`Packed help omits workflow command ${command}`);
       }
       if (/(^|\s)daily-ops(\s|$)/m.test(standalone.stdout)) throw new Error('Packed help must not expose a daily-ops command');
@@ -174,6 +175,13 @@ try {
     if (standalone.stdout !== delegated.stdout || standalone.stderr !== delegated.stderr
         || !/planned attempt chain is incomplete/iu.test(standalone.stderr + standalone.stdout)) throw new Error(`Packed v2 ${operation[0]} fail-closed behavior differs`);
   }
+  const installedGovernedScript = join(prefix, 'node_modules', '@yylo', 'benchmark', 'scripts', 'verify-installed-boundary-acceptance.mjs');
+  const governedAcceptance = run(process.execPath, [installedGovernedScript, '--benchmark', benchmark, '--delegate', yy,
+    '--juno-version', junoPackage.version], { cwd: fixtureRoot, env });
+  if (!/juno_benchmark_boundary_installed_acceptance\.v1/u.test(governedAcceptance.stdout)) {
+    throw new Error('Packed governed workflow installed-consumer acceptance did not produce its terminal receipt');
+  }
+
   const installedEnvelopeEvidence = {
     schema_version: 'yylo_benchmark_installed_v2_acceptance.v1',
     candidate_dispatch_count: 0,
