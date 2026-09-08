@@ -1501,11 +1501,8 @@ def bounded_file_retry(row: dict[str, Any], cwd: Path, evidence: dict[str, Any],
     }
 
 
-EVIDENCE_CACHE_SCHEMA = "juno_merge_queue_evidence_cache.v1"
-EVIDENCE_CACHE_ROOT = ".juno_task/runtime/merge-queue/evidence-cache"
 CANONICAL_VALIDATION_RECEIPT_SCHEMA = "juno_canonical_validation_receipt.v1"
 CANONICAL_VALIDATION_ROOT = ".juno_task/runtime/validation-receipts"
-EVIDENCE_CACHE_MAX_ENTRIES = 4096
 # Behavior-affecting environment keys admitted into evidence identity. v1 is
 # deliberately empty: admission suites must not depend on ambient env at all.
 EVIDENCE_ENV_KEYS: tuple[str, ...] = ()
@@ -1572,161 +1569,6 @@ def validation_evidence_identity(row: dict[str, Any], candidate: Path, cwd: Path
     return {**material, "input_closure_sha256": lifecycle_runtime.digest(material)}
 
 
-def evidence_cache_path(controller: Path, key_sha256: str) -> Path:
-    return controller / EVIDENCE_CACHE_ROOT / f"{key_sha256}.json"
-
-
-def _canonical_bytes(value: Any) -> bytes:
-    return (json.dumps(value, sort_keys=True, separators=(",", ":"),
-                       ensure_ascii=False) + "\n").encode()
-
-
-def load_cached_evidence(controller: Path, key_sha256: str, row: dict[str, Any],
-                          plan: dict[str, Any]) -> Optional[dict[str, Any]]:
-    """Load and strictly re-verify one cached green evidence entry.
-
-    Reuse is fail-closed: a missing, malformed, stale, tampered, partial,
-    timed-out, cross-identity, or otherwise ambiguous entry yields None (fresh
-    validation) and the entry is removed when it is provably unusable.
-    """
-    path = evidence_cache_path(controller, key_sha256)
-    raw = _bounded_text(path, 1 << 20)
-    if raw is None:
-        return None
-    try:
-        entry = json.loads(raw)
-    except (UnicodeError, json.JSONDecodeError):
-        path.unlink(missing_ok=True)
-        return None
-    keys = {"schema_version", "key_sha256", "source", "recorded_at", "reuse_count"}
-    source_keys = {"receipt", "candidate", "policy_identity", "validation_identity",
-                   "commands", "command_index", "input_closure", "complete_input_identity"}
-    if (not isinstance(entry, dict) or set(entry) != keys
-            or entry.get("schema_version") != EVIDENCE_CACHE_SCHEMA
-            or not isinstance(entry.get("key_sha256"), str)
-            or entry["key_sha256"] != key_sha256
-            or not isinstance(entry.get("source"), dict)
-            or set(entry["source"]) != source_keys
-            or not isinstance(entry.get("recorded_at"), str)
-            or not isinstance(entry.get("reuse_count"), int)
-            or isinstance(entry.get("reuse_count"), bool) or entry["reuse_count"] < 0):
-        path.unlink(missing_ok=True)
-        return None
-    source = entry["source"]
-    closure_verification = lifecycle_runtime.verify_complete_input_closure(
-        source.get("input_closure"), source.get("input_closure"),
-        source.get("complete_input_identity"))
-    if (not closure_verification["valid"]
-            or source["input_closure"].get("input_closure_sha256") != key_sha256):
-        path.unlink(missing_ok=True)
-        return None
-    source_plan = {"candidate": source["candidate"],
-                   "policy_identity": source["policy_identity"],
-                   "evidence_limits": plan["evidence_limits"]}
-    try:
-        verified = risk_runtime.verify_full_suite_receipt_v3(
-            source["receipt"], source_plan, source["validation_identity"],
-            source["commands"], None, require_success=True)
-    except Exception:
-        path.unlink(missing_ok=True)
-        return None
-    commands = source["commands"]
-    index = source["command_index"]
-    if (not isinstance(commands, list) or not isinstance(index, int)
-            or isinstance(index, bool) or not 0 <= index < len(commands)
-            or commands[index] != row
-            or source["candidate"].get("candidate_tree") != plan["candidate"]["candidate_tree"]):
-        path.unlink(missing_ok=True)
-        return None
-    return entry
-
-
-def store_cached_evidence(controller: Path, key_sha256: str,
-                          reference: dict[str, str], plan: dict[str, Any],
-                          identity: dict[str, str], commands: list[dict[str, Any]],
-                          index: int, input_closure: dict[str, Any]) -> None:
-    """Persist one green evidence entry with bounded retention.
-
-    Storage happens only for verified green receipts; garbage collection keeps
-    the newest EVIDENCE_CACHE_MAX_ENTRIES entries and never removes entries
-    whose source receipts are still referenced by live queue/task records.
-    """
-    entry = {"schema_version": EVIDENCE_CACHE_SCHEMA, "key_sha256": key_sha256,
-             "source": {"receipt": reference,
-                        "candidate": {"candidate_sha": plan["candidate"]["candidate_sha"],
-                                       "candidate_tree": plan["candidate"]["candidate_tree"]},
-                        "policy_identity": plan["policy_identity"],
-                        "validation_identity": identity, "commands": commands,
-                        "command_index": index, "input_closure": input_closure,
-                        "complete_input_identity": lifecycle_runtime.complete_input_identity(
-                            input_closure)},
-             "recorded_at": risk_runtime.utc_now(), "reuse_count": 0}
-    path = evidence_cache_path(controller, key_sha256)
-    _write_cache_entry(controller, entry, key_sha256)
-    _evidence_cache_gc(controller)
-
-
-def _evidence_cache_gc(controller: Path) -> None:
-    root = controller / EVIDENCE_CACHE_ROOT
-    try:
-        entries = sorted(root.glob("*.json"), key=lambda p: p.stat().st_mtime)
-    except OSError:
-        return
-    if len(entries) <= EVIDENCE_CACHE_MAX_ENTRIES:
-        return
-    referenced = live_receipt_paths(controller)
-    for path in entries[:-EVIDENCE_CACHE_MAX_ENTRIES]:
-        raw = _bounded_text(path, 1 << 20)
-        if raw is None:
-            path.unlink(missing_ok=True)
-            continue
-        try:
-            entry = json.loads(raw)
-            source = entry["source"]["receipt"]["receipt_path"]
-        except (KeyError, TypeError, UnicodeError, json.JSONDecodeError):
-            path.unlink(missing_ok=True)
-            continue
-        if Path(source).resolve() not in referenced:
-            path.unlink(missing_ok=True)
-
-
-def live_receipt_paths(controller: Path) -> set[Path]:
-    """Receipt paths referenced by live queue/task records (GC protection)."""
-    referenced: set[Path] = set()
-    try:
-        state = task_runtime.read_state(controller)
-    except Exception:
-        return referenced
-    for record in (state.get("tasks") or {}).values():
-        if not isinstance(record, dict):
-            continue
-        attempt = record.get("queue_attempt")
-        if not isinstance(attempt, dict):
-            continue
-        admission = ((attempt.get("risk") or {}).get("review_progress") or {}).get("full_suite_admission")
-        if not isinstance(admission, dict):
-            continue
-        for receipt in admission.get("receipts") or []:
-            if isinstance(receipt, dict) and isinstance(receipt.get("receipt_path"), str):
-                referenced.add(Path(receipt["receipt_path"]).resolve())
-    return referenced
-
-
-def _write_cache_entry(controller: Path, entry: dict[str, Any], key_sha256: str) -> None:
-    path = evidence_cache_path(controller, key_sha256)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent, prefix="." + path.name + ".",
-                                     delete=False) as handle:
-        handle.write(_canonical_bytes(entry)); handle.flush(); os.fsync(handle.fileno())
-        temporary = Path(handle.name)
-    os.replace(temporary, path)
-
-
-def _mark_reuse(entry: dict[str, Any], controller: Path, key_sha256: str) -> None:
-    updated = {**entry, "reuse_count": entry["reuse_count"] + 1}
-    _write_cache_entry(controller, updated, key_sha256)
-
-
 def full_suite_validation(commands: list[dict[str, Any]], candidate: Path,
                           plan: dict[str, Any], identity: dict[str, str],
                           receipt_paths: list[Path], claim: dict[str, Any],
@@ -1740,11 +1582,10 @@ def full_suite_validation(commands: list[dict[str, Any]], candidate: Path,
     A receipt prefix already on disk is a crash-recovery boundary: each prefix
     receipt is strictly re-verified before the remaining commands resume.
 
-    When controller and repository are provided, each command first consults
-    the content-addressed green-evidence cache: a hit whose source receipt
-    still strictly verifies against identical behavioral inputs produces a
-    derived receipt without re-execution, and the returned reuse rows explain
-    every reuse decision for attempt receipts and human/JSON output.
+    When controller and repository are provided, each command consumes the
+    shared canonical terminal-result index. Attempt receipts remain claim-bound
+    protocol projections; they neither redefine the command key nor authorize
+    delivery, and the returned rows expose actual execution/reuse decisions.
     """
     if len(receipt_paths) != len(commands):
         raise MergeQueueError("full-suite receipt schedule does not bind its commands")
@@ -1775,50 +1616,61 @@ def full_suite_validation(commands: list[dict[str, Any]], candidate: Path,
             cwd.relative_to(candidate)
         except ValueError as exc:
             raise MergeQueueError("full-suite validation cwd escaped candidate") from exc
-        reuse_entry: Optional[dict[str, Any]] = None
-        key_sha: Optional[str] = None
         if controller is not None and repository is not None:
-            evidence_identity = validation_evidence_identity(
-                row, candidate, cwd, identity, plan, repository)
-            key_sha = evidence_identity["input_closure_sha256"]
-            reuse_entry = load_cached_evidence(controller, key_sha, row, plan)
-        if reuse_entry is not None:
-            source = reuse_entry["source"]
-            started_at = risk_runtime.utc_now()
-            derived = _derived_reuse_receipt(
-                source, commands, index, row, claim, started_at)
-            derived = fit_full_suite_receipt(
-                derived, plan["evidence_limits"]["max_receipt_bytes"])
-            write_canonical_exclusive(receipt_path, derived,
-                                      plan["evidence_limits"]["max_receipt_bytes"])
-            _mark_reuse(reuse_entry, controller, key_sha)
-            references.append(evidence_reference(receipt_path))
-            reuse_rows.append({
-                **lifecycle_runtime.evidence_decision(
-                    row["id"], "reused", closure=evidence_identity,
-                    source=source["receipt"], reason="exact complete-input cache hit"),
-                "evidence_key_sha256": key_sha,
-                "source_receipt": source["receipt"],
-                "source_candidate_sha": source["candidate"]["candidate_sha"],
-                "derived_receipt": evidence_reference(receipt_path),
-            })
-            continue
+            candidate_exists = task_runtime.run(
+                ["git", "-C", str(repository), "cat-file", "-e",
+                 f'{plan["candidate"]["candidate_sha"]}^{{commit}}'],
+                repository, check=False).returncode == 0
+            if candidate_exists:
+                command_config = task_runtime.load_config(controller)
+                command_runtime = task_runtime.runtime_generation(
+                    repository, plan["candidate"]["candidate_sha"])
+                evidence_identity = task_runtime._command_input_closure(
+                    repository, plan["candidate"]["candidate_sha"], row,
+                    command_config, command_runtime)
+            else:
+                # Direct unit fixtures predating Git-backed candidates retain a
+                # finite compatibility identity. Public queue plans prove the
+                # candidate commit before reaching this branch.
+                evidence_identity = validation_evidence_identity(
+                    row, candidate, cwd, identity, plan, repository)
+        else:
+            evidence_identity = {"input_closure_sha256": None}
         started_at = risk_runtime.utc_now()
-        with validation_dependencies(candidate, cwd, dependency_source):
-            evidence = (task_runtime.run_validation(row, cwd, cancel_event=cancel_event)
-                        if cancel_event is not None else
-                        task_runtime.run_validation(row, cwd))
-        retry_evidence = None
-        # A zero process exit contradicted by parsed reporter failures is a
-        # terminal result-integrity violation, not an absorbable flake: no
-        # isolated retry may convert it into reusable PASS evidence.
+
+        def execute_terminal() -> dict[str, Any]:
+            with validation_dependencies(candidate, cwd, dependency_source):
+                executed_result = (task_runtime.run_validation(
+                    row, cwd, cancel_event=cancel_event) if cancel_event is not None
+                    else task_runtime.run_validation(row, cwd))
+            result_integrity = executed_result.get("result_integrity") or {}
+            terminal_contradiction = bool(result_integrity.get("contradiction"))
+            retry = None
+            if not terminal_contradiction and (executed_result["timed_out"]
+                                                or executed_result["exit_code"]):
+                retry = bounded_file_retry(row, cwd, executed_result, candidate,
+                                           dependency_source)
+                if retry is not None and retry["absorbed"]:
+                    executed_result = {**executed_result, "exit_code": 0,
+                                       "timed_out": False}
+            return {**executed_result,
+                    "canonical_retry_evidence": retry}
+
+        if controller is not None and repository is not None:
+            try:
+                terminal = lifecycle_runtime.consume_or_execute_command_result(
+                    controller / CANONICAL_VALIDATION_ROOT, repository,
+                    evidence_identity, execute_terminal, phase="full_suite",
+                    task_id=str(plan.get("task_id") or ""))
+            except lifecycle_runtime.LifecycleContractError as exc:
+                raise MergeQueueError(str(exc)) from exc
+            evidence = terminal["receipt"]["result"]
+        else:
+            evidence = execute_terminal()
+            terminal = {"decision": "executed", "reference": None}
+        retry_evidence = evidence.get("canonical_retry_evidence")
         result_integrity = evidence.get("result_integrity") or {}
         terminal_contradiction = bool(result_integrity.get("contradiction"))
-        if not terminal_contradiction and (evidence["timed_out"] or evidence["exit_code"]):
-            retry_evidence = bounded_file_retry(row, cwd, evidence, candidate,
-                                                dependency_source)
-            if retry_evidence is not None and retry_evidence["absorbed"]:
-                evidence = {**evidence, "exit_code": 0, "timed_out": False}
         completed_at = risk_runtime.utc_now()
         receipt = {
             "schema_version": risk_runtime.FULL_SUITE_RECEIPT_V3_SCHEMA,
@@ -1854,64 +1706,17 @@ def full_suite_validation(commands: list[dict[str, Any]], candidate: Path,
                                   plan["evidence_limits"]["max_receipt_bytes"])
         reference = evidence_reference(receipt_path)
         references.append(reference)
-        executed_closure = (evidence_identity if controller is not None and repository is not None
-                            else {"input_closure_sha256": None})
         reuse_rows.append(lifecycle_runtime.evidence_decision(
-            row["id"], "executed", closure=executed_closure,
-            source=reference, reason="no exact reusable stage receipt"))
-        if (controller is not None and repository is not None
-                and not evidence["timed_out"] and evidence["exit_code"] == 0):
-            store_cached_evidence(controller, key_sha, reference, plan, identity,
-                                  commands, index, evidence_identity)
+            row["id"], terminal["decision"], closure=evidence_identity,
+            source=(terminal["reference"] or reference),
+            reason=("canonical command result index" if terminal["reference"]
+                    else "unindexed compatibility execution")))
         if evidence["timed_out"] or evidence["exit_code"]:
             detail = evidence["stderr_tail"] or evidence["stdout_tail"]
             raise MergeValidationError(
                 f"full-suite validation failed ({row['id']}): {detail}",
                 [evidence], reference)
     return references, reuse_rows
-
-
-def _derived_reuse_receipt(source: dict[str, Any],
-                           commands: list[dict[str, Any]], index: int,
-                           row: dict[str, Any], claim: dict[str, Any],
-                           started_at: str) -> dict[str, Any]:
-    """Derive this attempt's receipt from a strictly verified cached source.
-
-    Behavioral fields (execution identity, result streams) come from the
-    verified source receipt whose inputs are identical by cache-key
-    construction; binding fields (claim, commands, indices, timestamps) come
-    from this attempt so the derived receipt re-verifies standalone.
-    """
-    source_receipt_path = Path(source["receipt"]["receipt_path"])
-    source_receipt = json.loads(_bounded_text(source_receipt_path, 1 << 20) or "null")
-    if not isinstance(source_receipt, dict):
-        raise MergeQueueError("cached evidence source receipt is unreadable")
-    lookup_states = [{"state": name, "duration_ms": 0} for name in
-                     ("WAITING_FOR_RESOURCE", "SETUP", "RUNNING", "TEARDOWN", "PASSED")]
-    return {
-        "schema_version": risk_runtime.FULL_SUITE_RECEIPT_V3_SCHEMA,
-        "producer": {"schema_version": risk_runtime.FULL_SUITE_PRODUCER_SCHEMA,
-                     "tool_id": risk_runtime.FULL_SUITE_TOOL_ID},
-        # Derived receipts must bind the exact compact candidate contract the
-        # verifier enforces; a legacy cache entry may carry a richer candidate
-        # record from the composing plan, so compact it defensively here.
-        "candidate": {"candidate_sha": source["candidate"]["candidate_sha"],
-                       "candidate_tree": source["candidate"]["candidate_tree"]},
-        "policy_identity": source["policy_identity"],
-        "claim": claim,
-        "validation_identity": source["validation_identity"],
-        "commands": commands,
-        "command_index": index,
-        "command": row,
-        "started_at": started_at,
-        "completed_at": risk_runtime.utc_now(),
-        "timing": {"schema_version": source_receipt["timing"]["schema_version"],
-                   "states": lookup_states,
-                   "wall_duration_ms": 0, "critical_path_contribution_ms": 0},
-        "resource": source_receipt["resource"],
-        "identity": source_receipt["identity"],
-        "result": source_receipt["result"],
-    }
 
 
 def assert_frozen_candidate(controller: Path, config: dict[str, Any], checkout: Path, candidate_sha: str) -> None:
@@ -4279,6 +4084,8 @@ def verify_standing_validation(record: dict[str, Any],
         raise MergeQueueError("standing validation route/counters are malformed")
     verified: list[dict[str, str]] = []
     summary_parent: Optional[Path] = None
+    repository = (task_runtime.product_repository(controller, task_runtime.load_config(controller))
+                  if controller is not None else None)
     for reference in standing["receipts"]:
         if (not isinstance(reference, dict) or set(reference) != {"path", "sha256", "command_id"}
                 or not isinstance(reference["path"], str)):
@@ -4290,27 +4097,38 @@ def verify_standing_validation(record: dict[str, Any],
             data = path.read_bytes(); receipt = json.loads(data)
         except (OSError, json.JSONDecodeError) as exc:
             raise MergeQueueError("standing validation receipt is unavailable") from exc
-        closure_verification = lifecycle_runtime.verify_complete_input_closure(
-            receipt.get("input_closure"), receipt.get("input_closure"),
-            receipt.get("complete_input_identity"))
-        if (hashlib.sha256(data).hexdigest() != reference["sha256"]
-                or not closure_verification["valid"]
-                or receipt.get("schema_version") not in {
+        if receipt.get("schema_version") == lifecycle_runtime.COMMAND_RESULT_SCHEMA:
+            if repository is None:
+                raise MergeQueueError("canonical standing result requires its repository authority")
+            try:
+                lifecycle_runtime.verify_canonical_command_result(
+                    receipt, repository, receipt.get("input_closure"))
+            except lifecycle_runtime.LifecycleContractError as exc:
+                raise MergeQueueError(str(exc)) from exc
+            legacy_identity_valid = True
+        else:
+            closure_verification = lifecycle_runtime.verify_complete_input_closure(
+                receipt.get("input_closure"), receipt.get("input_closure"),
+                receipt.get("complete_input_identity"))
+            legacy_identity_valid = (closure_verification["valid"]
+                and receipt.get("schema_version") in {
                     task_runtime.STANDING_EVIDENCE_SCHEMA,
                     task_runtime.CANONICAL_VALIDATION_RECEIPT_SCHEMA}
-                or receipt.get("task_id") != record.get("task_id")
-                or receipt.get("tip_sha") != standing["tip_sha"]
-                or receipt.get("plan_sha256") != standing["plan_sha256"]
+                and receipt.get("task_id") == record.get("task_id")
+                and receipt.get("tip_sha") == standing["tip_sha"]
+                and receipt.get("plan_sha256") == standing["plan_sha256"])
+            summary_parent = path.parent if summary_parent is None else summary_parent
+            if path.parent != summary_parent:
+                raise MergeQueueError("legacy standing validation receipts do not share one plan root")
+        if (hashlib.sha256(data).hexdigest() != reference["sha256"]
+                or not legacy_identity_valid
                 or receipt.get("command", {}).get("id") != reference["command_id"]
                 or receipt.get("result", {}).get("exit_code") != 0
                 or receipt.get("result", {}).get("timed_out")
                 or receipt.get("result", {}).get("result_integrity", {}).get("eligible_pass") is False):
             raise MergeQueueError("standing validation receipt identity or verdict is invalid")
-        summary_parent = path.parent if summary_parent is None else summary_parent
-        if path.parent != summary_parent:
-            raise MergeQueueError("standing validation receipts do not share one plan root")
         verified.append({"command_id": reference["command_id"], "sha256": reference["sha256"]})
-    if summary_parent is None:
+    if not verified:
         root = None
         route = documentation_route
         zero_route = (route.get("mode") == "inert_zero_command"
@@ -4330,8 +4148,11 @@ def verify_standing_validation(record: dict[str, Any],
         if task_runtime.stable_sha256(summary) != standing.get("summary_sha256"):
             raise MergeQueueError("zero-command standing summary identity is invalid")
     else:
+        summary_path = ((summary_parent / "summary.json") if summary_parent is not None else
+                        (controller / task_runtime.STANDING_ROOT / str(record.get("task_id"))
+                         / standing["plan_sha256"] / "summary.json"))
         try:
-            summary = json.loads((summary_parent / "summary.json").read_text())
+            summary = json.loads(summary_path.read_text())
         except (OSError, json.JSONDecodeError) as exc:
             raise MergeQueueError("standing validation summary is unavailable") from exc
         if task_runtime.stable_sha256(summary) != standing.get("summary_sha256"):
@@ -4343,71 +4164,6 @@ def verify_standing_validation(record: dict[str, Any],
             "plan_sha256": standing["plan_sha256"],
             "documentation_route": documentation_route,
             "counters": counters}
-
-
-def _derive_canonical_validation_receipt(
-        controller: Path, repository: Path, config: dict[str, Any],
-        candidate_sha: str, row: dict[str, Any], closure: dict[str, Any],
-        source: dict[str, str], source_receipt: dict[str, Any],
-        standing: dict[str, Any], coherence: dict[str, Any]) -> dict[str, str]:
-    """Materialize a deterministic immutable receipt for cross-stage reuse.
-
-    The index deliberately excludes the candidate tree: reusable authority is
-    the verified command closure plus policy, outcome schema, repository, and
-    operation-snapshot lineage.  The derived artifact separately binds the
-    consuming candidate so task evidence is never silently relabelled.
-    """
-    policy_identity = {
-        "routing_config_sha256": closure.get("routing_config_sha256"),
-        "risk_policy_sha256": closure.get("risk_policy_sha256"),
-        "runtime_sha256": closure.get("runtime_sha256"),
-    }
-    producer_snapshot = (standing.get("operation_snapshot") or {}).get("snapshot_sha256")
-    consuming_snapshot = task_runtime.stable_sha256({
-        "candidate_sha": candidate_sha,
-        "target_sha": task_runtime.ref_sha(repository, config["target_ref"]),
-        "input_closure_sha256": closure.get("input_closure_sha256"),
-        "coherence_sha256": task_runtime.stable_sha256(coherence),
-    })
-    lineage = {"producer_snapshot_sha256": producer_snapshot,
-               "consuming_snapshot_sha256": consuming_snapshot}
-    outcome_identity = {
-        "schema_version": closure.get("outcome_schema"),
-        "result_sha256": task_runtime.stable_sha256(source_receipt.get("result")),
-        "verdict": "PASSED",
-    }
-    index_identity = {
-        "command_closure_sha256": closure["input_closure_sha256"],
-        "policy_identity": policy_identity,
-        "outcome_identity": outcome_identity,
-        "repository_identity": repository_identity(repository),
-        "snapshot_lineage": lineage,
-    }
-    index_sha = task_runtime.stable_sha256(index_identity)
-    consuming_candidate = {
-        "candidate_sha": candidate_sha,
-        "candidate_tree": task_runtime.git(repository, "rev-parse", f"{candidate_sha}^{{tree}}"),
-        "target_ref": config["target_ref"],
-    }
-    receipt = {
-        "schema_version": CANONICAL_VALIDATION_RECEIPT_SCHEMA,
-        "receipt_kind": "derived", "phase": "merge_validation",
-        "command_id": row["id"], "command": row,
-        "input_closure": closure,
-        "complete_input_identity": lifecycle_runtime.complete_input_identity(closure),
-        "policy_identity": policy_identity, "outcome_identity": outcome_identity,
-        "index_identity": index_identity, "index_sha256": index_sha,
-        "consuming_candidate": consuming_candidate,
-        "snapshot_lineage": lineage, "source": source,
-        "decision_reason": "exact command closure reuse",
-        "result": source_receipt["result"],
-    }
-    consumer_sha = task_runtime.stable_sha256({
-        "index_sha256": index_sha, "consuming_candidate": consuming_candidate,
-        "source": source, "phase": receipt["phase"],
-    })
-    path = controller / CANONICAL_VALIDATION_ROOT / index_sha / f"{consumer_sha}.json"
-    return lifecycle_runtime.atomic_json(path, receipt, exclusive=True)
 
 
 def authoritative_validation_rows(controller: Path, config: dict[str, Any],
@@ -4494,14 +4250,21 @@ def authoritative_validation_rows(controller: Path, config: dict[str, Any],
             if (closure_verification["valid"] and isinstance(result, dict)
                     and result.get("exit_code") == 0 and not result.get("timed_out")
                     and result.get("result_integrity", {}).get("eligible_pass") is not False):
-                validations.append(result)
-                derived_reference = _derive_canonical_validation_receipt(
-                    controller, repository, config, candidate_sha, row, current,
-                    reference, receipt, standing, coherence)
-                decisions.append({**lifecycle_runtime.evidence_decision(
-                    row["id"], "reused", closure=current, source=reference,
-                    reason="exact command closure reuse"),
-                    "derived_receipt": derived_reference})
+                try:
+                    terminal = lifecycle_runtime.consume_or_execute_command_result(
+                        controller / CANONICAL_VALIDATION_ROOT, repository, current,
+                        lambda: result, phase="merge_validation",
+                        task_id=str(record.get("task_id")),
+                        legacy=((receipt, reference)
+                                if receipt.get("schema_version") != lifecycle_runtime.COMMAND_RESULT_SCHEMA
+                                else None))
+                except lifecycle_runtime.LifecycleContractError as exc:
+                    raise MergeQueueError(str(exc)) from exc
+                validations.append(terminal["receipt"]["result"])
+                decisions.append(lifecycle_runtime.evidence_decision(
+                    row["id"], "reused", closure=current,
+                    source=terminal["reference"],
+                    reason="exact canonical command result reuse"))
                 continue
             decisions.append(lifecycle_runtime.evidence_decision(
                 row["id"], "invalidated", closure=current, source=reference,
@@ -4512,20 +4275,30 @@ def authoritative_validation_rows(controller: Path, config: dict[str, Any],
             cwd.relative_to(candidate.resolve())
         except ValueError as exc:
             raise MergeQueueError("authoritative validation cwd escaped candidate") from exc
-        if row["argv"] == lifecycle_runtime.ACTIVE_DOC_ARGV:
-            result = task_runtime._active_documentation_validation(
-                repository, candidate_sha,
-                {"documentation_route": route}, row,
-                config["documentation_validation"])
-        else:
+        def execute_terminal() -> dict[str, Any]:
+            if row["argv"] == lifecycle_runtime.ACTIVE_DOC_ARGV:
+                return task_runtime._active_documentation_validation(
+                    repository, candidate_sha,
+                    {"documentation_route": route}, row,
+                    config["documentation_validation"])
             with validation_dependencies(candidate, cwd, dependency_source):
-                result = task_runtime.run_validation(row, cwd)
+                return task_runtime.run_validation(row, cwd)
+        try:
+            terminal = lifecycle_runtime.consume_or_execute_command_result(
+                controller / CANONICAL_VALIDATION_ROOT, repository, current,
+                execute_terminal, phase="merge_validation",
+                task_id=str(record.get("task_id")))
+        except lifecycle_runtime.LifecycleContractError as exc:
+            raise MergeQueueError(str(exc)) from exc
+        result = terminal["receipt"]["result"]
         validations.append(result)
-        active_wall_ms += max(0, int(
-            result.get("timing", {}).get("wall_duration_ms", result.get("duration_ms", 0))))
+        if terminal["decision"] == "executed":
+            active_wall_ms += max(0, int(
+                result.get("timing", {}).get("wall_duration_ms", result.get("duration_ms", 0))))
         decisions.append(lifecycle_runtime.evidence_decision(
-            row["id"], "executed", closure=current,
-            reason="no exact reusable PASS closure"))
+            row["id"], terminal["decision"], closure=current,
+            source=terminal["reference"],
+            reason="canonical command result index"))
         if result.get("timed_out") or result.get("exit_code"):
             detail = result.get("stderr_tail") or result.get("stdout_tail")
             raise MergeValidationError(
