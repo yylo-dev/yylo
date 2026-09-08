@@ -1,0 +1,1392 @@
+{
+  "schema_version": "juno.lifecycle_simplification.corpus.v1",
+  "reference": {
+    "commit": "de9e3a8caa9d439654fe25dd06ecd5aae3af0bb4",
+    "tree": "f55b0f0cda1157e7795cb512f9effdc4fd60ff1b",
+    "target_ref": "refs/heads/juno-mono-002",
+    "source_inputs": [
+      {
+        "path": "juno-code/package.json",
+        "sha256": "9287af32449c95b7a9011894b6c0472b619c582b793095981c2499816a35c355"
+      },
+      {
+        "path": "juno-code/package-lock.json",
+        "sha256": "610fb6c5fec9488c9fe48245b97ee070f022566e9947001244e94324f40dec7b"
+      },
+      {
+        "path": "juno-code/scripts/test-support/task_workspace_fixture.py",
+        "sha256": "8c67924f011c3f113889546baff13475a905b35c00025f3b494fea96c8f7fe57"
+      },
+      {
+        "path": "juno-code/scripts/test-support/task_workspace_test_runner.py",
+        "sha256": "556f3abec1ef4dda9f436b2b3736722922ed1bda6dc3da23146b579ee0cff30e"
+      },
+      {
+        "path": "juno-code/scripts/test-task-workspace.mjs",
+        "sha256": "77f6c794b42d483eec9c24f3d2cf5a7b5cbdf5d69012efab6536b959a344d365"
+      },
+      {
+        "path": "juno-code/scripts/test-performance/task-workspace-duration-weights.v1.json",
+        "sha256": "199718f55445546d7a8af63a08f7fd53af569ded42b21b3b3400c2e6febf04ca"
+      },
+      {
+        "path": ".juno_task/scripts/tests/fixtures/lifecycle-evidence-reuse-matrix.v1.json",
+        "sha256": "abe6098fd59f3fd9bd04a1b19ef840e6b5cc173fb40ae31e4b189a173ebe3b66"
+      },
+      {
+        "path": ".juno_task/scripts/task_workspace.py",
+        "sha256": "c8de31d5f8300ae8dd8957d2bcf2808de1d5362745ea7f43d7e9ff8e3a8eb960"
+      },
+      {
+        "path": ".juno_task/scripts/merge_queue.py",
+        "sha256": "24a25e905c40c80a306b91220842cf11c1759a0772458d319aa553dcf7d7d768"
+      },
+      {
+        "path": ".juno_task/scripts/risk_policy.py",
+        "sha256": "dd05186e8b8ab47885395aada558131577ee7aabe586363cf995c86140f85843"
+      },
+      {
+        "path": ".juno_task/scripts/operation_snapshot.py",
+        "sha256": "1ba7e016097d2772ceed43cddf5201341d77039d0ecc56a595a8a585a98ec06b"
+      }
+    ],
+    "invoked_package": {
+      "name": "@yylo/cli",
+      "version": "0.2.2",
+      "binary": "yy",
+      "ledger_runtime": "yylo-ledger 0.2.0"
+    }
+  },
+  "environment": {
+    "captured_utc": "2026-09-08T17:34:00Z",
+    "os": "Linux 6.17.0-1019-aws x86_64",
+    "node": "v22.23.2",
+    "python": "3.12.3",
+    "git": "2.43.0",
+    "timezone": "UTC",
+    "fixture_workers": "deterministic; not paid/live models",
+    "reviewers": "deterministic verdict fixtures; not semantic review-quality evidence"
+  },
+  "policies": {
+    "risk_policy_sha256": "dd05186e8b8ab47885395aada558131577ee7aabe586363cf995c86140f85843",
+    "review_counts": {
+      "low": 0,
+      "normal_max": 1,
+      "high": 2
+    },
+    "review_order": "high reviewers sequential and predecessor-bound",
+    "repair_candidates": 1,
+    "delta_review_groups": 1
+  },
+  "denominator": {
+    "primary_metric": "lifecycle coordination interventions",
+    "unit": "fixture-observed deterministic phase-advancing commands or handoffs",
+    "routine_cohort_membership": [
+      "docs-inert",
+      "docs-active-cold",
+      "docs-inert-warm",
+      "docs-active-warm",
+      "normal",
+      "two",
+      "ten",
+      "multi"
+    ],
+    "weights": {
+      "docs-inert": 0.05,
+      "docs-active-cold": 0.1,
+      "docs-inert-warm": 0.1,
+      "docs-active-warm": 0.15,
+      "normal": 0.25,
+      "two": 0.1,
+      "ten": 0.1,
+      "multi": 0.15
+    },
+    "wall_rule": "wall is elapsed max across concurrent work; concurrent durations are never summed",
+    "input_rule": "count unique complete input closures only",
+    "fixture_elapsed_rule": "Whole-delivery fixture elapsed equals isolated seeded scenario wall; live queue wait is unavailable and is not inferred from zero fixture wait."
+  },
+  "acceptance": {
+    "primary_reduction": 0.7,
+    "stretch_reduction": 0.8,
+    "zero_baseline_rule": "absolute count with no regression; never divide by zero",
+    "safety_rule": "G1-G8 are independent pass/fail gates, never a composite score"
+  },
+  "guarantees": [
+    {
+      "id": "G1",
+      "name": "correct requirements"
+    },
+    {
+      "id": "G2",
+      "name": "dirty bytes preserved"
+    },
+    {
+      "id": "G3",
+      "name": "exact integration"
+    },
+    {
+      "id": "G4",
+      "name": "exact evidence"
+    },
+    {
+      "id": "G5",
+      "name": "truthful completion"
+    },
+    {
+      "id": "G6",
+      "name": "concurrency and fencing"
+    },
+    {
+      "id": "G7",
+      "name": "bounded recovery and low coordination"
+    },
+    {
+      "id": "G8",
+      "name": "explicit authority and external-action boundaries"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "docs-inert",
+      "cohort": "routine",
+      "weight": 0.05,
+      "guarantees": ["G4", "G7"],
+      "fixture": {
+        "kind": "task_workspace_profile",
+        "selector": "MinimumRcLifecycleContractTests.test_documentation_routes_inert_active_and_unsafe_without_process_guessing",
+        "review_quality_evidence": false,
+        "environment": "cold"
+      },
+      "repeats": [
+        {
+          "repeat": 1,
+          "outcome": "passed",
+          "active_wall_ms": 3.257,
+          "whole_delivery_ms": 3.257,
+          "queue_wait_ms": 0,
+          "command_count": 0,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 1,
+          "state_count": 2,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["3e7d8f1903f40e032b019949330909e608e4445a3142618e799ed6ca183efe47"]
+        },
+        {
+          "repeat": 2,
+          "outcome": "passed",
+          "active_wall_ms": 1.135,
+          "whole_delivery_ms": 1.135,
+          "queue_wait_ms": 0,
+          "command_count": 0,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 1,
+          "state_count": 2,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["4b63063208c675a4aef284fc6a8276e96a8f21a0863072e5c9deaedacbcf7b56"]
+        },
+        {
+          "repeat": 3,
+          "outcome": "passed",
+          "active_wall_ms": 0.953,
+          "whole_delivery_ms": 0.953,
+          "queue_wait_ms": 0,
+          "command_count": 0,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 1,
+          "state_count": 2,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["93dd37994c89646ddfbee53b75de13f1e7f887f2b7b40e3d34896c32bd8c3ea6"]
+        }
+      ]
+    },
+    {
+      "id": "docs-active-cold",
+      "cohort": "routine",
+      "weight": 0.1,
+      "guarantees": ["G1", "G4"],
+      "fixture": {
+        "kind": "task_workspace_profile",
+        "selector": "MinimumRcLifecycleContractTests.test_active_documentation_audits_false_guidance_then_reuses_corrected_identity",
+        "review_quality_evidence": false,
+        "environment": "cold"
+      },
+      "repeats": [
+        {
+          "repeat": 1,
+          "outcome": "passed",
+          "active_wall_ms": 287.775,
+          "whole_delivery_ms": 287.775,
+          "queue_wait_ms": 0,
+          "command_count": 42,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 1,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 3,
+          "state_count": 2,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["b22010d1b4237baa42a9bbf4faef6f1bfc7b6ec2dcfefb93142fd9fdc7d54540"]
+        },
+        {
+          "repeat": 2,
+          "outcome": "passed",
+          "active_wall_ms": 147.522,
+          "whole_delivery_ms": 147.522,
+          "queue_wait_ms": 0,
+          "command_count": 42,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 1,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 3,
+          "state_count": 2,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["a50216314f96fadfbb72af3bf300ef08d6c7313efe9955f3af06e24550862173"]
+        },
+        {
+          "repeat": 3,
+          "outcome": "passed",
+          "active_wall_ms": 138.501,
+          "whole_delivery_ms": 138.501,
+          "queue_wait_ms": 0,
+          "command_count": 42,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 1,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 3,
+          "state_count": 2,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["01fd0913781c483e069be93f31f398c80a934ea065dafbd41c70e56be8a2fd3b"]
+        }
+      ]
+    },
+    {
+      "id": "docs-inert-warm",
+      "cohort": "routine",
+      "weight": 0.1,
+      "guarantees": ["G4", "G7"],
+      "fixture": {
+        "kind": "task_workspace_profile",
+        "selector": "MinimumRcLifecycleContractTests.test_documentation_routes_inert_active_and_unsafe_without_process_guessing",
+        "review_quality_evidence": false,
+        "environment": "warm"
+      },
+      "repeats": [
+        {
+          "repeat": 1,
+          "outcome": "passed",
+          "active_wall_ms": 2.986,
+          "whole_delivery_ms": 2.986,
+          "queue_wait_ms": 0,
+          "command_count": 0,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 1,
+          "state_count": 2,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["3fd72584e4c9bbfb0ec26da893f8567023749a481c56c0a40b63b8aacbe7480c"]
+        },
+        {
+          "repeat": 2,
+          "outcome": "passed",
+          "active_wall_ms": 5.23,
+          "whole_delivery_ms": 5.23,
+          "queue_wait_ms": 0,
+          "command_count": 0,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 1,
+          "state_count": 2,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["6753ed1de3217b39597e0e0f6dc2a326ce5d68207fd49f6e4d82737bb4071d92"]
+        },
+        {
+          "repeat": 3,
+          "outcome": "passed",
+          "active_wall_ms": 1.145,
+          "whole_delivery_ms": 1.145,
+          "queue_wait_ms": 0,
+          "command_count": 0,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 1,
+          "state_count": 2,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["4c7538ada3bb7361098c3abc552fa5f06dd7d7f8c426010217ab8bf61ffe17d4"]
+        }
+      ]
+    },
+    {
+      "id": "docs-active-warm",
+      "cohort": "routine",
+      "weight": 0.15,
+      "guarantees": ["G1", "G4"],
+      "fixture": {
+        "kind": "task_workspace_profile",
+        "selector": "MinimumRcLifecycleContractTests.test_active_documentation_audits_false_guidance_then_reuses_corrected_identity",
+        "review_quality_evidence": false,
+        "environment": "warm"
+      },
+      "repeats": [
+        {
+          "repeat": 1,
+          "outcome": "passed",
+          "active_wall_ms": 331.191,
+          "whole_delivery_ms": 331.191,
+          "queue_wait_ms": 0,
+          "command_count": 42,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 2,
+          "state_count": 2,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["06517e3d1653466ee5bcf0a447bb0673de10fa591cfec84385c599e16168844d"]
+        },
+        {
+          "repeat": 2,
+          "outcome": "passed",
+          "active_wall_ms": 293.638,
+          "whole_delivery_ms": 293.638,
+          "queue_wait_ms": 0,
+          "command_count": 42,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 2,
+          "state_count": 2,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["bda396e4acdd7ba03e74597cf8fd9ce99ef034712357015ec063110a5594f907"]
+        },
+        {
+          "repeat": 3,
+          "outcome": "passed",
+          "active_wall_ms": 126.562,
+          "whole_delivery_ms": 126.562,
+          "queue_wait_ms": 0,
+          "command_count": 42,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 2,
+          "state_count": 2,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["75ce73010eab0a98342c300ab99cfb8e55c71440285a5459f2646494123153fa"]
+        }
+      ]
+    },
+    {
+      "id": "normal",
+      "cohort": "routine",
+      "weight": 0.25,
+      "guarantees": ["G1", "G3", "G5"],
+      "fixture": {
+        "kind": "task_workspace_profile",
+        "selector": "TaskWorkspaceTests.test_finish_queues_clean_committed_tip_without_merging_or_cleanup",
+        "review_quality_evidence": false,
+        "environment": "warm"
+      },
+      "repeats": [
+        {
+          "repeat": 1,
+          "outcome": "passed",
+          "active_wall_ms": 8978.759,
+          "whole_delivery_ms": 8978.759,
+          "queue_wait_ms": 0,
+          "command_count": 27,
+          "model_handoffs": 0,
+          "evidence_hits": 2,
+          "evidence_misses": 1,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 6,
+          "state_count": 3,
+          "authority_writer_count": 2,
+          "complete_input_ids": ["757a47e57106443adea1092af622523aa0c7af6171a6244d3ef5b840fa4d8666"]
+        },
+        {
+          "repeat": 2,
+          "outcome": "passed",
+          "active_wall_ms": 9257.094,
+          "whole_delivery_ms": 9257.094,
+          "queue_wait_ms": 0,
+          "command_count": 27,
+          "model_handoffs": 0,
+          "evidence_hits": 2,
+          "evidence_misses": 1,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 6,
+          "state_count": 3,
+          "authority_writer_count": 2,
+          "complete_input_ids": ["55b0031d250fdb04793acc1462f623bc59ce1229c1d37d0bb02571fe63dd724c"]
+        },
+        {
+          "repeat": 3,
+          "outcome": "passed",
+          "active_wall_ms": 9332.46,
+          "whole_delivery_ms": 9332.46,
+          "queue_wait_ms": 0,
+          "command_count": 27,
+          "model_handoffs": 0,
+          "evidence_hits": 2,
+          "evidence_misses": 1,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 6,
+          "state_count": 3,
+          "authority_writer_count": 2,
+          "complete_input_ids": ["bd4346b983756f0652f6afcfca9c6441efbefe6de3544f180e024575ecb2aa02"]
+        }
+      ]
+    },
+    {
+      "id": "high",
+      "cohort": "safety",
+      "weight": 0,
+      "guarantees": ["G4", "G6", "G8"],
+      "fixture": {
+        "kind": "task_workspace_profile",
+        "selector": "TaskWorkspaceTests.test_task_run_serializes_concurrent_callers_and_dispatches_one_worker",
+        "review_quality_evidence": false,
+        "environment": "warm"
+      },
+      "repeats": [
+        {
+          "repeat": 1,
+          "outcome": "passed",
+          "active_wall_ms": 5728.273,
+          "whole_delivery_ms": 5728.273,
+          "queue_wait_ms": 0,
+          "command_count": 347,
+          "model_handoffs": 2,
+          "evidence_hits": 0,
+          "evidence_misses": 1,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 10,
+          "state_count": 5,
+          "authority_writer_count": 2,
+          "complete_input_ids": ["d6be873092c449cdf0118e1810cc5809a4bc8b3ff52fb59c5a319d3d7a9a6868"]
+        },
+        {
+          "repeat": 2,
+          "outcome": "passed",
+          "active_wall_ms": 6114.892,
+          "whole_delivery_ms": 6114.892,
+          "queue_wait_ms": 0,
+          "command_count": 347,
+          "model_handoffs": 2,
+          "evidence_hits": 0,
+          "evidence_misses": 1,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 10,
+          "state_count": 5,
+          "authority_writer_count": 2,
+          "complete_input_ids": ["458e53d97f6f480d61719a2fa53469d89b5a9b327a8ed78f0cd85efebdc21f9b"]
+        },
+        {
+          "repeat": 3,
+          "outcome": "passed",
+          "active_wall_ms": 5953.46,
+          "whole_delivery_ms": 5953.46,
+          "queue_wait_ms": 0,
+          "command_count": 347,
+          "model_handoffs": 2,
+          "evidence_hits": 0,
+          "evidence_misses": 1,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 10,
+          "state_count": 5,
+          "authority_writer_count": 2,
+          "complete_input_ids": ["ae5bfaea67dadb60f515894b46f4d0633095f3b40952ac1d98ea775a70575e09"]
+        }
+      ]
+    },
+    {
+      "id": "two",
+      "cohort": "routine",
+      "weight": 0.1,
+      "guarantees": ["G2", "G6"],
+      "fixture": {
+        "kind": "task_workspace_profile",
+        "selector": "TaskWorkspaceTests.test_duplicate_finish_validates_once_but_different_tasks_finish_concurrently",
+        "review_quality_evidence": false,
+        "environment": "warm"
+      },
+      "repeats": [
+        {
+          "repeat": 1,
+          "outcome": "passed",
+          "active_wall_ms": 16904.626,
+          "whole_delivery_ms": 16904.626,
+          "queue_wait_ms": 0,
+          "command_count": 36,
+          "model_handoffs": 0,
+          "evidence_hits": 2,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 10,
+          "state_count": 6,
+          "authority_writer_count": 2,
+          "complete_input_ids": [
+            "6bcab28da61f52183933619c39b41576db6310108822b70a499381faaac0b68c",
+            "e2fb2b7d257dfc96ef5b9de15881893989fda760d5fd8d1b76b4a19e51153dcc"
+          ]
+        },
+        {
+          "repeat": 2,
+          "outcome": "passed",
+          "active_wall_ms": 16763.624,
+          "whole_delivery_ms": 16763.624,
+          "queue_wait_ms": 0,
+          "command_count": 36,
+          "model_handoffs": 0,
+          "evidence_hits": 2,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 10,
+          "state_count": 6,
+          "authority_writer_count": 2,
+          "complete_input_ids": [
+            "bd5e46c515ceb36e1b4aef33ba712c9ce82cd702033f4d91c979411987239f6e",
+            "55a6e1efce4ab03898540bb4779c6dceabe86c76c358486b900ade3557f8ec54"
+          ]
+        },
+        {
+          "repeat": 3,
+          "outcome": "passed",
+          "active_wall_ms": 16809.066,
+          "whole_delivery_ms": 16809.066,
+          "queue_wait_ms": 0,
+          "command_count": 36,
+          "model_handoffs": 0,
+          "evidence_hits": 2,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 10,
+          "state_count": 6,
+          "authority_writer_count": 2,
+          "complete_input_ids": [
+            "96db387951f4fd5dd268be03d084ad1147b3d6ed4bc575a3a815742e5a7879f8",
+            "b2dc3d82c71a0a80ef493f66a96352b71cbef881b8e39ccab62b61e5d28776e6"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ten",
+      "cohort": "routine",
+      "weight": 0.1,
+      "guarantees": ["G2", "G6"],
+      "fixture": {
+        "kind": "deterministic_ten_input_projection",
+        "selector": "TaskWorkspaceTests.test_duplicate_finish_validates_once_but_different_tasks_finish_concurrently x5; wall=max concurrent groups, never sum",
+        "review_quality_evidence": false,
+        "environment": "warm"
+      },
+      "repeats": [
+        {
+          "repeat": 1,
+          "outcome": "passed",
+          "active_wall_ms": 16904.626,
+          "whole_delivery_ms": 16904.626,
+          "queue_wait_ms": 0,
+          "command_count": 180,
+          "model_handoffs": 0,
+          "evidence_hits": 2,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 50,
+          "state_count": 30,
+          "authority_writer_count": 2,
+          "complete_input_ids": [
+            "8214d2a03daff07ede252c12dcfed9da007679b87eb27343a91ef1bf29c22e78",
+            "0d35923ff18ec6882190c007fdc40463ecde03738111064cbce962efaea64b95",
+            "e5c2325253c1de9391693cace1c9b048b61894632193881f3a67a61fb5e6c215",
+            "16549961fceee8b728c767ab42e3c226cf6a6969b9967b688b98a5e1c4b1cff4",
+            "11a3840e6b7ad63b5d8eaeb2b96c4a281a5627e22378db619baca06ba9d5495d",
+            "12298679f3d10372a8e09e5467e9f663775a7905e3d9f9c9d828f74cb21847c7",
+            "45bb81c468eb01e1bd3e7eab98b2f9702f5e63dcc2ac7955322bf04eabacc3be",
+            "0e8b939a7e622e899d11ac6698dc65f0fbcfe808c1e56bd0387a892db73c5377",
+            "386bea83f73234e34c9e10f76fa12daec3fe8dbfe7eea089122d17632e508304",
+            "70923cc932b0122cf152c60e00f48bc19b7ef13b9b488b089202d648e6630cf0"
+          ]
+        },
+        {
+          "repeat": 2,
+          "outcome": "passed",
+          "active_wall_ms": 16763.624,
+          "whole_delivery_ms": 16763.624,
+          "queue_wait_ms": 0,
+          "command_count": 180,
+          "model_handoffs": 0,
+          "evidence_hits": 2,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 50,
+          "state_count": 30,
+          "authority_writer_count": 2,
+          "complete_input_ids": [
+            "738bf358f03a502df5a77a5523c137d7d3925deafdaa425e58ad3004cf451412",
+            "8c360c16ef04d16f2a19cad1a7f4c9c49f676d7f35c39cc0fc7a1b0ba17be76c",
+            "4d9a630bcc4e1110eb596bbc55e098776b39d9df0e17cb90808d9a02b3bb2d67",
+            "a74ce53954cd64af3dfef1f080967e29b99edf5bacc034d41007e2ebec4e618a",
+            "df8beabe9367e7b33bd0d218b8c0963ac702439be64a16375b0585b71819faa2",
+            "858eeac59247c202adb44a44e28a5848c30c922c448fa0063397f3c119cf64bc",
+            "6817c6bcefad13bf62bfa4eeb32fc1fc603fc4165317f131c8055c84341fa9a4",
+            "0e36926c6ff9ecf3738c21ab12c01544f78ef26ccdfd0f9f6df075380be07de9",
+            "2b52f9abe17474610d72b9178257ecb8d26fde10f874fb9fb75ea313e4cbe601",
+            "e2ba65d74ab2014ed2fed827faed53ac1c1597abf59ff274e61df8911964451b"
+          ]
+        },
+        {
+          "repeat": 3,
+          "outcome": "passed",
+          "active_wall_ms": 16809.066,
+          "whole_delivery_ms": 16809.066,
+          "queue_wait_ms": 0,
+          "command_count": 180,
+          "model_handoffs": 0,
+          "evidence_hits": 2,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 50,
+          "state_count": 30,
+          "authority_writer_count": 2,
+          "complete_input_ids": [
+            "ea0400ee0227c20f419a400dddd133317e888ce8609039a9f751854606855665",
+            "853a4cce66a85422083ee90df5210c91a8d6aff70d573c3c3c260918bd5e7215",
+            "a79f996c026b086ee3241e0f1d57f9317794545366f67f9565b20d3ba966ea40",
+            "4eb442d45c6de875aee521595bc1becdcd4732c73aa8995921aebca46bd81194",
+            "8dc2664ea266246b4a82e0e1760992e2b0bc33e9d91b49b561ebd265889e62f8",
+            "5dded8c3ac08130f25e419fb23deed74f36bd8ee8ebf26ff682ecaafb732d83e",
+            "abb6604aa5b4d3a60ae13b27a442eefc00606442f7961ba72d2e3de5a6d06928",
+            "d684d6dab7a0ff6460fc797aa0b716d5ad782d53cb5c7fb072fe0c124ac0604b",
+            "b74d759ca2bb9ea286bb74007054a8402b9356497df1117f01fd4aec8ac5865a",
+            "f5c8c1c26df8af180ce7ac619437a32f9e3bbbbaf9e50dd33ab98b63f7b4a3a5"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "multi",
+      "cohort": "routine",
+      "weight": 0.15,
+      "guarantees": ["G1", "G5", "G7"],
+      "fixture": {
+        "kind": "task_workspace_profile",
+        "selector": "TaskWorkspaceTests.test_umbrella_child_checkpoint_records_sequential_progress_and_status_projection",
+        "review_quality_evidence": false,
+        "environment": "warm"
+      },
+      "repeats": [
+        {
+          "repeat": 1,
+          "outcome": "passed",
+          "active_wall_ms": 4269.529,
+          "whole_delivery_ms": 4269.529,
+          "queue_wait_ms": 0,
+          "command_count": 267,
+          "model_handoffs": 0,
+          "evidence_hits": 2,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 18,
+          "state_count": 8,
+          "authority_writer_count": 2,
+          "complete_input_ids": ["08cd8bf086547f619bca2db7f07a8db6968dc2df7473ff0a08a06aab503e8df5"]
+        },
+        {
+          "repeat": 2,
+          "outcome": "passed",
+          "active_wall_ms": 4168.608,
+          "whole_delivery_ms": 4168.608,
+          "queue_wait_ms": 0,
+          "command_count": 267,
+          "model_handoffs": 0,
+          "evidence_hits": 2,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 18,
+          "state_count": 8,
+          "authority_writer_count": 2,
+          "complete_input_ids": ["799a67c8555d521755b784aa0ce2e6cf03e3ce2e164339ea18bf6f1684830dbd"]
+        },
+        {
+          "repeat": 3,
+          "outcome": "passed",
+          "active_wall_ms": 4240.659,
+          "whole_delivery_ms": 4240.659,
+          "queue_wait_ms": 0,
+          "command_count": 267,
+          "model_handoffs": 0,
+          "evidence_hits": 2,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 0,
+          "bytes_preserved": 0,
+          "coordination_interventions": 18,
+          "state_count": 8,
+          "authority_writer_count": 2,
+          "complete_input_ids": ["f26e74e29d8270c0a313e58513c60913f59a8b793b3d3d4fbf5dff98e2f91129"]
+        }
+      ]
+    },
+    {
+      "id": "conflict",
+      "cohort": "safety",
+      "weight": 0,
+      "guarantees": ["G2", "G3"],
+      "fixture": {
+        "kind": "python_unittest",
+        "selector": "MergeQueueTests.test_real_a_b_text_conflict_is_preserved_then_resolved_without_feature_recreation",
+        "review_quality_evidence": false,
+        "environment": "warm"
+      },
+      "repeats": [
+        {
+          "repeat": 1,
+          "outcome": "passed",
+          "active_wall_ms": 10700,
+          "whole_delivery_ms": 10700,
+          "queue_wait_ms": 0,
+          "command_count": 1,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 2,
+          "bytes_preserved": 19,
+          "coordination_interventions": 8,
+          "state_count": 4,
+          "authority_writer_count": 2,
+          "complete_input_ids": ["edcd8b1173e1efc595dcbdba21182dfb7a3ac51ca73519360315eb0f23b3a309"]
+        },
+        {
+          "repeat": 2,
+          "outcome": "passed",
+          "active_wall_ms": 11730,
+          "whole_delivery_ms": 11730,
+          "queue_wait_ms": 0,
+          "command_count": 1,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 2,
+          "bytes_preserved": 19,
+          "coordination_interventions": 8,
+          "state_count": 4,
+          "authority_writer_count": 2,
+          "complete_input_ids": ["3287d390ce42fd5ada3695630ca0e0138c63db3d55d9fa6ee3e9189c60740176"]
+        },
+        {
+          "repeat": 3,
+          "outcome": "passed",
+          "active_wall_ms": 11910,
+          "whole_delivery_ms": 11910,
+          "queue_wait_ms": 0,
+          "command_count": 1,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 2,
+          "bytes_preserved": 19,
+          "coordination_interventions": 8,
+          "state_count": 4,
+          "authority_writer_count": 2,
+          "complete_input_ids": ["1db51f7edd032a110a536d651f857e2861383e85efb05a16b3b7e4ecad6f5266"]
+        }
+      ]
+    },
+    {
+      "id": "failed",
+      "cohort": "safety",
+      "weight": 0,
+      "guarantees": ["G4", "G5"],
+      "fixture": {
+        "kind": "python_unittest",
+        "selector": "MergeQueueTests.test_failed_validation_and_target_movement_do_zero_queue_cas",
+        "review_quality_evidence": false,
+        "environment": "warm"
+      },
+      "repeats": [
+        {
+          "repeat": 1,
+          "outcome": "known_failure",
+          "active_wall_ms": 9700,
+          "whole_delivery_ms": 9700,
+          "queue_wait_ms": 0,
+          "command_count": 1,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 1,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 1,
+          "bytes_preserved": 0,
+          "coordination_interventions": 5,
+          "state_count": 3,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["18416024b551eedbee12166d0d892b056a93917539a5fc340215d7e4dcee7804"]
+        },
+        {
+          "repeat": 2,
+          "outcome": "known_failure",
+          "active_wall_ms": 9400,
+          "whole_delivery_ms": 9400,
+          "queue_wait_ms": 0,
+          "command_count": 1,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 1,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 1,
+          "bytes_preserved": 0,
+          "coordination_interventions": 5,
+          "state_count": 3,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["a03421ea3a255150968ff1fec21fcda910013e67ab7c3a08b07a97d36103d724"]
+        },
+        {
+          "repeat": 3,
+          "outcome": "known_failure",
+          "active_wall_ms": 9960,
+          "whole_delivery_ms": 9960,
+          "queue_wait_ms": 0,
+          "command_count": 1,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 1,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 1,
+          "bytes_preserved": 0,
+          "coordination_interventions": 5,
+          "state_count": 3,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["52cdb9f108537e0038e8af0fd8ce75ac5e16eaa4136973d72d0c8ae18e6fd887"]
+        }
+      ]
+    },
+    {
+      "id": "stale",
+      "cohort": "safety",
+      "weight": 0,
+      "guarantees": ["G4", "G8"],
+      "fixture": {
+        "kind": "task_workspace_profile",
+        "selector": "TaskWorkspaceTests.test_stale_runtime_refuses_before_creating_branch_worktree_or_state",
+        "review_quality_evidence": false,
+        "environment": "warm"
+      },
+      "repeats": [
+        {
+          "repeat": 1,
+          "outcome": "known_failure",
+          "active_wall_ms": 913.932,
+          "whole_delivery_ms": 913.932,
+          "queue_wait_ms": 0,
+          "command_count": 25,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 1,
+          "bytes_preserved": 0,
+          "coordination_interventions": 2,
+          "state_count": 2,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["d6436faf23d1cda08668b8a689df785c0a586f0e5d0645d0d1430319643e426a"]
+        },
+        {
+          "repeat": 2,
+          "outcome": "known_failure",
+          "active_wall_ms": 819.596,
+          "whole_delivery_ms": 819.596,
+          "queue_wait_ms": 0,
+          "command_count": 25,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 1,
+          "bytes_preserved": 0,
+          "coordination_interventions": 2,
+          "state_count": 2,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["167c93accdbd28fb748b4dfdc70e28d92958138c7e58cea1e5c1c549c1aa602f"]
+        },
+        {
+          "repeat": 3,
+          "outcome": "known_failure",
+          "active_wall_ms": 809.088,
+          "whole_delivery_ms": 809.088,
+          "queue_wait_ms": 0,
+          "command_count": 25,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 1,
+          "bytes_preserved": 0,
+          "coordination_interventions": 2,
+          "state_count": 2,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["730c6737273a77c73ca28fa2a4c77aaa81bf7f30bd58002301ddd08da08fcf26"]
+        }
+      ]
+    },
+    {
+      "id": "crash-validation",
+      "cohort": "safety",
+      "weight": 0,
+      "guarantees": ["G4", "G5"],
+      "fixture": {
+        "kind": "task_workspace_profile",
+        "selector": "TaskFencingLeaseTests.test_crash_between_receipt_and_state_is_idempotent",
+        "review_quality_evidence": false,
+        "environment": "warm"
+      },
+      "repeats": [
+        {
+          "repeat": 1,
+          "outcome": "passed",
+          "active_wall_ms": 3842.193,
+          "whole_delivery_ms": 3842.193,
+          "queue_wait_ms": 0,
+          "command_count": 24,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 1,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 1,
+          "bytes_preserved": 0,
+          "coordination_interventions": 3,
+          "state_count": 3,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["6b73868a3b2a15bece722228f364b962d447092b5856af8a8b907988919c920a"]
+        },
+        {
+          "repeat": 2,
+          "outcome": "passed",
+          "active_wall_ms": 3949.435,
+          "whole_delivery_ms": 3949.435,
+          "queue_wait_ms": 0,
+          "command_count": 24,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 1,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 1,
+          "bytes_preserved": 0,
+          "coordination_interventions": 3,
+          "state_count": 3,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["6bd83ece8251681d6484967c210d64c0ba2dedfe7a7c9f9caa250c93b4b3dd6c"]
+        },
+        {
+          "repeat": 3,
+          "outcome": "passed",
+          "active_wall_ms": 4056.173,
+          "whole_delivery_ms": 4056.173,
+          "queue_wait_ms": 0,
+          "command_count": 24,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 1,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 1,
+          "bytes_preserved": 0,
+          "coordination_interventions": 3,
+          "state_count": 3,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["7ea347e38cb0719c96bb93b29af24b76c7251dfc9a9b32578402f813a7cc8418"]
+        }
+      ]
+    },
+    {
+      "id": "crash-cas",
+      "cohort": "safety",
+      "weight": 0,
+      "guarantees": ["G3", "G5"],
+      "fixture": {
+        "kind": "python_unittest",
+        "selector": "MergeQueueTests.test_durable_merging_window_recovers_landed_cas_without_revalidation",
+        "review_quality_evidence": false,
+        "environment": "warm"
+      },
+      "repeats": [
+        {
+          "repeat": 1,
+          "outcome": "passed",
+          "active_wall_ms": 4560,
+          "whole_delivery_ms": 4560,
+          "queue_wait_ms": 0,
+          "command_count": 1,
+          "model_handoffs": 0,
+          "evidence_hits": 2,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 1,
+          "bytes_preserved": 0,
+          "coordination_interventions": 4,
+          "state_count": 4,
+          "authority_writer_count": 2,
+          "complete_input_ids": ["5fd84dd3caa1c1cdaf8c899224706f2a2c482bb4d9c5ac61679bfaa1b5e828b1"]
+        },
+        {
+          "repeat": 2,
+          "outcome": "passed",
+          "active_wall_ms": 4510,
+          "whole_delivery_ms": 4510,
+          "queue_wait_ms": 0,
+          "command_count": 1,
+          "model_handoffs": 0,
+          "evidence_hits": 2,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 1,
+          "bytes_preserved": 0,
+          "coordination_interventions": 4,
+          "state_count": 4,
+          "authority_writer_count": 2,
+          "complete_input_ids": ["78e459b9884dd4b364cd9a099ed9a9b65be5d0ce2fa39658fd42b90d006e2f2d"]
+        },
+        {
+          "repeat": 3,
+          "outcome": "passed",
+          "active_wall_ms": 4490,
+          "whole_delivery_ms": 4490,
+          "queue_wait_ms": 0,
+          "command_count": 1,
+          "model_handoffs": 0,
+          "evidence_hits": 2,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 1,
+          "bytes_preserved": 0,
+          "coordination_interventions": 4,
+          "state_count": 4,
+          "authority_writer_count": 2,
+          "complete_input_ids": ["40e4cb87e7e0ea278018298de70b43f2f680a0d5015914f735a4bab0b01c9261"]
+        }
+      ]
+    },
+    {
+      "id": "crash-finalization",
+      "cohort": "safety",
+      "weight": 0,
+      "guarantees": ["G3", "G5"],
+      "fixture": {
+        "kind": "task_workspace_profile",
+        "selector": "TaskWorkspaceTests.test_crash_after_board_mutation_duplicate_recovery_is_idempotent",
+        "review_quality_evidence": false,
+        "environment": "warm"
+      },
+      "repeats": [
+        {
+          "repeat": 1,
+          "outcome": "passed",
+          "active_wall_ms": 2555.308,
+          "whole_delivery_ms": 2555.308,
+          "queue_wait_ms": 0,
+          "command_count": 67,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 1,
+          "bytes_preserved": 0,
+          "coordination_interventions": 3,
+          "state_count": 4,
+          "authority_writer_count": 2,
+          "complete_input_ids": ["0931cf256fe027cb48a73c3cc0eda1d21feb1852bb7e1732d0fb7149f6942e3e"]
+        },
+        {
+          "repeat": 2,
+          "outcome": "passed",
+          "active_wall_ms": 2632.511,
+          "whole_delivery_ms": 2632.511,
+          "queue_wait_ms": 0,
+          "command_count": 67,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 1,
+          "bytes_preserved": 0,
+          "coordination_interventions": 3,
+          "state_count": 4,
+          "authority_writer_count": 2,
+          "complete_input_ids": ["b71c3a6e299f58a094c9495ac0b7072c8351664a0917c0d95e18b239ca79aaaf"]
+        },
+        {
+          "repeat": 3,
+          "outcome": "passed",
+          "active_wall_ms": 2667.325,
+          "whole_delivery_ms": 2667.325,
+          "queue_wait_ms": 0,
+          "command_count": 67,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 1,
+          "bytes_preserved": 0,
+          "coordination_interventions": 3,
+          "state_count": 4,
+          "authority_writer_count": 2,
+          "complete_input_ids": ["dcbd83f04d8d3a0f806f86627174a88834f72c3f169da448280189d03c99f522"]
+        }
+      ]
+    },
+    {
+      "id": "dirty",
+      "cohort": "safety",
+      "weight": 0,
+      "guarantees": ["G2", "G8"],
+      "fixture": {
+        "kind": "task_workspace_profile",
+        "selector": "TaskFencingLeaseTests.test_dirty_worktree_successor_preserves_recovery_packet",
+        "review_quality_evidence": false,
+        "environment": "warm"
+      },
+      "repeats": [
+        {
+          "repeat": 1,
+          "outcome": "passed",
+          "active_wall_ms": 3748.909,
+          "whole_delivery_ms": 3748.909,
+          "queue_wait_ms": 0,
+          "command_count": 22,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 1,
+          "bytes_preserved": 19,
+          "coordination_interventions": 3,
+          "state_count": 2,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["dcfbebc6ab29987fa1b29f8db0e6b81444c1a9107a1656814538442a1f60edd9"]
+        },
+        {
+          "repeat": 2,
+          "outcome": "passed",
+          "active_wall_ms": 3977.938,
+          "whole_delivery_ms": 3977.938,
+          "queue_wait_ms": 0,
+          "command_count": 22,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 1,
+          "bytes_preserved": 19,
+          "coordination_interventions": 3,
+          "state_count": 2,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["ebf3f55e3522a39862839dae91403cb75738953db1f261ee02e80340fd414499"]
+        },
+        {
+          "repeat": 3,
+          "outcome": "passed",
+          "active_wall_ms": 3626.237,
+          "whole_delivery_ms": 3626.237,
+          "queue_wait_ms": 0,
+          "command_count": 22,
+          "model_handoffs": 0,
+          "evidence_hits": 0,
+          "evidence_misses": 0,
+          "duplicate_dispatches": 0,
+          "recovery_actions": 1,
+          "bytes_preserved": 19,
+          "coordination_interventions": 3,
+          "state_count": 2,
+          "authority_writer_count": 1,
+          "complete_input_ids": ["75211a2b2248542e213989ea618d32ee0a3f52ebe2b3c14a704fec6b669b227a"]
+        }
+      ]
+    }
+  ],
+  "evidence_reuse_matrix": {
+    "path": ".juno_task/scripts/tests/fixtures/lifecycle-evidence-reuse-matrix.v1.json",
+    "sha256": "abe6098fd59f3fd9bd04a1b19ef840e6b5cc173fb40ae31e4b189a173ebe3b66",
+    "expected_hits": 2,
+    "expected_false_reuse": 0
+  },
+  "public_consumers": [
+    {
+      "surface": "yy task",
+      "source": "juno-code/src/cli/commands/task.ts",
+      "operations": [
+        "start",
+        "status",
+        "preflight",
+        "finish",
+        "run",
+        "lease-handoff",
+        "lease-successor"
+      ]
+    },
+    {
+      "surface": "yy merge",
+      "source": "juno-code/src/cli/commands/merge.ts",
+      "operations": ["status", "arbiter status", "arbiter run", "drive", "next", "resolve"]
+    },
+    {
+      "surface": "installed wrapper",
+      "source": "juno-code/src/bin/yylo.sh",
+      "operations": ["task routing", "merge routing"]
+    },
+    {
+      "surface": "managed templates",
+      "source": "juno-code/src/templates/scripts",
+      "operations": ["task workspace", "merge queue", "risk policy"]
+    }
+  ],
+  "legacy_inventory": {
+    "attempt_states": [
+      "QUEUED",
+      "MERGING",
+      "CONFLICT",
+      "CONFLICT_RESOLVED",
+      "AWAITING_RISK",
+      "REVIEWING",
+      "RISK_EVIDENCE_READY",
+      "REVIEW_FINDINGS",
+      "REVIEW_FINDINGS_EXHAUSTED",
+      "REOPENING",
+      "REQUEUING_STALE",
+      "MERGED",
+      "WITHDRAWN"
+    ],
+    "umbrella_requirements": [
+      "ordered child scope union",
+      "tracking-only child refusal",
+      "checkpoint order/evidence",
+      "single parent owner",
+      "atomic truthful projection"
+    ],
+    "migration_rule": "unknown state fails safely; originals and historical receipts remain immutable"
+  },
+  "k6ozfw_removal_candidates": {
+    "reference_commit": "de9e3a8caa9d439654fe25dd06ecd5aae3af0bb4",
+    "symbols": [
+      "preimplementation_contract",
+      "active_preimplementation_contract",
+      "run_handoff",
+      "HANDOFF_SCHEMA",
+      "HANDOFF_ROOT",
+      "_git_blob",
+      "acceptance_contract prompt field"
+    ],
+    "supported_public_producers": [],
+    "raw_or_test_only_evidence": [
+      "task_workspace.py raw parser operations contract/handoff",
+      "task workspace contract/handoff tests"
+    ],
+    "withdrawn_ixf60t_replacement": "integrated task-workspace fixture runner and immutable fixture-base v1 are present at the bound source digests above"
+  },
+  "unavailable_measurements": [
+    {
+      "metric": "paid model tokens and billed cost",
+      "reason": "no paid/live model run authorized; fixture reviewer counts are not substituted"
+    },
+    {
+      "metric": "real reviewer defect recall and production escape rate",
+      "reason": "deterministic seeded reviewers cannot measure semantic review quality"
+    },
+    {
+      "metric": "reliable p90/p95/p99 latency",
+      "reason": "three repeats support median/range only"
+    },
+    {
+      "metric": "live whole-delivery elapsed and queue wait",
+      "reason": "no live queue driving authorized; zero fixture queue wait is not a production queue-wait measurement"
+    }
+  ],
+  "authority_writer_inventory": [
+    {
+      "id": "task-attempt-producer",
+      "boundary": "fenced task worktree transition writer"
+    },
+    {
+      "id": "target-arbiter",
+      "boundary": "fenced target composition/CAS writer"
+    },
+    {
+      "id": "ledger-projection",
+      "boundary": "revision-checked task truth projection; counted only where fixture exercises it"
+    }
+  ],
+  "manifest_sha256": "ec8b3c499966fcd35d0dae6a9b564e5c60e7cd900a83d938915aebd3a5e7c827"
+}
