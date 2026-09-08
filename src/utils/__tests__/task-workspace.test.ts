@@ -64,7 +64,7 @@ describe('Bolt task workspace managed runtime', () => {
     }
   });
 
-  it('admits independently versioned product submodules as selectable exact roots', () => {
+  it('stages first creation of yylo-skills as an exact allowed root', () => {
     for (const policyPath of [
       resolve(repository, '.juno_task/config/task-workspace.json'),
       resolve(repository, 'juno-code/src/templates/config/task-workspace.json'),
@@ -73,8 +73,8 @@ describe('Bolt task workspace managed runtime', () => {
         allowed_paths: string[];
         selectable_paths: string[];
       };
-      expect(policy.selectable_paths).toEqual(['frontend', 'juno_kanban', 'yylo-skills']);
-      expect(policy.allowed_paths).not.toContain('yylo-skills');
+      expect(policy.allowed_paths).toContain('yylo-skills');
+      expect(policy.selectable_paths).toEqual(['frontend', 'juno_kanban']);
     }
 
     const runtime = readFileSync(
