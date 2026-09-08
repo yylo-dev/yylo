@@ -4285,12 +4285,21 @@ raise SystemExit(2)
         self.assertEqual(checked["outcome"], "preflight_passed")
         self.assertEqual(closure["tip_sha"], tip)
         self.assertEqual(closure["changed_paths"], ["src/feature.txt"])
+        submission = closure["submission"]
+        submission_body = {key: value for key, value in submission.items()
+                           if key != "submission_sha256"}
+        self.assertEqual(submission["submission_sha256"],
+                         task_runtime.stable_sha256(submission_body))
+        self.assertTrue(Path(checked["submission_receipt"]["path"]).is_file())
         body = {key: value for key, value in closure.items() if key != "closure_sha256"}
         self.assertEqual(closure["closure_sha256"], task_runtime.stable_sha256(body))
         self.assertEqual(task_runtime.read_state(self.controller)["tasks"]["X"]["state"],
                          "WORKING")
         queued = self.payload("finish", "X")
         queued_closure = queued["review_ready_closure"]
+        self.assertEqual(checked["submission_receipt"], queued["submission_receipt"])
+        self.assertEqual(submission["submission_sha256"],
+                         queued_closure["submission"]["submission_sha256"])
         for key, value in closure.items():
             if key != "closure_sha256":
                 self.assertEqual(queued_closure[key], value)
@@ -4301,6 +4310,18 @@ raise SystemExit(2)
                        if key != "closure_sha256"}
         self.assertEqual(queued_closure["closure_sha256"],
                          task_runtime.stable_sha256(queued_body))
+
+    def test_unrelated_target_advance_reuses_the_same_semantic_submission(self) -> None:
+        self.payload("start", "X")
+        self.commit_task("X")
+        checked = self.payload("preflight", "X")
+        self.advance_target()
+        queued = self.payload("finish", "X")
+        self.assertEqual(
+            checked["review_ready_closure"]["submission"]["submission_sha256"],
+            queued["review_ready_closure"]["submission"]["submission_sha256"],
+        )
+        self.assertEqual(checked["submission_receipt"], queued["submission_receipt"])
 
     def test_finish_refuses_failed_focused_validation_without_state_advance(self) -> None:
         self.payload("start", "X")
