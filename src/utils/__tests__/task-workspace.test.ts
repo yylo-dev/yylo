@@ -59,6 +59,8 @@ describe('Bolt task workspace managed runtime', () => {
       );
       expect(installer?.argv).toContain('src/utils/__tests__/script-installer.test.ts');
       expect(integration?.argv).toContain('src/utils/__tests__/integration-workspace.test.ts');
+      expect(installer?.argv).toContain('--no-cache');
+      expect(integration?.argv).toContain('--no-cache');
     }
   });
 
