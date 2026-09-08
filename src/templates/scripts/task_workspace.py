@@ -2296,10 +2296,10 @@ def record_control_audit(controller: Path, surface: str, operation: str,
                          task_id: Optional[str] = None) -> dict[str, str]:
     routing = routing_identity(controller)
     forwarded_policy = routing.get("policy_operation")
-    expected_policy = ("kanban" if operation in {"status", "admission", "preflight", "recovery-plan", "contract", "handoff", "evidence-status", "doctor", "lease-status"}
+    expected_policy = ("kanban" if operation in {"status", "admission", "preflight", "recovery-plan", "evidence-status", "doctor", "lease-status"}
                        else "orchestration")
     if surface == "task" and operation not in {
-            "start", "run", "recover-predispatch", "recover-wall-budget", "status", "admission", "hydrate", "preflight", "finish", "contract", "handoff",
+            "start", "run", "recover-predispatch", "recover-wall-budget", "status", "admission", "hydrate", "preflight", "finish",
             "checkpoint", "child-checkpoint", "evidence-run", "evidence-status", "evidence-await",
             "recovery-plan", "recovery-authorize", "recovery-apply", "sync", "doctor",
             "lease-status", "lease-heartbeat", "lease-handoff", "lease-successor",
@@ -3890,209 +3890,6 @@ def review_ready_closure(controller: Path, config: dict[str, Any], record: dict[
     return repository, worktree, head, changed, closure
 
 
-PREIMPLEMENTATION_CONTRACT_SCHEMA = "juno_preimplementation_acceptance.v1"
-CONTRACTS_ROOT = ".juno_task/runtime/contracts"
-
-
-def _contract_sections(body: str) -> dict[str, list[str]]:
-    """Split a canonical task body into bounded section bullet/line lists."""
-    sections: dict[str, list[str]] = {}
-    current: Optional[str] = None
-    for line in body.splitlines():
-        header = re.match(r"(?m)^##\s+(.{1,120})\s*$", line)
-        if header:
-            current = header.group(1).strip().lower()[:64]
-            sections.setdefault(current, [])
-            continue
-        if current is None:
-            continue
-        stripped = line.strip()
-        if stripped and len(stripped) <= 512 and not stripped.startswith("```"):
-            sections[current].append(stripped)
-    return {name: lines[:64] for name, lines in sections.items() if lines}
-
-
-def _parity_pairs(changed_paths: list[str]) -> list[dict[str, str]]:
-    """Runtime/template parity surfaces implied by changed paths."""
-    pairs: list[dict[str, str]] = []
-    runtime_prefix = ".juno_task/scripts/"
-    template_prefix = "juno-code/src/templates/scripts/"
-    for path in changed_paths:
-        if path.startswith(runtime_prefix):
-            twin = template_prefix + path[len(runtime_prefix):]
-            pairs.append({"runtime": path, "template": twin})
-        elif path.startswith(template_prefix):
-            twin = runtime_prefix + path[len(template_prefix):]
-            pairs.append({"runtime": twin, "template": path})
-    seen: set[tuple[str, str]] = set()
-    unique: list[dict[str, str]] = []
-    for pair in pairs:
-        key = (pair["runtime"], pair["template"])
-        if key not in seen:
-            seen.add(key)
-            unique.append(pair)
-    return unique[:16]
-
-
-def _likely_test_files(changed_paths: list[str], worktree: Optional[Path]) -> list[str]:
-    """Existing sibling test files for changed sources (read-only discovery)."""
-    likely: list[str] = []
-    for path in changed_paths:
-        if not path.endswith((".ts", ".tsx", ".py")) or ".test." in path:
-            continue
-        stem, suffix = path.rsplit(".", 1)
-        candidate = f"{stem}.test.{suffix}"
-        if worktree is not None and (worktree / candidate).is_file():
-            likely.append(candidate)
-    return likely[:16]
-
-
-def preimplementation_contract(controller: Path, task_id: str) -> dict[str, Any]:
-    """Build one versioned read-only acceptance contract for a task.
-
-    The contract is deterministic and read-only: it freezes the requirements
-    digest, base/target identities, validation surface, invariant parity pairs,
-    likely files, focused tests, and the final reviewer checklist derived from
-    the task's own acceptance sections. Implementation handoff is refused
-    (status blocked_handoff) while material owner decisions remain open. A new
-    contract supersedes its predecessor by reference and never rewrites it.
-    """
-    if not TASK_RE.fullmatch(task_id):
-        raise TaskWorkspaceError("unsafe task id")
-    manifest_path, manifest_bytes = task_manifest(controller, task_id)
-    config = load_config(controller)
-    repository = product_repository(controller, config)
-    runtime_candidates = [controller / ".juno_task/scripts/task_workspace.py",
-                           repository / ".juno_task/scripts/task_workspace.py"]
-    runtime_sha: Optional[str] = None
-    for candidate in runtime_candidates:
-        try:
-            runtime_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
-            break
-        except OSError:
-            continue
-    try:
-        manifest = json.loads(manifest_bytes[: manifest_bytes.find(b"---", 4)] or b"{}")
-    except (UnicodeError, json.JSONDecodeError):
-        manifest = {}
-    body_match = re.search(rb"<!-- juno:body:start -->\n(.*?)<!-- juno:body:end -->",
-                           manifest_bytes, re.S)
-    body = body_match.group(1).decode("utf-8", errors="replace") if body_match else ""
-    sections = _contract_sections(body)
-    requirements_sha = hashlib.sha256(manifest_bytes).hexdigest()
-
-    record: dict[str, Any] = {}
-    try:
-        record = read_state(controller)["tasks"].get(task_id) or {}
-    except TaskWorkspaceError:
-        record = {}
-    worktree_value = record.get("worktree")
-    worktree = Path(worktree_value) if isinstance(worktree_value, str) and worktree_value else None
-    changed = sorted(set(record.get("changed_paths") or []))[:64]
-    target_ref = config.get("target_ref") or record.get("target_ref")
-    base_sha = record.get("base_sha")
-    source_identity: dict[str, Optional[str]] = {"head": None, "tree": None}
-    if worktree is not None and worktree.is_dir():
-        head = git(worktree, "rev-parse", "HEAD", check=False)
-        tree = git(worktree, "rev-parse", "HEAD^{tree}", check=False)
-        source_identity = {"head": head or None, "tree": tree or None}
-
-    profiles: list[dict[str, Any]] = []
-    changed_roots = {path.split("/")[0] for path in changed if path}
-    for profile in config.get("validation_profiles") or []:
-        if not isinstance(profile, dict):
-            continue
-        roots = set(profile.get("path_roots") or [])
-        if not changed or (roots & changed_roots):
-            profiles.append({
-                "id": profile.get("id"),
-                "path_roots": sorted(roots),
-                "commands": [row.get("id") for row in profile.get("commands") or []
-                             if isinstance(row, dict)],
-            })
-
-    owner_decisions: list[str] = [
-        line for line in sections.get("unresolved decisions", [])
-        if re.search(r"\b(must|should|needs)?\s*(owner|decision|authorize)\b", line)
-    ][:8]
-    acceptance = (sections.get("acceptance") or sections.get("acceptance criteria")
-                  or sections.get("required behavior") or [])
-    reviewer_checklist = [f"Acceptance: {line}" for line in acceptance[:24]]
-    for pair in _parity_pairs(changed):
-        reviewer_checklist.append(
-            f"Parity: {pair['runtime']} is byte-identical to {pair['template']}")
-    reviewer_checklist = reviewer_checklist[:32]
-
-    contracts_dir = controller / CONTRACTS_ROOT / task_id
-    contracts_dir.mkdir(parents=True, exist_ok=True)
-    predecessors = sorted(contracts_dir.glob("v*.json"))
-    predecessor: Optional[dict[str, str]] = None
-    if predecessors:
-        latest = predecessors[-1]
-        predecessor = {"path": str(latest),
-                       "sha256": hashlib.sha256(latest.read_bytes()).hexdigest()}
-
-    contract = {
-        "schema_version": PREIMPLEMENTATION_CONTRACT_SCHEMA,
-        "task_id": task_id,
-        "status": "blocked_handoff" if owner_decisions else "ready",
-        "version": len(predecessors) + 1,
-        "predecessor": predecessor,
-        "binding": {
-            "task_manifest_path": str(manifest_path),
-            "task_manifest_sha256": requirements_sha,
-            "task_last_modified": manifest.get("last_modified"),
-            "base_sha": base_sha, "target_ref": target_ref,
-            "source": source_identity,
-        },
-        "planner": {"mode": "deterministic-static", "runtime_sha256": runtime_sha,
-                    "package_version": None, "model": None, "session_id": None},
-        "requirements_sections": {name: lines for name, lines in sections.items()},
-        "changed_paths": changed,
-        "parity_pairs": _parity_pairs(changed),
-        "likely_test_files": _likely_test_files(changed, worktree),
-        "validation_profiles": profiles[:8],
-        "owner_decisions": owner_decisions,
-        "implementation_choices": [
-            line for line in sections.get("implementation choices", [])][:16],
-        "reviewer_checklist": reviewer_checklist,
-        "negative_cases": [f"Refuse: {line}" for line in
-                           (sections.get("exclusions") or sections.get("risks and constraints")
-                            or [])][:16],
-    }
-    destination = contracts_dir / f"v{contract['version']}.json"
-    if destination.exists():
-        raise TaskWorkspaceError("contract version already exists")
-    payload = (json.dumps(contract, sort_keys=True, separators=(",", ":"),
-                          ensure_ascii=False) + "\n").encode()
-    with tempfile.NamedTemporaryFile(dir=contracts_dir, prefix=".contract-",
-                                     delete=False) as handle:
-        handle.write(payload); handle.flush(); os.fsync(handle.fileno())
-        temporary = Path(handle.name)
-    os.replace(temporary, destination)
-    return {**contract, "contract_path": str(destination),
-            "contract_sha256": hashlib.sha256(payload).hexdigest()}
-
-
-def active_preimplementation_contract(controller: Path,
-                                      task_id: str) -> Optional[dict[str, Any]]:
-    """Latest non-superseded contract for a task, or None."""
-    contracts_dir = controller / CONTRACTS_ROOT / task_id
-    try:
-        versions = sorted(contracts_dir.glob("v*.json"))
-    except OSError:
-        return None
-    if not versions:
-        return None
-    try:
-        contract = json.loads(versions[-1].read_bytes())
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(contract, dict) or contract.get("task_id") != task_id:
-        return None
-    return contract
-
-
 def _standing_atomic(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -4107,11 +3904,6 @@ def _standing_root(controller: Path, task_id: str) -> Path:
     if not TASK_RE.fullmatch(task_id):
         raise TaskWorkspaceError("unsafe task id")
     return controller / STANDING_ROOT / task_id
-
-
-def _git_blob(repository: Path, head: str, relative: str) -> Optional[str]:
-    value = git(repository, "rev-parse", f"{head}:{relative}", check=False)
-    return value if SHA_RE.fullmatch(value) else None
 
 
 def _command_input_closure(repository: Path, head: str, row: dict[str, Any],
@@ -4740,170 +4532,7 @@ def finish(controller: Path, task_id: str, lease_token: Optional[str] = None) ->
         return _finish_once(controller, task_id, lease_token)
 
 
-HANDOFF_SCHEMA = "juno_run_handoff.v1"
-HANDOFF_ROOT = ".juno_task/runtime/handoff"
-HANDOFF_MAX_BYTES = 8192
-HANDOFF_NEXT_COMMANDS = {
-    "NOT_STARTED": "yy task start {task}",
-    "WORKING": "yy task preflight {task}",
-    KANBAN_SYNC_STATE: KANBAN_SYNC_RECOVERY,
-    "QUEUED": "yy merge next",
-    "AWAITING_RISK": "yy merge review {task}",
-    "REVIEWING": "yy merge review {task}",
-    "REVIEW_FINDINGS": "repair findings in the task worktree, then yy merge reopen {task}",
-    "REVIEW_FINDINGS_EXHAUSTED": "yy merge reconcile plan",
-    "CONFLICT": "yy merge resolve {task}",
-    "CONFLICT_RESOLVED": "yy merge next",
-    "REOPENING": "yy merge status",
-    "REQUEUING_STALE": "yy merge refresh plan {task}",
-    "RISK_EVIDENCE_READY": "yy merge next {task}",
-    "MERGING": "yy merge next",
-    "MERGED": "none: task integrated; archive the Kanban task",
-    "WITHDRAWN": "none: candidate withdrawn; create or bind a continuation task",
-}
-
-
 _handoff_phase = decisions.handoff_phase
-
-
-def run_handoff(controller: Path, task_id: str) -> dict[str, Any]:
-    """Deterministic bounded evidence-backed handoff for the next agent.
-
-    Everything is derived from durable Juno evidence (task record, queue
-    attempt, receipts, runtime generation) - never model memory. Missing
-    values are explicit; conflicting evidence fails closed with the
-    reconciliation command instead of a misleading next step.
-    """
-    if not TASK_RE.fullmatch(task_id):
-        raise TaskWorkspaceError("unsafe task id")
-    config = load_config(controller)
-    require_task(controller, task_id)
-    repository = product_repository(controller, config)
-    current_target = optional_ref_sha(repository, config["target_ref"])
-    generation = runtime_generation(repository, current_target) if current_target else None
-    state = read_state(controller)
-    record = state.get("tasks", {}).get(task_id) or {}
-    task_state = record.get("state") or "NOT_STARTED"
-    attempt = record.get("queue_attempt") if isinstance(record.get("queue_attempt"), dict) else {}
-
-    validation_rows = [
-        {"id": row.get("id"), "exit_code": row.get("exit_code"),
-         "timed_out": bool(row.get("timed_out"))}
-        for row in (record.get("validation") or attempt.get("validation") or [])
-        if isinstance(row, dict)][:12]
-    risk = attempt.get("risk") if isinstance(attempt.get("risk"), dict) else {}
-    progress = risk.get("review_progress") if isinstance(risk, dict) else {}
-    admission = (progress or {}).get("full_suite_admission") \
-        if isinstance(progress, dict) else None
-    receipts = [row.get("receipt_path") for row in
-                ((admission or {}).get("receipts") or [])
-                if isinstance(row, dict) and isinstance(row.get("receipt_path"), str)][:16]
-
-    conflicts: list[str] = []
-    candidate_sha = attempt.get("candidate_sha") or record.get("candidate_sha")
-    if task_state in {"AWAITING_RISK", "REVIEWING", "RISK_EVIDENCE_READY"}:
-        if not candidate_sha:
-            conflicts.append("queue state requires a frozen candidate identity")
-        elif isinstance(admission, dict) and not receipts:
-            conflicts.append("full-suite admission has no bound receipts")
-    if task_state == "MERGED" and not (attempt.get("outcome") == "MERGED"
-                                       or record.get("outcome") == "MERGED"):
-        conflicts.append("merged state lacks its merged attempt outcome")
-
-    next_command = ("yy integration runtime-doctor" if conflicts else
-                    HANDOFF_NEXT_COMMANDS.get(task_state, "yy merge status").format(task=task_id))
-    evidence_reuse = [row.get("command_id") for row in (attempt.get("evidence_reuse") or [])
-                      if isinstance(row, dict)][:12]
-    handoff = {
-        "schema_version": HANDOFF_SCHEMA, "task_id": task_id,
-        "phase": _handoff_phase(task_state), "state": task_state,
-        "conflicts": conflicts, "next_command": next_command,
-        "identity": {
-            "controller_branch": git(controller, "rev-parse", "--abbrev-ref", "HEAD",
-                                      check=False) or None,
-            "controller_head": git(controller, "rev-parse", "HEAD", check=False) or None,
-            "product_repository": str(repository),
-            "target_ref": config["target_ref"],
-            "target_sha": current_target,
-            "runtime_generation_current": bool(generation and generation.get("current")),
-            "runtime_running_sha256": (generation or {}).get("running_sha256"),
-            "node_version": os.environ.get("JUNO_NODE_VERSION") or None,
-        },
-        "task": {
-            "base_sha": record.get("base_sha") or attempt.get("base_sha"),
-            "candidate_sha": candidate_sha,
-            "worktree": record.get("worktree"),
-            "tip_sha": record.get("tip_sha"),
-            "changed_path_count": len(record.get("changed_paths") or []),
-            "validation": validation_rows,
-            "review_status": (risk or {}).get("status"),
-            "review_round": record.get("review_round"),
-            "evidence_reuse_commands": evidence_reuse,
-            "blockers": sorted(record.get("blocked_by") or [])[:8],
-        },
-        "references": {
-            "full_suite_receipts": receipts,
-            "queue_evidence": (risk or {}).get("evidence"),
-            "task_manifest": str(task_file(controller, task_id)),
-        },
-    }
-    text = _handoff_text(handoff)
-    if len(text.encode()) > HANDOFF_MAX_BYTES:
-        raise TaskWorkspaceError("handoff exceeded its documented byte budget")
-    directory = controller / HANDOFF_ROOT
-    directory.mkdir(parents=True, exist_ok=True)
-    for name, payload in ((f"{task_id}.json", (json.dumps(
-                                handoff, sort_keys=True, indent=1) + "\n").encode()),
-                          (f"{task_id}.md", text.encode())):
-        with tempfile.NamedTemporaryFile(dir=directory, prefix="." + name, delete=False) as handle:
-            handle.write(payload); handle.flush(); os.fsync(handle.fileno())
-            temporary = Path(handle.name)
-        os.replace(temporary, directory / name)
-    return {**handoff, "handoff_text": text,
-            "handoff_paths": [str(directory / f"{task_id}.json"),
-                              str(directory / f"{task_id}.md")]}
-
-
-def _handoff_text(handoff: dict[str, Any]) -> str:
-    phases = ["planned", "working", "queued", "validating", "reviewing",
-              "approved", "merged"]
-    phase = handoff["phase"]
-    on_rail = phase in phases
-    completed = phases.index(phase) if on_rail else -1
-    markers = " ".join(
-        ("[x]" if (completed > index or phase == "merged") else
-         "[>]" if phase == name else "[ ]")
-        for index, name in enumerate(phases))
-    flow = " -> ".join(phases) + "\n" + markers
-    if not on_rail:
-        flow += f"\n! off-rail phase: {phase}"
-    identity, task, references = handoff["identity"], handoff["task"], handoff["references"]
-    validation = ", ".join(f"{row['id']}={row['exit_code']}"
-                           for row in task["validation"][:6]) or "none recorded"
-    lines = [
-        f"# Run handoff: {handoff['task_id']}",
-        "",
-        "```",
-        flow,
-        "```",
-        f"- state: {handoff['state']} (phase {phase})",
-        f"- conflicts: {', '.join(handoff['conflicts']) or 'none'}",
-        f"- next command: {handoff['next_command']}",
-        f"- target: {identity['target_ref']} @ {identity['target_sha']}",
-        f"- runtime: current={identity['runtime_generation_current']} "
-        f"sha={str(identity['runtime_running_sha256'])[:12]}",
-        f"- base {str(task['base_sha'])[:12]} candidate {str(task['candidate_sha'])[:12]} "
-        f"tip {str(task['tip_sha'])[:12]}",
-        f"- validation: {validation}",
-        f"- review: {task['review_status']} round {task['review_round']}",
-        f"- evidence reuse: {', '.join(task['evidence_reuse_commands']) or 'none'}",
-        f"- blockers: {', '.join(task['blockers']) or 'none'}",
-        f"- receipts: {'; '.join(str(p) for p in references['full_suite_receipts'][:4]) or 'none'}",
-        "- cost/duration: not available through canonical provenance (explicitly absent)",
-        "",
-        f"Full JSON: {handoff['handoff_paths'][0] if 'handoff_paths' in handoff else 'controller runtime'}",
-    ]
-    return "\n".join(lines)
 
 
 def status(controller: Path, task_id: str) -> dict[str, Any]:
@@ -7722,7 +7351,7 @@ def _worktree_recovery_classification(record: dict[str, Any]) -> dict[str, Any]:
         "preservation": "dirty bytes are preserved for one bounded recovery agent",
         "escalate_only": ["semantic ambiguity", "scope or authority expansion",
                           "sensitive action", "unrecoverable state"],
-        "next_command": "yy task handoff " + str(record.get("task_id")),
+        "next_command": "yy task status " + str(record.get("task_id")),
     }
 
 
@@ -7813,7 +7442,7 @@ def lease_release(controller: Path, task_id: str, lease_token: Optional[str]) ->
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(description=__doc__)
     value.add_argument("operation", choices=(
-        "start", "run", "recover-predispatch", "recover-wall-budget", "status", "admission", "hydrate", "preflight", "finish", "contract", "handoff",
+        "start", "run", "recover-predispatch", "recover-wall-budget", "status", "admission", "hydrate", "preflight", "finish",
         "checkpoint", "child-checkpoint", "evidence-run", "evidence-status", "evidence-await",
         "recovery-plan", "recovery-authorize", "recovery-apply", "runtime-bootstrap",
         "sync", "doctor", "lease-status", "lease-heartbeat", "lease-handoff",
@@ -7955,10 +7584,6 @@ def main(argv: list[str] | None = None) -> int:
                     result = recover_task_wall_budget(
                         controller, args.task, args.run_id, args.attempt,
                         args.predispatch_receipt_sha256, args.original_deadline_unix_ns)
-                elif args.operation == "contract":
-                    result = preimplementation_contract(controller, args.task)
-                elif args.operation == "handoff":
-                    result = run_handoff(controller, args.task)
                 elif args.operation == "checkpoint":
                     result = standing_checkpoint(controller, args.task, args.lease_token)
                 elif args.operation == "child-checkpoint":
