@@ -54,7 +54,8 @@
   ],
   "selectable_paths": [
     "frontend",
-    "juno_kanban"
+    "juno_kanban",
+    "yylo-skills"
   ],
   "controller_private_paths": [
     ".juno_task/archive",
