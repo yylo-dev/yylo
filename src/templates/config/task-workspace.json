@@ -106,6 +106,7 @@
         "npm",
         "test",
         "--",
+        "--no-cache",
         "src/utils/__tests__/integration-workspace.test.ts",
         "src/cli/__tests__/task-command.test.ts",
         "src/cli/__tests__/integration-command.test.ts"
@@ -120,6 +121,7 @@
         "npm",
         "test",
         "--",
+        "--no-cache",
         "src/utils/__tests__/script-installer.test.ts"
       ],
       "resource": {
