@@ -6171,11 +6171,8 @@ steps:
                       f"superseded-by-{repaired['plan_sha256']}.json")
         self.assertEqual(json.loads(superseded.read_text())["outcome"], "SUPERSEDED")
 
-    def test_failed_evidence_with_changed_readiness_reexecutes_via_supersession(self) -> None:
-        """Regression (Yx60Pf): a failed focused-validation receipt whose
-        readiness identity then changed must re-execute under its one
-        supersession and persist the supersession receipt instead of raising
-        FileNotFoundError for a receipt that was never written."""
+    def test_failed_exact_command_stands_when_only_legacy_readiness_wrapper_changes(self) -> None:
+        """D owns one terminal result; G, not readiness wrappers, owns retries."""
         counter = self.root / "standing-counter.txt"
         repair = self.root / "repair.flag"
         code = ("from pathlib import Path\n"
@@ -6196,23 +6193,16 @@ steps:
             **hydration, "yy60pf_readiness_marker": "repaired-environment"}
         state_path.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
         repair.write_text("ready\n")
-        summary = self.payload("evidence-run", "X")
-        self.assertEqual((summary["outcome"], summary["executed"], summary["invalidated"]),
-                         ("PASSED", 1, 1))
-        self.assertEqual(counter.read_text().splitlines(), ["run", "run"])
-        self.assertEqual([item["decision"] for item in summary["decisions"]],
-                         ["invalidated", "executed"])
-        root = self.controller / task_runtime.STANDING_ROOT / "X" / plan["plan_sha256"]
-        receipts = sorted(root.glob("command-0-*.json"))
-        self.assertEqual(len(receipts), 2)
-        supersession = [path for path in receipts if ".readiness-" in path.name]
-        original = [path for path in receipts if ".readiness-" not in path.name]
-        self.assertEqual((len(supersession), len(original)), (1, 1))
-        rerun = json.loads(supersession[0].read_text())
-        failed = json.loads(original[0].read_text())
-        self.assertEqual(rerun["result"]["exit_code"], 0)
+        with self.assertRaisesRegex(AssertionError, "focused validation failed"):
+            self.command("evidence-run", "X")
+        self.assertEqual(counter.read_text().splitlines(), ["run"])
+        canonical = list((self.controller / task_runtime.CANONICAL_VALIDATION_ROOT).rglob("result.json"))
+        self.assertEqual(len(canonical), 1)
+        failed = json.loads(canonical[0].read_text())
+        self.assertEqual(failed["outcome_identity"]["verdict"], "FAILED")
         self.assertEqual(failed["result"]["exit_code"], 3)
-        self.assertNotEqual(rerun["readiness_sha256"], failed["readiness_sha256"])
+        root = self.controller / task_runtime.STANDING_ROOT / "X" / plan["plan_sha256"]
+        self.assertEqual(list(root.glob("command-0-*.readiness-*.json")), [])
 
     # --- Receipt-bound projection of durable lifecycle truth onto the board ---
 
@@ -6994,6 +6984,49 @@ class MinimumRcLifecycleContractTests(unittest.TestCase):
             phase="successor_attempt")
         self.assertEqual(trace["restart_stage"], "VALIDATING")
         self.assertEqual(trace["counters"]["invalidated"], 1)
+
+    def test_canonical_command_index_executes_once_and_invalidates_each_identity(self) -> None:
+        lifecycle = task_runtime.lifecycle_runtime
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repository"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True,
+                           stdout=subprocess.DEVNULL)
+            root = Path(temporary) / "index"
+            calls = []
+            body = {"schema_version": lifecycle.COMMAND_CLOSURE_SCHEMA,
+                    "command": {"id": "suite", "cwd": "pkg", "argv": ["npm", "test"]},
+                    "observable_tree": "a" * 40, "dependency_locks": {"lock": "b" * 40},
+                    "runtime_sha256": "c" * 64, "environment": {"CI": "1"}}
+            closure = {**body, "input_closure_sha256": lifecycle.digest(body)}
+
+            def execute() -> dict:
+                calls.append("run")
+                return {"exit_code": 0, "timed_out": False, "cancelled": False,
+                        "result_integrity": {"eligible_pass": True}}
+
+            first = lifecycle.consume_or_execute_command_result(
+                root, repository, closure, execute, phase="task_closure", task_id="T")
+            second = lifecycle.consume_or_execute_command_result(
+                root, repository, closure, execute, phase="merge_validation", task_id="T")
+            self.assertEqual(([first["decision"], second["decision"]], calls),
+                             (["executed", "reused"], ["run"]))
+            self.assertEqual(first["reference"], second["reference"])
+            drifted_body = {**body, "environment": {"CI": "0"}}
+            drifted = {**drifted_body,
+                       "input_closure_sha256": lifecycle.digest(drifted_body)}
+            third = lifecycle.consume_or_execute_command_result(
+                root, repository, drifted, execute, phase="merge_validation", task_id="T")
+            self.assertEqual((third["decision"], calls), ("executed", ["run", "run"]))
+            path = Path(first["reference"]["path"])
+            tampered = json.loads(path.read_text())
+            tampered["result"]["exit_code"] = 7
+            path.write_text(json.dumps(tampered) + "\n")
+            with self.assertRaisesRegex(lifecycle.LifecycleContractError,
+                                        "canonical command result"):
+                lifecycle.consume_or_execute_command_result(
+                    root, repository, closure, execute, phase="merge_validation", task_id="T")
+            self.assertEqual(calls, ["run", "run"])
 
     def test_profile_closure_is_package_local_deterministic_and_attributes_changed_inputs(self) -> None:
         lifecycle = task_runtime.lifecycle_runtime
