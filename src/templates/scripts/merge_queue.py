@@ -99,6 +99,50 @@ def verify_merge_operation_snapshot(snapshot: Any) -> dict[str, Any]:
     return snapshot
 
 
+def verify_task_submission(controller: Path, repository: Path, task_id: str,
+                           record: dict[str, Any]) -> dict[str, Any]:
+    """Verify the one task-produced submission; admit finite pre-submission records."""
+    closure = record.get("review_ready_closure")
+    if closure is None:
+        return {"kind": "legacy_creation_identity", "valid": True}
+    body = {key: value for key, value in closure.items() if key != "closure_sha256"}
+    if (not isinstance(closure, dict)
+            or closure.get("schema_version") != "juno_task_review_ready_closure.v1"
+            or closure.get("closure_sha256") != task_runtime.stable_sha256(body)):
+        return {"kind": "submission", "valid": False, "reason": "closure_tampered"}
+    submission = closure.get("submission")
+    if submission is None:
+        return {"kind": "legacy_review_ready_closure", "valid": True}
+    submission_body = {key: value for key, value in submission.items()
+                       if key != "submission_sha256"} if isinstance(submission, dict) else {}
+    refresh = closure.get("target_refresh")
+    source_tip = (refresh.get("source_tip") if isinstance(refresh, dict)
+                  else record.get("tip_sha"))
+    expected = {
+        "task_id": task_id,
+        "base_sha": record.get("base_sha"), "tip_sha": source_tip,
+        "tree_sha": task_runtime.git(repository, "rev-parse",
+                                      f"{source_tip}^{{tree}}", check=False),
+        "admitted_scope_sha256": task_runtime.stable_sha256(
+            (record.get("creation_receipt") or {}).get("allowed_paths")),
+        "generated_scope_sha256": task_runtime.stable_sha256(
+            (record.get("creation_receipt") or {}).get("generated_output_admission")),
+    }
+    try:
+        requirements = task_runtime.canonical_requirement_identity(controller, task_id)
+    except task_runtime.TaskWorkspaceError as exc:
+        return {"kind": "submission", "valid": False, "reason": str(exc)}
+    if (not isinstance(submission, dict)
+            or set(submission_body) != operation_runtime.SUBMISSION_FIELDS
+            or submission.get("submission_sha256") != task_runtime.stable_sha256(submission_body)
+            or any(submission.get(key) != value for key, value in expected.items())
+            or submission.get("requirements_sha256") != requirements["requirements_sha256"]):
+        return {"kind": "submission", "valid": False,
+                "reason": "submission_identity_mismatch"}
+    return {"kind": "submission", "valid": True,
+            "submission_sha256": submission["submission_sha256"]}
+
+
 class AuthorityDriftError(MergeQueueError):
     """Live task/queue/target authority no longer matches the admitted attempt."""
 
@@ -676,6 +720,12 @@ def merge_plan(controller: Path, task_id: str, against: Optional[str] = None,
     record = state.get("tasks", {}).get(task_id)
     if not isinstance(record, dict):
         raise MergeQueueError("task has no merge-queue record")
+    submission_verification = verify_task_submission(
+        controller, repository, task_id, record)
+    if not submission_verification["valid"]:
+        findings.append(_finding(
+            "submission.invalid", "error", "task_queue_lifecycle",
+            submission_verification, f"yy task status {task_id}"))
     if operation is None:
         operation = ("resolve" if record.get("state") in {"CONFLICT", "CONFLICT_RESOLVED"}
                      else "reopen" if record.get("state") in {
@@ -5464,6 +5514,7 @@ def _target_refresh_review_ready_closure(
         "risk_policy_sha256": risk_policy_sha256,
         "runtime_sha256": runtime["running_sha256"],
         "unresolved_findings_candidate_sha": source.get("unresolved_findings_candidate_sha"),
+        "submission": source.get("submission"),
         "target_refresh": {
             "plan_id": plan["plan_id"],
             "receipt_sha256": receipt_sha256,
