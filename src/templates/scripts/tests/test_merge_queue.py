@@ -1111,6 +1111,10 @@ class MergeQueueTests(unittest.TestCase):
         self.assertEqual(closure["target_refresh"]["source_identity_sha256"],
                          before["review_ready_closure"]["closure_sha256"])
         self.assertEqual("reused_lineage", closure["target_refresh"]["standing_evidence_decision"])
+        self.assertEqual(before["review_ready_closure"].get("submission"),
+                         closure.get("submission"))
+        self.assertTrue(merge_runtime.verify_task_submission(
+            self.controller, self.repository, "X", applied)["valid"])
         self.assertNotIn("standing_validation", closure)
         self.assertTrue(closure["authoritative_validation"]["results_sha256"])
 
@@ -1162,7 +1166,7 @@ class MergeQueueTests(unittest.TestCase):
         planned = merge_runtime.persist_target_refresh_plan(self.controller.resolve(), "X")
         before = state_path.read_bytes()
         with self.assertRaisesRegex(merge_runtime.MergeQueueError,
-                                    "source review-ready closure is forged or stale"):
+                                    "submission.invalid"):
             merge_runtime.apply_target_refresh(
                 self.controller.resolve(), "X", planned["receipt"]["path"],
                 planned["receipt"]["sha256"])

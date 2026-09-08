@@ -38,6 +38,16 @@ class OperationSnapshotTests(unittest.TestCase):
         except ModuleNotFoundError as exc:
             self.fail(f"operation_snapshot behavior is absent: {exc}")
 
+    def submission(self):
+        return {
+            "task_id": "Task1", "requirements_sha256": "1" * 64,
+            "admitted_scope_sha256": "2" * 64, "generated_scope_sha256": "3" * 64,
+            "base_sha": "c" * 40, "tip_sha": "a" * 40, "tree_sha": "d" * 40,
+            "origin_projection_sha256": "4" * 64, "hydration_sha256": "5" * 64,
+            "dependency_sha256": "6" * 64, "runtime_sha256": "7" * 64,
+            "validation_sha256": "8" * 64, "risk_sha256": "9" * 64,
+        }
+
     def spec(self, *, root: Path | None = None, reverse: bool = False):
         units = [
             {"phase": "validation", "id": "focused-a", "paths": ["runtime/validate.py", "config/routing.json"]},
@@ -66,6 +76,7 @@ class OperationSnapshotTests(unittest.TestCase):
             "environment": {"TZ": "UTC", "CI": "1"},
             "read_sets": units,
             "managed_outputs": {"runtime/merge.py": "managed-v1"},
+            "submission": self.submission(),
             "discovery": {"complete": True, "kind": "exact-import-closure"},
         }
 
@@ -98,6 +109,15 @@ class OperationSnapshotTests(unittest.TestCase):
         current = self.compile(controller_status=["M  metadata/task.json", " M wiki/PDR.md", "?? untracked.log"])
         self.assertEqual(snapshot["snapshot_sha256"], current["snapshot_sha256"])
         self.assertEqual([], self.module().phase_invalidation(snapshot, current))
+
+    def test_live_target_movement_preserves_submission_and_invalidates_only_composition(self) -> None:
+        snapshot = self.compile()
+        current = self.compile(target="e" * 40)
+        self.assertEqual(snapshot["submission_sha256"], current["submission_sha256"])
+        self.assertEqual(
+            [{"phase": "integration", "unit_id": "live-target", "reason": "target_drift"}],
+            self.module().phase_invalidation(snapshot, current),
+        )
 
     def test_validation_runtime_and_routing_drift_invalidates_only_affected_shard(self) -> None:
         snapshot = self.compile()
@@ -174,6 +194,7 @@ class OperationSnapshotTests(unittest.TestCase):
                 {"phase": "integration", "id": "runtime", "inputs": {"runtime": "v1"}},
             ],
             "managed_outputs": {"queue": "v1"},
+            "submission": self.submission(),
             "discovery": {"complete": True, "kind": "exact-import-closure"},
         }
         task_snapshot = task_runtime.compile_standing_operation_snapshot(**kwargs)
@@ -207,6 +228,7 @@ class OperationSnapshotTests(unittest.TestCase):
                 {"phase": "integration", "id": "runtime", "inputs": {"runtime": "6" * 64}},
             ],
             "managed_outputs": {"task_workspace_runtime": "7" * 64},
+            "submission": self.submission(),
             "discovery": {"complete": True, "kind": "exact-import-closure"},
         }
         snapshot = module.compile_identity_operation_snapshot(**kwargs)
