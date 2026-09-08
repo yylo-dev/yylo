@@ -57,9 +57,15 @@
     "juno_kanban"
   ],
   "controller_private_paths": [
+    ".juno_task/archive",
+    ".juno_task/archive-receipts",
+    ".juno_task/artifact-ledger",
     ".juno_task/artifacts",
+    ".juno_task/document-ledger",
+    ".juno_task/documents",
     ".juno_task/ledger",
     ".juno_task/logs",
+    ".juno_task/objects",
     ".juno_task/receipts",
     ".juno_task/specs",
     ".juno_task/state",
