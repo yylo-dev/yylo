@@ -1152,6 +1152,9 @@ from typing import Any, Callable, Optional
 COMMAND_CLOSURE_SCHEMA = "juno_command_input_closure.v5"
 COMMAND_CLOSURE_DECLARATION_SCHEMA = "juno_validation_input_declaration.v1"
 COMMAND_OUTCOME_SCHEMA = "juno_canonical_validation_receipt.v1"
+COMMAND_RESULT_SCHEMA = "juno_canonical_command_result.v1"
+COMMAND_RESULT_INDEX_SCHEMA = "juno_canonical_command_result_index.v1"
+COMMAND_RESULT_PRODUCER_SCHEMA = "juno_canonical_command_result_producer.v1"
 CHANGED_INPUT_ATTRIBUTION_LIMIT = 64
 COMPLETE_INPUT_IDENTITY_SCHEMA = "juno_complete_input_closure_identity.v1"
 REPLAY_TRACE_SCHEMA = "juno_evidence_replay_trace.v1"
@@ -1514,6 +1517,147 @@ def complete_input_identity(closure: Any) -> dict[str, str]:
     return {**signature_body, "signature_sha256": digest(signature_body)}
 
 
+def canonical_command_result_identity(repository: Path,
+                                      closure: dict[str, Any]) -> dict[str, str]:
+    """Return the only command-result key used by task and queue phases."""
+    complete = complete_input_identity(closure)
+    body = {"schema_version": COMMAND_RESULT_INDEX_SCHEMA,
+            "repository_identity": repository_identity(repository),
+            "complete_input_identity": complete}
+    return {**body, "index_sha256": digest(body)}
+
+
+def canonical_command_result_path(root: Path, repository: Path,
+                                  closure: dict[str, Any]) -> Path:
+    identity = canonical_command_result_identity(repository, closure)
+    repository_sha = hashlib.sha256(identity["repository_identity"].encode()).hexdigest()
+    return root / repository_sha / identity["index_sha256"] / "result.json"
+
+
+def _terminal_result_verdict(result: Any) -> str:
+    if (not isinstance(result, dict) or not isinstance(result.get("exit_code"), int)
+            or not isinstance(result.get("timed_out"), bool)
+            or result.get("cancelled") is True):
+        return "UNSETTLED"
+    integrity = result.get("result_integrity")
+    if isinstance(integrity, dict) and integrity.get("eligible_pass") is False:
+        return "FAILED"
+    return "PASSED" if result["exit_code"] == 0 and not result["timed_out"] else "FAILED"
+
+
+def verify_canonical_command_result(receipt: Any, repository: Path,
+                                    closure: dict[str, Any]) -> dict[str, Any]:
+    """Strictly reopen one terminal result; a consumer never redefines its key."""
+    if not isinstance(receipt, dict):
+        raise LifecycleContractError("canonical command result is missing or malformed")
+    expected_keys = {"schema_version", "producer", "index_identity", "index_sha256",
+                     "command_id", "command", "input_closure", "complete_input_identity",
+                     "outcome_identity", "result", "source", "recorded_at_unix_ns",
+                     "receipt_body_sha256"}
+    identity = canonical_command_result_identity(repository, closure)
+    verification = verify_complete_input_closure(
+        receipt.get("input_closure"), closure, receipt.get("complete_input_identity"))
+    result = receipt.get("result")
+    verdict = _terminal_result_verdict(result)
+    outcome = {"schema_version": closure.get("outcome_schema"),
+               "result_sha256": digest(result), "verdict": verdict}
+    producer = receipt.get("producer")
+    receipt_body = {key: value for key, value in receipt.items()
+                    if key != "receipt_body_sha256"}
+    if (set(receipt) != expected_keys
+            or receipt.get("receipt_body_sha256") != digest(receipt_body)
+            or receipt.get("schema_version") != COMMAND_RESULT_SCHEMA
+            or not isinstance(producer, dict)
+            or producer.get("schema_version") != COMMAND_RESULT_PRODUCER_SCHEMA
+            or receipt.get("index_identity") != identity
+            or receipt.get("index_sha256") != identity["index_sha256"]
+            or receipt.get("command") != closure.get("command")
+            or receipt.get("command_id") != closure.get("command", {}).get("id")
+            or not verification["valid"]
+            or receipt.get("outcome_identity") != outcome
+            or verdict == "UNSETTLED"):
+        raise LifecycleContractError("canonical command result identity or terminal outcome is invalid")
+    return receipt
+
+
+def consume_or_execute_command_result(
+        root: Path, repository: Path, closure: dict[str, Any],
+        execute: Callable[[], dict[str, Any]], *, phase: str, task_id: Optional[str] = None,
+        legacy: Optional[tuple[dict[str, Any], dict[str, Any]]] = None) -> dict[str, Any]:
+    """Consume or produce one immutable terminal result under one canonical index.
+
+    The identity lock spans lookup and execution, so checkpoint, finish, queue,
+    refresh, and resume cannot independently launch the same exact command.
+    ``legacy`` is a finite read/import seam: the original bytes remain untouched
+    and their exact reference is retained in the canonical producer record.
+    """
+    path = canonical_command_result_path(root, repository, closure)
+    lock_path = path.with_name(".claim.lock")
+    with lifecycle_claim(lock_path):
+        if path.exists():
+            try:
+                raw = path.read_bytes(); receipt = json.loads(raw)
+            except (OSError, json.JSONDecodeError) as exc:
+                raise LifecycleContractError("canonical command result is unreadable") from exc
+            verify_canonical_command_result(receipt, repository, closure)
+            return {"decision": "reused", "receipt": receipt,
+                    "reference": {"path": str(path.resolve()),
+                                  "sha256": hashlib.sha256(raw).hexdigest(),
+                                  "command_id": receipt["command_id"]}}
+        source: Optional[dict[str, Any]] = None
+        if legacy is not None:
+            legacy_receipt, legacy_reference = legacy
+            admitted = {"juno_standing_validation_evidence.v1",
+                        "juno_canonical_validation_receipt.v1"}
+            verification = verify_complete_input_closure(
+                legacy_receipt.get("input_closure"), closure,
+                legacy_receipt.get("complete_input_identity"))
+            legacy_result = legacy_receipt.get("result")
+            source_path = Path(str(legacy_reference.get("path", "")))
+            try: source_raw = source_path.read_bytes()
+            except OSError as exc:
+                raise LifecycleContractError("legacy command result source is unavailable") from exc
+            try:
+                preserved_legacy = json.loads(source_raw)
+            except json.JSONDecodeError as exc:
+                raise LifecycleContractError("legacy command result source is malformed") from exc
+            if (legacy_receipt.get("schema_version") not in admitted
+                    or not verification["valid"]
+                    or hashlib.sha256(source_raw).hexdigest() != legacy_reference.get("sha256")
+                    or preserved_legacy != legacy_receipt
+                    or _terminal_result_verdict(legacy_result) == "UNSETTLED"):
+                raise LifecycleContractError("legacy command result cannot be verified for import")
+            result = legacy_result
+            source = {"kind": "legacy_import", "schema_version": legacy_receipt["schema_version"],
+                      "path": str(source_path.resolve()),
+                      "sha256": legacy_reference["sha256"]}
+            decision = "reused"
+        else:
+            result = execute()
+            if _terminal_result_verdict(result) == "UNSETTLED":
+                raise LifecycleContractError("validation command did not produce a settled terminal result")
+            decision = "executed"
+        identity = canonical_command_result_identity(repository, closure)
+        outcome = {"schema_version": closure.get("outcome_schema"),
+                   "result_sha256": digest(result),
+                   "verdict": _terminal_result_verdict(result)}
+        receipt_body = {"schema_version": COMMAND_RESULT_SCHEMA,
+                        "producer": {"schema_version": COMMAND_RESULT_PRODUCER_SCHEMA,
+                                     "implementation": "task_workflow_helper.consume_or_execute_command_result.v1",
+                                     "phase": phase, "task_id": task_id},
+                        "index_identity": identity, "index_sha256": identity["index_sha256"],
+                        "command_id": closure.get("command", {}).get("id"),
+                        "command": closure.get("command"), "input_closure": closure,
+                        "complete_input_identity": complete_input_identity(closure),
+                        "outcome_identity": outcome, "result": result, "source": source,
+                        "recorded_at_unix_ns": time.time_ns()}
+        receipt = {**receipt_body, "receipt_body_sha256": digest(receipt_body)}
+        reference = atomic_json(path, receipt, exclusive=True)
+        return {"decision": decision, "receipt": receipt,
+                "reference": {"path": reference["path"], "sha256": reference["sha256"],
+                              "command_id": receipt["command_id"]}}
+
+
 def verify_complete_input_closure(previous: Any, current: Any,
                                   identity: Any) -> dict[str, Any]:
     """One fail-closed verifier shared by task, queue, refresh, and train stages."""
@@ -1601,7 +1745,7 @@ def evidence_decision(command_id: str, decision: str, *, closure: dict[str, Any]
                       source: Optional[dict[str, Any]] = None,
                       invalidation: Optional[list[dict[str, Any]]] = None,
                       reason: Optional[str] = None) -> dict[str, Any]:
-    if decision not in {"executed", "reused", "invalidated", "skipped", "not_applicable"}:
+    if decision not in {"executed", "reused", "invalidated", "unknown", "skipped", "not_applicable"}:
         raise LifecycleContractError(f"invalid command evidence decision: {decision}")
     return {"schema_version": COMMAND_DECISION_SCHEMA, "command_id": command_id,
             "decision": decision, "input_closure_sha256": closure.get("input_closure_sha256"),
@@ -1609,7 +1753,7 @@ def evidence_decision(command_id: str, decision: str, *, closure: dict[str, Any]
 
 
 def evidence_counters(decisions: list[dict[str, Any]]) -> dict[str, int]:
-    result = {name: 0 for name in ("executed", "reused", "invalidated", "skipped", "not_applicable")}
+    result = {name: 0 for name in ("executed", "reused", "invalidated", "unknown", "skipped", "not_applicable")}
     for row in decisions:
         if row.get("decision") in result:
             result[row["decision"]] += 1
