@@ -1731,136 +1731,12 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
         with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "commit history escaped"):
             task_runtime.build_umbrella_recovery_plan(self.controller, "X", declaration)
 
-    def _contract_body(self, task_id: str, *, owner_decision: bool = False) -> None:
-        decisions = ("\n## Unresolved decisions\n\n- The owner must authorize the release scope before implementation.\n"
-                     if owner_decision else "")
-        task_runtime.task_file(self.controller, task_id).write_text(
-            f"---\nid: {task_id}\nstatus: todo\nlast_modified: '2026-08-20T00:00:00Z'\n---\n"
-            f"\n<!-- juno:body:start -->\n\n## Goal\n\nShip the feature.\n\n"
-            f"## Acceptance\n\n- Focused tests pass.\n- Full suite passes.\n"
-            f"{decisions}\n<!-- juno:body:end -->\n")
-
-    def test_contract_binds_requirements_base_and_reviewer_checklist(self) -> None:
-        self._contract_body("X")
-        task_runtime.start(self.controller, "X")
-        contract = task_runtime.preimplementation_contract(self.controller, "X")
-        self.assertEqual(contract["schema_version"],
-                         task_runtime.PREIMPLEMENTATION_CONTRACT_SCHEMA)
-        self.assertEqual(contract["status"], "ready")
-        self.assertEqual(contract["version"], 1)
-        binding = contract["binding"]
-        self.assertEqual(binding["task_manifest_sha256"],
-                         hashlib.sha256(
-                             task_runtime.task_file(self.controller, "X").read_bytes()
-                         ).hexdigest())
-        self.assertEqual(binding["base_sha"], task_runtime.ref_sha(self.repository, "refs/heads/product"))
-        checklist = contract["reviewer_checklist"]
-        self.assertTrue(any("Focused tests pass" in item for item in checklist))
-        self.assertTrue(contract["contract_path"].endswith("v1.json"))
-        self.assertTrue(Path(contract["contract_path"]).is_file())
-
-    def test_contract_refuses_handoff_while_owner_decisions_open(self) -> None:
-        self._contract_body("X", owner_decision=True)
-        task_runtime.start(self.controller, "X")
-        contract = task_runtime.preimplementation_contract(self.controller, "X")
-        self.assertEqual(contract["status"], "blocked_handoff")
-        self.assertEqual(len(contract["owner_decisions"]), 1)
-        self.assertIn("owner must authorize", contract["owner_decisions"][0])
-
-    def test_contract_supersedes_without_rewriting_the_predecessor(self) -> None:
-        self._contract_body("X")
-        task_runtime.start(self.controller, "X")
-        first = task_runtime.preimplementation_contract(self.controller, "X")
-        first_path = Path(first["contract_path"])
-        first_bytes = first_path.read_bytes()
-        self._contract_body("X")
-        second = task_runtime.preimplementation_contract(self.controller, "X")
-        self.assertEqual(second["version"], 2)
-        self.assertEqual(second["predecessor"]["path"], str(first_path))
-        self.assertEqual(second["predecessor"]["sha256"],
-                         hashlib.sha256(first_bytes).hexdigest())
-        self.assertEqual(first_path.read_bytes(), first_bytes,
-                         "superseding must never rewrite predecessor evidence")
-        active = task_runtime.active_preimplementation_contract(self.controller, "X")
-        assert active is not None
-        self.assertEqual(active["version"], 2)
-
-    def test_contract_parity_pairs_follow_runtime_template_twins(self) -> None:
-        self._contract_body("X")
-        task_runtime.start(self.controller, "X")
-        with task_runtime.state_lock(self.controller):
-            state = task_runtime.read_state(self.controller)
-            state["tasks"]["X"]["changed_paths"] = [
-                ".juno_task/scripts/merge_queue.py",
-                "juno-code/src/templates/scripts/merge_queue.py",
-                "src/feature.txt",
-            ]
-            task_runtime.write_state(self.controller, state)
-        contract = task_runtime.preimplementation_contract(self.controller, "X")
-        pairs = {json.dumps(pair, sort_keys=True) for pair in contract["parity_pairs"]}
-        self.assertIn(json.dumps(
-            {"runtime": ".juno_task/scripts/merge_queue.py",
-             "template": "juno-code/src/templates/scripts/merge_queue.py"}, sort_keys=True), pairs)
-        self.assertEqual(len(contract["parity_pairs"]), 1)
-        self.assertTrue(any("Parity:" in item for item in contract["reviewer_checklist"]))
-
-    def test_handoff_is_deterministic_bounded_and_byte_stable(self) -> None:
-        task_runtime.start(self.controller, "X")
-        first = task_runtime.run_handoff(self.controller, "X")
-        second = task_runtime.run_handoff(self.controller, "X")
-        self.assertEqual(first["schema_version"], task_runtime.HANDOFF_SCHEMA)
-        self.assertEqual(first["state"], "WORKING")
-        self.assertEqual(first["next_command"], "yy task preflight X")
-        self.assertLessEqual(len(first["handoff_text"].encode()),
-                             task_runtime.HANDOFF_MAX_BYTES)
-        markdown = Path(first["handoff_paths"][1])
-        before = markdown.read_bytes()
-        task_runtime.run_handoff(self.controller, "X")
-        self.assertEqual(markdown.read_bytes(), before,
-                         "handoff must be byte-stable without state changes")
-        self.assertIn("[x]", first["handoff_text"])
-        self.assertIn("[>]", first["handoff_text"])
-        self.assertIn("cost/duration: not available", first["handoff_text"])
-
-    def test_handoff_fails_closed_on_conflicting_evidence(self) -> None:
-        task_runtime.start(self.controller, "X")
-        with task_runtime.state_lock(self.controller):
-            state = task_runtime.read_state(self.controller)
-            state["tasks"]["X"]["state"] = "AWAITING_RISK"
-            state["tasks"]["X"]["queue_attempt"] = {"candidate_sha": None,
-                                                    "risk": {"status": "AWAITING_RISK"}}
-            task_runtime.write_state(self.controller, state)
-        handoff = task_runtime.run_handoff(self.controller, "X")
-        self.assertTrue(handoff["conflicts"])
-        self.assertEqual(handoff["next_command"], "yy integration runtime-doctor")
-
-    def test_handoff_maps_lifecycle_states_to_next_commands(self) -> None:
-        task_runtime.start(self.controller, "X")
-        cases = {"QUEUED": "yy merge next",
-                 "AWAITING_RISK": "yy merge review X",
-                 "REVIEW_FINDINGS": "repair findings in the task worktree, then yy merge reopen X",
-                 "RISK_EVIDENCE_READY": "yy merge next X",
-                 "MERGED": "none: task integrated; archive the Kanban task"}
-        for queue_state, command in cases.items():
-            with task_runtime.state_lock(self.controller):
-                state = task_runtime.read_state(self.controller)
-                if queue_state in {"AWAITING_RISK", "RISK_EVIDENCE_READY", "REVIEWING"}:
-                    state["tasks"]["X"]["queue_attempt"] = {
-                        "candidate_sha": "a" * 40,
-                        "risk": {"status": queue_state,
-                                 "review_progress": {"full_suite_admission": {
-                                     "receipts": [{"receipt_path": "/tmp/r.json",
-                                                   "receipt_sha256": "0" * 64}]}}}}
-                elif queue_state == "MERGED":
-                    state["tasks"]["X"]["queue_attempt"] = {"outcome": "MERGED",
-                                                            "candidate_sha": "a" * 40}
-                    state["tasks"]["X"]["outcome"] = "MERGED"
-                else:
-                    state["tasks"]["X"]["queue_attempt"] = {"risk": {"status": queue_state}}
-                state["tasks"]["X"]["state"] = queue_state
-                task_runtime.write_state(self.controller, state)
-            handoff = task_runtime.run_handoff(self.controller, "X")
-            self.assertEqual(handoff["next_command"], command, queue_state)
+    def test_raw_parser_rejects_removed_contract_and_handoff_operations(self) -> None:
+        for operation in ("contract", "handoff"):
+            result = run(["python3", str(SCRIPT), operation, "--task", "X",
+                          "--controller", str(self.controller)], self.controller, False)
+            self.assertEqual(result.returncode, 2, operation)
+            self.assertIn("invalid choice", result.stderr, operation)
 
     def test_recovery_plan_audit_requires_kanban_routing_policy(self) -> None:
         self.payload("start", "X")
@@ -6764,16 +6640,26 @@ class TaskFencingLeaseTests(TaskWorkspaceFixture):
         queued = self.payload("finish", "X")
         self.assertEqual(queued["state"], "QUEUED")
 
-    def test_dirty_worktree_successor_preserves_recovery_packet(self) -> None:
+    def test_dirty_worktree_successor_preserves_recovery_packet_and_routes_to_status(self) -> None:
         self.payload("start", "X")
         worktree = self.workspaces / "X"
+        (worktree / "src/committed.txt").write_text("committed bytes\n")
+        git(worktree, "add", "src/committed.txt")
+        git(worktree, "commit", "-m", "committed recovery evidence")
         (worktree / "src/uncommitted.txt").write_text("dirty bytes\n")
+        before = self.payload("status", "X")
+        self.assertEqual(before["changed_paths"], ["src/committed.txt"])
+        self.assertEqual(before["uncommitted_paths"], ["src/uncommitted.txt"])
         successor = self.payload("lease-successor", "X")
         recovery = successor["recovery"]
         self.assertEqual(recovery["classification"], "dirty_recovery_required")
         self.assertEqual(recovery["dirty_paths"], ["src/uncommitted.txt"])
+        self.assertEqual(recovery["next_command"], "yy task status X")
         self.assertIn("preserved", json.dumps(recovery))
-        # The dirty bytes survive successor issuance untouched.
+        # Successor issuance mutates neither committed nor uncommitted task bytes.
+        after = self.payload("status", "X")
+        self.assertEqual(after["changed_paths"], ["src/committed.txt"])
+        self.assertEqual(after["uncommitted_paths"], ["src/uncommitted.txt"])
         self.assertEqual((worktree / "src/uncommitted.txt").read_text(), "dirty bytes\n")
         lease = self.fencing_record("X")
         self.assertEqual(lease["recovery"]["classification"], "dirty_recovery_required")

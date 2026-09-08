@@ -73,7 +73,7 @@ RISK_STATE_SCHEMA = "juno_merge_queue_risk_state.v1"
 REVIEW_PROMPT_FIELDS = {
     "task_id", "review_kind", "reviewer_index", "repository", "base_sha",
     "tip_sha", "checklist_path", "findings_summary_path",
-    "validation_evidence_path", "acceptance_contract", "requirements_bundle",
+    "validation_evidence_path", "requirements_bundle",
     "findings_summary",
 }
 REVIEW_PLACEHOLDER_RE = re.compile(r"{{\s*([a-z_][a-z0-9_]*)\s*}}")
@@ -3491,20 +3491,6 @@ def render_managed_review_prompt(controller: Path, candidate_root: Path,
     else:
         validation_path = "queue-state: affected validation embedded below"
     findings_summary, findings_path = prior_findings_summary(controller, record, plan)
-    contract_section = "none"
-    contract = getattr(task_runtime, "active_preimplementation_contract", lambda c, t: None)(
-        controller, task_id)
-    if isinstance(contract, dict):
-        contract_path = (controller / task_runtime.CONTRACTS_ROOT / task_id
-                         / f"v{contract.get('version')}.json")
-        contract_bytes = contract_path.read_bytes()
-        checklist = contract.get("reviewer_checklist")
-        contract_section = (
-            f"{contract_path} sha256={hashlib.sha256(contract_bytes).hexdigest()} "
-            f"status={contract.get('status')} version={contract.get('version')}\n"
-            + "\n".join(f"- {item}" for item in checklist[:32]
-                         if isinstance(checklist, list))
-            if isinstance(checklist, list) else str(contract_path))
     validation_bundle = canonical({
         "affected_validation": attempt.get("validation", []),
         "full_suite_admission": admission,
@@ -3524,7 +3510,6 @@ def render_managed_review_prompt(controller: Path, candidate_root: Path,
         "tip_sha": plan["candidate"]["candidate_sha"],
         "checklist_path": f"{task_path} sha256={hashlib.sha256(task_data).hexdigest()}",
         "findings_summary_path": findings_path,
-        "acceptance_contract": contract_section,
         "validation_evidence_path": validation_path,
         "requirements_bundle": requirements,
         "findings_summary": findings_summary,
