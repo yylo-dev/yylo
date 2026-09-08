@@ -4214,7 +4214,7 @@ steps:
         self.assertEqual((self.controller / ".juno_task/state/tasks.json").read_bytes(), before_state)
         self.assertEqual(Path(frozen["journal"]).read_bytes(), before_journal)
 
-    def test_failed_suite_then_success_uses_fresh_attempt_and_reaches_reviewers(self) -> None:
+    def test_unchanged_failed_suite_stands_without_retry_or_reviewer(self) -> None:
         flaky = (f"from pathlib import Path; import sys; p=Path({str(self.full_counter)!r}); "
                  "n=len(p.read_text().splitlines()) if p.exists() else 0; "
                  "p.open('a').write('run\\n'); sys.exit(23 if n == 0 else 0)")
@@ -4231,20 +4231,11 @@ steps:
         failed = failed_attempt["risk"]["review_progress"]
         self.assertEqual((failed["full_suite_admission"]["state"],
                           failed["full_suite_admission"]["attempt_number"]), ("FAILED", 1))
-        with mock.patch.object(merge_runtime, "dispatch_reviewer", side_effect=self.fake_review) as dispatch:
-            ready = merge_runtime.merge_review(self.controller.resolve(), "X")
-        self.assertEqual((ready["outcome"], dispatch.call_count), ("RISK_EVIDENCE_READY", 2))
-        self.assertEqual(ready["validation"], affected_validation)
-        self.assertTrue(all(row["id"] != "full-suite" for row in ready["validation"]))
-        complete = ready["risk"]["review_progress"]["full_suite_admission"]
-        self.assertEqual((complete["state"], complete["attempt_number"]), ("COMPLETE", 2))
-        receipt = json.loads(Path(complete["receipts"][0]["receipt_path"]).read_text())
-        self.assertEqual(receipt["timing"]["schema_version"], "juno_validation_timing.v1")
-        self.assertEqual([item["state"] for item in receipt["timing"]["states"]],
-                         ["WAITING_FOR_RESOURCE", "SETUP", "RUNNING", "TEARDOWN", "PASSED"])
-        self.assertEqual(set(receipt["identity"]), {"command_sha256", "cwd_sha256",
-                                                   "policy_sha256", "candidate_sha", "candidate_tree"})
-        self.assertEqual(self.full_counter.read_text().splitlines(), ["run", "run"])
+        with mock.patch.object(merge_runtime, "dispatch_reviewer") as dispatch:
+            with self.assertRaises(merge_runtime.MergeValidationError):
+                merge_runtime.merge_review(self.controller.resolve(), "X")
+        dispatch.assert_not_called()
+        self.assertEqual(self.full_counter.read_text().splitlines(), ["run"])
 
     def test_failed_suite_new_tip_reopens_and_requeues_the_repair(self) -> None:
         self.write_policy(full_code="raise SystemExit(23)")
@@ -4426,7 +4417,7 @@ steps:
         for name in attempts:
             self.assertTrue((next(root.iterdir()) / name / "claim.json").is_file())
             self.assertTrue((next(root.iterdir()) / name / "receipt-1.json").is_file())
-        self.assertEqual(self.full_counter.read_text().splitlines(), ["run", "run"])
+        self.assertEqual(self.full_counter.read_text().splitlines(), ["run"])
 
     def test_restart_from_claimed_failed_receipt_marks_failed_without_reviewer(self) -> None:
         self.write_policy(full_code="raise SystemExit(31)")
@@ -4703,7 +4694,7 @@ steps:
         with mock.patch.object(merge_runtime, "dispatch_reviewer", side_effect=self.fake_review):
             ready = merge_runtime.merge_review(self.controller.resolve(), "X")
         self.assertEqual(ready["outcome"], "RISK_EVIDENCE_READY")
-        self.assertEqual(self.full_counter.read_text().splitlines(), ["run", "run"])
+        self.assertEqual(self.full_counter.read_text().splitlines(), ["run"])
         admission = ready["risk"]["review_progress"]["full_suite_admission"]
         self.assertEqual((admission["state"], admission["attempt_number"]), ("COMPLETE", 2))
         self.assertEqual([path.read_bytes() for path in receipts], poisoned)
@@ -5341,35 +5332,24 @@ steps:
             self.assertEqual(hashlib.sha256(Path(reference["path"]).read_bytes()).hexdigest(),
                              reference["sha256"])
 
-    def test_merge_reuse_emits_immutable_candidate_bound_derived_receipt(self) -> None:
-        """Canonical task evidence reused by merge is materialized, not relabelled."""
+    def test_merge_reuse_points_to_the_one_immutable_terminal_result(self) -> None:
+        """Queue reuse references task's canonical result without a derived write."""
         self.commit_feature("X", "docs/derived.txt", "derived\n")
+        standing = self.task("status", "X")["review_ready_closure"]["standing_validation"]
         merged = self.queue_payload("next")
 
         decision = next(row for row in merged["command_evidence"]["decisions"]
                         if row["decision"] == "reused")
-        reference = decision["derived_receipt"]
-        path = Path(reference["path"])
+        self.assertNotIn("derived_receipt", decision)
+        self.assertEqual(decision["source"], standing["receipts"][0])
+        path = Path(decision["source"]["path"])
         payload = path.read_bytes()
-        self.assertEqual(hashlib.sha256(payload).hexdigest(), reference["sha256"])
+        self.assertEqual(hashlib.sha256(payload).hexdigest(), decision["source"]["sha256"])
         receipt = json.loads(payload)
         self.assertEqual(receipt["schema_version"],
-                         merge_runtime.CANONICAL_VALIDATION_RECEIPT_SCHEMA)
-        self.assertEqual(receipt["receipt_kind"], "derived")
-        self.assertEqual(receipt["phase"], "merge_validation")
-        self.assertEqual(receipt["consuming_candidate"]["candidate_sha"],
-                         merged["candidate_sha"])
-        self.assertEqual(receipt["source"]["sha256"], decision["source"]["sha256"])
-        source_receipt = json.loads(Path(decision["source"]["path"]).read_text())
-        self.assertEqual(source_receipt["schema_version"],
-                         merge_runtime.CANONICAL_VALIDATION_RECEIPT_SCHEMA)
-        self.assertEqual((source_receipt["receipt_kind"], source_receipt["phase"]),
-                         ("executed", "task_closure"))
-        self.assertEqual(source_receipt["decision_reason"],
-                         "supported registered validation command execution")
-        self.assertEqual(receipt["decision_reason"], "exact command closure reuse")
-        self.assertIn("producer_snapshot_sha256", receipt["snapshot_lineage"])
-        self.assertIn("consuming_snapshot_sha256", receipt["snapshot_lineage"])
+                         merge_runtime.lifecycle_runtime.COMMAND_RESULT_SCHEMA)
+        self.assertEqual(receipt["producer"]["phase"], "task_closure")
+        self.assertEqual(receipt["outcome_identity"]["verdict"], "PASSED")
         self.assertFalse(self.counter.exists(), "merge reuse must not execute validation")
 
     def test_out_of_cwd_candidate_change_invalidates_reused_command_evidence(self) -> None:
@@ -5907,7 +5887,7 @@ steps:
         tip = self.commit_feature("X", "pkg/security/auth.py", "package change\n")
         standing = self.task("status", "X")["review_ready_closure"]["standing_validation"]
         self.assertEqual(standing["counters"], {
-            "executed": 2, "reused": 0, "invalidated": 0,
+            "executed": 2, "reused": 0, "invalidated": 0, "unknown": 0,
             "skipped": 0, "not_applicable": 0,
         })
         self.bind_merge_validation_identity("X")
@@ -5927,9 +5907,11 @@ steps:
         self.assertEqual(claim["routing"]["mode"], "profile")
         self.assertEqual(claim["routing"]["profile_ids"], ["pkg-suite"])
         self.assertIn("validation_routing_sha256", claim["validation_identity"])
-        self.assertEqual(pkg_counter.read_text().splitlines(),
-                         ["run", "run", "run", "run"])
+        self.assertEqual(pkg_counter.read_text().splitlines(), ["run", "run"])
         self.assertFalse(self.full_counter.exists())
+        self.assertEqual(reviewed["evidence_replay_trace"]["counters"]["reused"], 2)
+        self.assertEqual(reviewed["evidence_replay_trace"]["counters"]["executed"], 0)
+        self.assertEqual(reviewed["evidence_replay_trace"]["counters"]["unknown"], 0)
         merged = merge_runtime.merge_next(self.controller.resolve(), "X")
         self.assertEqual((merged["outcome"], merged["candidate_sha"]), ("MERGED", tip))
 
@@ -5946,7 +5928,7 @@ steps:
         self.task("finish", "X")
         standing = self.task("status", "X")["review_ready_closure"]["standing_validation"]
         self.assertEqual(standing["counters"], {
-            "executed": 3, "reused": 0, "invalidated": 0,
+            "executed": 3, "reused": 0, "invalidated": 0, "unknown": 0,
             "skipped": 0, "not_applicable": 0,
         })
         self.bind_merge_validation_identity("X")
@@ -5960,8 +5942,7 @@ steps:
         self.assertEqual(claim["routing"]["mode"], "union")
         self.assertEqual([row["id"] for row in claim["commands"]],
                          ["pkg-test", "pkg-build", "full-suite"])
-        self.assertEqual(pkg_counter.read_text().splitlines(),
-                         ["run", "run", "run", "run"])
+        self.assertEqual(pkg_counter.read_text().splitlines(), ["run", "run"])
         self.assertEqual(self.full_counter.read_text().splitlines(), ["run"])
 
     def test_plan_binds_validation_routing_identity(self) -> None:
@@ -6615,7 +6596,7 @@ class FullSuiteFileRetryTests(unittest.TestCase):
 
 
 class EvidenceReuseTests(unittest.TestCase):
-    """Hash-bound green evidence reuse: reuse only proven-identical inputs."""
+    """One canonical command-result index: reuse only proven-identical inputs."""
 
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="juno-evidence-reuse-"))
@@ -6628,7 +6609,7 @@ class EvidenceReuseTests(unittest.TestCase):
         (self.candidate / "pkg").mkdir(parents=True)
         (self.candidate / "pkg" / "package-lock.json").write_text("{}\n")
         self.controller = self.root / "controller"
-        (self.controller / merge_runtime.EVIDENCE_CACHE_ROOT).mkdir(parents=True)
+        (self.controller / merge_runtime.CANONICAL_VALIDATION_ROOT).mkdir(parents=True)
         self.commands = [
             {"id": "suite", "cwd": "pkg", "argv": ["npm", "test"],
              "timeout_seconds": 60, "max_output_bytes": 8192},
@@ -6728,7 +6709,7 @@ class EvidenceReuseTests(unittest.TestCase):
              "token": "t" * 48, "attempt_number": 2}, require_success=False)
         self.assertEqual(verified["exit_code"], 0)
 
-    def test_green_pass_is_cached_then_reused_without_reexecution(self) -> None:
+    def test_green_pass_is_indexed_then_reused_without_reexecution(self) -> None:
         references, first_trace, calls = self._run(self._claim(1), self._receipt_path(1),
                                       controller=self.controller,
                                       repository=self.repository)
@@ -6738,7 +6719,7 @@ class EvidenceReuseTests(unittest.TestCase):
             first_trace, phase="queue_full_suite")
         self.assertEqual(replay["restart_stage"], "READY_CAS")
         self.assertEqual(replay["counters"]["executed"], 1)
-        entry_files = list((self.controller / merge_runtime.EVIDENCE_CACHE_ROOT).glob("*.json"))
+        entry_files = list((self.controller / merge_runtime.CANONICAL_VALIDATION_ROOT).rglob("result.json"))
         self.assertEqual(len(entry_files), 1)
 
         references2, _reuse2, calls2 = self._run(self._claim(2), self._receipt_path(2),
@@ -6752,20 +6733,12 @@ class EvidenceReuseTests(unittest.TestCase):
             self.claims[1], require_success=True)
         self.assertEqual(verified["exit_code"], 0)
 
-    def test_cached_reuse_receipt_is_fitted_to_the_evidence_bound(self) -> None:
+    def test_reused_protocol_receipt_is_fitted_to_the_evidence_bound(self) -> None:
         self._run(self._claim(1), self._receipt_path(1),
                   controller=self.controller, repository=self.repository)
-        original = merge_runtime._derived_reuse_receipt
-
-        def oversized(*args, **kwargs):
-            receipt = original(*args, **kwargs)
-            receipt["result"]["stdout"]["tail"] = "x" * 100_000
-            return receipt
-
-        with mock.patch.object(merge_runtime, "_derived_reuse_receipt", side_effect=oversized):
-            references, _reuse, calls = self._run(
-                self._claim(2), self._receipt_path(2),
-                controller=self.controller, repository=self.repository)
+        references, _reuse, calls = self._run(
+            self._claim(2), self._receipt_path(2),
+            controller=self.controller, repository=self.repository)
         self.assertEqual(calls, [])
         self.assertLessEqual(Path(references[0]["receipt_path"]).stat().st_size,
                              self.plan["evidence_limits"]["max_receipt_bytes"])
@@ -6801,41 +6774,35 @@ class EvidenceReuseTests(unittest.TestCase):
                               controller=self.controller, repository=other)
         self.assertEqual(len(calls2), 1, "cross-repository receipts must not be reused")
 
-    def test_tampered_source_receipt_refuses_reuse_fail_closed(self) -> None:
-        references, _, _ = self._run(self._claim(1), self._receipt_path(1),
-                                  controller=self.controller, repository=self.repository)
-        source_path = Path(references[0]["receipt_path"])
+    def test_tampered_canonical_result_stops_without_reexecution(self) -> None:
+        _, trace, _ = self._run(self._claim(1), self._receipt_path(1),
+                                controller=self.controller, repository=self.repository)
+        source_path = Path(trace[0]["source"]["path"])
         receipt = json.loads(source_path.read_text())
-        receipt["result"]["exit_code"] = 0
-        tampered = {**receipt, "validation_identity": {
-            "task_workspace_config_sha256": "9" * 64,
-            "full_suite_config_sha256": "9" * 64,
-            "task_validation_commands_sha256": "9" * 64}}
-        source_path.write_bytes(risk_runtime.canonical(tampered))
-        _, _reuse2, calls2 = self._run(self._claim(2), self._receipt_path(2),
-                              controller=self.controller, repository=self.repository)
-        self.assertEqual(len(calls2), 1, "tampered source must force fresh validation")
+        receipt["result"]["exit_code"] = 9
+        source_path.write_bytes(risk_runtime.canonical(receipt))
+        with self.assertRaisesRegex(merge_runtime.MergeQueueError,
+                                    "canonical command result"):
+            self._run(self._claim(2), self._receipt_path(2),
+                      controller=self.controller, repository=self.repository)
 
-    def test_failed_suites_are_never_cached(self) -> None:
+    def test_failed_terminal_result_is_indexed_but_never_green(self) -> None:
         with self.assertRaisesRegex(merge_runtime.MergeValidationError,
                                     "full-suite validation failed"):
             self._run(self._claim(1), self._receipt_path(1), exit_code=1,
                       controller=self.controller, repository=self.repository)
-        entries = list((self.controller / merge_runtime.EVIDENCE_CACHE_ROOT).glob("*.json"))
-        self.assertEqual(entries, [], "red evidence must never be cached")
+        entries = list((self.controller / merge_runtime.CANONICAL_VALIDATION_ROOT).rglob("result.json"))
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(json.loads(entries[0].read_text())["outcome_identity"]["verdict"],
+                         "FAILED")
 
-    def test_gc_keeps_referenced_entries_and_bounds_count(self) -> None:
-        root = self.controller / merge_runtime.EVIDENCE_CACHE_ROOT
-        old_limit = merge_runtime.EVIDENCE_CACHE_MAX_ENTRIES
-        merge_runtime.EVIDENCE_CACHE_MAX_ENTRIES = 2
-        try:
-            for index in range(4):
-                self._run(self._claim(index + 1), self._receipt_path(index + 1),
-                          tree=("%x" % index) * 40,
-                          controller=self.controller, repository=self.repository)
-            self.assertLessEqual(len(list(root.glob("*.json"))), 2)
-        finally:
-            merge_runtime.EVIDENCE_CACHE_MAX_ENTRIES = old_limit
+    def test_each_changed_tree_has_one_immutable_index_entry(self) -> None:
+        for index in range(4):
+            self._run(self._claim(index + 1), self._receipt_path(index + 1),
+                      tree=("%x" % index) * 40,
+                      controller=self.controller, repository=self.repository)
+        root = self.controller / merge_runtime.CANONICAL_VALIDATION_ROOT
+        self.assertEqual(len(list(root.rglob("result.json"))), 4)
 
     def test_reuse_rows_explain_the_decision(self) -> None:
         self._run(self._claim(1), self._receipt_path(1),
@@ -6846,8 +6813,8 @@ class EvidenceReuseTests(unittest.TestCase):
         row = reuse[0]
         self.assertEqual(row["decision"], "reused")
         self.assertEqual(row["command_id"], "suite")
-        self.assertIn("evidence_key_sha256", row)
-        self.assertIn("source_receipt", row)
+        self.assertEqual(set(row["source"]), {"path", "sha256", "command_id"})
+        self.assertTrue(Path(row["source"]["path"]).is_file())
 
 
 class StandingValidationVerificationTests(unittest.TestCase):

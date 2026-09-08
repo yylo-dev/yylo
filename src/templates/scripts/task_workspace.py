@@ -134,6 +134,7 @@ VALIDATION_PHASES = ("WAITING_FOR_RESOURCE", "SETUP", "RUNNING", "TEARDOWN")
 VALIDATION_TERMINALS = {"PASSED", "FAILED", "TIMED_OUT", "INTERRUPTED", "SETUP_FAILED"}
 STANDING_EVIDENCE_SCHEMA = "juno_standing_validation_evidence.v1"
 CANONICAL_VALIDATION_RECEIPT_SCHEMA = "juno_canonical_validation_receipt.v1"
+CANONICAL_VALIDATION_ROOT = ".juno_task/runtime/validation-receipts"
 STANDING_PLAN_SCHEMA = "juno_standing_validation_plan.v1"
 STANDING_ROOT = ".juno_task/runtime/standing-evidence"
 SUBMISSION_ROOT = ".juno_task/runtime/task-submissions"
@@ -2479,13 +2480,17 @@ def _hydration_manifest_evidence(run_dir: Path) -> dict[str, Optional[str]]:
     }
 
 
+MUTABLE_DEPENDENCY_CACHE_PATHS = frozenset({".vite/vitest/results.json"})
+
+
 def _dependency_content_manifest(worktree: Path, config: dict[str, Any]) -> dict[str, str]:
-    """Content-address every installed dependency file per configured lock cwd.
+    """Content-address every behavior-relevant dependency file per lock cwd.
 
     npm metadata validation cannot detect tampered or corrupted installed
-    bytes, so hydration records a byte manifest of every regular file and
-    symlink under each lock cwd's node_modules. The manifest is stored as a
-    controller-side artifact and verified before any worker budget is spent.
+    bytes, so hydration records regular files and symlinks under each lock
+    cwd's node_modules. Explicit test-run caches are excluded because they are
+    outputs, not command inputs. The controller-side manifest is verified
+    before any worker budget is spent.
     """
     manifest: dict[str, str] = {}
     rows = [*config["focused_validation"], config["full_suite_validation"]]
@@ -2503,6 +2508,9 @@ def _dependency_content_manifest(worktree: Path, config: dict[str, Any]) -> dict
         if not node_modules.is_dir():
             continue
         for path in sorted(node_modules.rglob("*")):
+            dependency_relative = path.relative_to(node_modules).as_posix()
+            if dependency_relative in MUTABLE_DEPENDENCY_CACHE_PATHS:
+                continue
             entry = path.relative_to(worktree).as_posix()
             if path.is_symlink():
                 manifest[entry] = f"link:{os.readlink(path)}"
@@ -4304,78 +4312,53 @@ def standing_evidence_run(controller: Path, task_id: str,
             receipt = loaded[index]
             if entry.finding is not None:
                 raise TaskWorkspaceError(entry.finding.message)
-            execute = False
-            if entry.action == decisions.ACTION_FAILURE_STANDS:
-                failure = (row, receipt["result"])
-            elif entry.action == decisions.ACTION_INVALIDATE:
-                receipt_path = base_receipt_path.with_name(
-                    base_receipt_path.stem + (entry.supersession_suffix or ""))
-                receipt = None; invalidated += 1; execute = True
+            execute = entry.action not in {
+                decisions.ACTION_REUSE, decisions.ACTION_FAILURE_STANDS}
+            if entry.action == decisions.ACTION_INVALIDATE:
+                invalidated += 1
                 decision_log.append(lifecycle_runtime.evidence_decision(
                     row["id"], "invalidated", closure=closure,
                     invalidation=entry.invalidation,
-                    reason="failed evidence remains immutable; readiness changed"))
-            elif entry.action == decisions.ACTION_REUSE:
-                reused += 1
-                decision_log.append(lifecycle_runtime.evidence_decision(
-                    row["id"], "reused", closure=closure,
-                    source={"path": str(receipt_path),
-                            "sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest()}))
-            else:
-                execute = True
-            if execute:
-                cwd = (worktree / row["cwd"]).resolve()
-                try: cwd.relative_to(worktree)
-                except ValueError as exc:
-                    raise TaskWorkspaceError("standing validation cwd escaped task worktree") from exc
-                evidence = (_active_documentation_validation(
-                                repository, head, plan, row,
-                                config["documentation_validation"])
-                            if row["argv"] == lifecycle_runtime.ACTIVE_DOC_ARGV
-                            else run_validation(row, cwd))
-                policy_identity = {
-                    "routing_config_sha256": closure.get("routing_config_sha256"),
-                    "risk_policy_sha256": closure.get("risk_policy_sha256"),
-                    "runtime_sha256": closure.get("runtime_sha256")}
-                snapshot_sha = plan["operation_snapshot"]["snapshot_sha256"]
-                outcome_identity = {
-                    "schema_version": closure.get("outcome_schema"),
-                    "result_sha256": stable_sha256(evidence),
-                    "verdict": ("PASSED" if not evidence["timed_out"]
-                                and evidence["exit_code"] == 0 else "FAILED")}
-                index_identity = {
-                    "command_closure_sha256": closure["input_closure_sha256"],
-                    "policy_identity": policy_identity,
-                    "outcome_identity": outcome_identity,
-                    "repository_identity": lifecycle_runtime.repository_identity(repository),
-                    "snapshot_lineage": {"producer_snapshot_sha256": snapshot_sha,
-                                         "consuming_snapshot_sha256": snapshot_sha}}
-                receipt = {
-                    "schema_version": CANONICAL_VALIDATION_RECEIPT_SCHEMA,
-                    "receipt_kind": "executed", "phase": "task_closure",
-                    "task_id": task_id, "plan_sha256": plan["plan_sha256"],
-                    "tip_sha": head, "command_index": index, "command_id": row["id"],
-                    "command": row, "input_closure": closure,
-                    "complete_input_identity": lifecycle_runtime.complete_input_identity(closure),
-                    "policy_identity": policy_identity, "outcome_identity": outcome_identity,
-                    "index_identity": index_identity,
-                    "index_sha256": stable_sha256(index_identity),
-                    "consuming_candidate": {"candidate_sha": head,
-                                             "candidate_tree": plan["tree_sha"]},
-                    "snapshot_lineage": index_identity["snapshot_lineage"],
-                    "source": None,
-                    "decision_reason": "supported registered validation command execution",
-                    "readiness_sha256": readiness_sha256,
-                    "result": evidence, "recorded_at_unix_ns": time.time_ns()}
-                _standing_atomic(receipt_path, receipt); executed += 1
+                    reason="legacy readiness wrapper retired; canonical command identity is unchanged"))
+            legacy = None
+            if receipt is not None:
+                legacy = (receipt, {"path": str(base_receipt_path),
+                                    "sha256": hashlib.sha256(base_receipt_path.read_bytes()).hexdigest()})
+            cwd = (worktree / row["cwd"]).resolve()
+            try: cwd.relative_to(worktree)
+            except ValueError as exc:
+                raise TaskWorkspaceError("standing validation cwd escaped task worktree") from exc
+
+            def execute_terminal() -> dict[str, Any]:
+                return (_active_documentation_validation(
+                            repository, head, plan, row,
+                            config["documentation_validation"])
+                        if row["argv"] == lifecycle_runtime.ACTIVE_DOC_ARGV
+                        else run_validation(row, cwd))
+
+            try:
+                terminal = lifecycle_runtime.consume_or_execute_command_result(
+                    controller / CANONICAL_VALIDATION_ROOT, repository, closure,
+                    execute_terminal, phase="task_closure", task_id=task_id,
+                    legacy=legacy)
+            except lifecycle_runtime.LifecycleContractError as exc:
+                raise TaskWorkspaceError(str(exc)) from exc
+            receipt = terminal["receipt"]
+            reference = terminal["reference"]
+            receipt_path = Path(reference["path"])
+            actual = terminal["decision"]
+            if actual == "executed":
+                executed += 1
                 active_wall_ms += max(0, int(
-                    evidence.get("timing", {}).get("wall_duration_ms",
-                                                     evidence.get("duration_ms", 0))))
-                decision_log.append(lifecycle_runtime.evidence_decision(
-                    row["id"], "executed", closure=closure,
-                    source={"path": str(receipt_path)}))
-                if receipt["result"]["timed_out"] or receipt["result"]["exit_code"]:
-                    failure = (row, receipt["result"])
+                    receipt["result"].get("timing", {}).get(
+                        "wall_duration_ms", receipt["result"].get("duration_ms", 0))))
+            else:
+                reused += 1
+            decision_log.append(lifecycle_runtime.evidence_decision(
+                row["id"], actual, closure=closure, source=reference,
+                reason="canonical terminal command result"))
+            if receipt["result"]["timed_out"] or receipt["result"]["exit_code"]:
+                failure = (row, receipt["result"])
             receipts.append({"path": str(receipt_path),
                              "sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
                              "command_id": row["id"]})
