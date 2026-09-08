@@ -398,49 +398,9 @@ class MergeQueueTests(unittest.TestCase):
         self.assertIn("Queue-bound risk plan", text)
         self.assertIn('"affected_validation":[{"exit_code":0,"id":"affected"}]', text)
         self.assertIn("No prior reviewed candidate is bound", text)
+        self.assertNotIn("Preimplementation acceptance contract", text)
         for field in merge_runtime.REVIEW_PROMPT_FIELDS:
             self.assertNotRegex(text, r"{{\s*" + field + r"\s*}}")
-
-    def test_rendered_reviewer_prompt_embeds_active_acceptance_contract(self) -> None:
-        template = SCRIPTS.parent / "prompts/review_commit_parallel_runner.md"
-        candidate_sha = "b" * 40
-        base_sha = "a" * 40
-        plan = {
-            "tier": "high", "full_suite_required": False,
-            "evidence_limits": {"max_receipt_bytes": 65536},
-            "candidate": {"base_sha": base_sha, "candidate_sha": candidate_sha},
-        }
-        record = {
-            "task_id": "A", "state": "AWAITING_RISK",
-            "queue_attempt": {
-                "candidate_sha": candidate_sha,
-                "validation": [],
-                "risk": {"plan": plan, "review_progress": {"full_suite_admission": None}},
-            },
-        }
-        contract_dir = (self.controller / merge_runtime.task_runtime.CONTRACTS_ROOT
-                        / "A")
-        contract_dir.mkdir(parents=True)
-        contract = {"schema_version": "juno_preimplementation_acceptance.v1",
-                    "task_id": "A", "status": "ready", "version": 1,
-                    "reviewer_checklist": [
-                        "Acceptance: focused tests pass",
-                        "Parity: runtime and template bytes match"]}
-        contract_path = contract_dir / "v1.json"
-        contract_path.write_text(json.dumps(contract, sort_keys=True) + "\n")
-        output = self.root / "rendered-review-contract.md"
-        with (mock.patch.object(merge_runtime, "managed_review_prompt", return_value=template),
-              mock.patch.object(merge_runtime.task_runtime, "read_state",
-                                return_value={"tasks": {"A": record}})):
-            rendered = merge_runtime.render_managed_review_prompt(
-                self.controller, self.repository, plan, "A", "reviewer_a", 1, output)
-        text = rendered.read_text()
-        self.assertIn("Preimplementation acceptance contract", text)
-        self.assertIn(f"{contract_path.resolve()} sha256="
-                      + hashlib.sha256(contract_path.read_bytes()).hexdigest(), text)
-        self.assertIn("status=ready version=1", text)
-        self.assertIn("- Acceptance: focused tests pass", text)
-        self.assertIn("- Parity: runtime and template bytes match", text)
 
     def test_rendered_reviewer_prompt_accepts_multi_receipt_full_suite_admission(self) -> None:
         template = SCRIPTS.parent / "prompts/review_commit_parallel_runner.md"
