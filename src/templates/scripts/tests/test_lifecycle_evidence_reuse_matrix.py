@@ -67,6 +67,14 @@ class LifecycleEvidenceReuseMatrixTests(unittest.TestCase):
                 {"phase": "integration", "id": "managed-write", "paths": ["integration/write-cas.py", "runtime/merge.py"]},
             ],
             "managed_outputs": {"integration/write-cas.py": "expected-old-v1"},
+            "submission": {
+                "task_id": "matrix", "requirements_sha256": "1" * 64,
+                "admitted_scope_sha256": "2" * 64, "generated_scope_sha256": "3" * 64,
+                "base_sha": "4" * 40, "tip_sha": "5" * 40, "tree_sha": "6" * 40,
+                "origin_projection_sha256": "7" * 64, "hydration_sha256": "8" * 64,
+                "dependency_sha256": "9" * 64, "runtime_sha256": "a" * 64,
+                "validation_sha256": "b" * 64, "risk_sha256": "c" * 64,
+            },
             "discovery": {"complete": True, "kind": "exact-import-closure"},
         }
         values.update(overrides)
@@ -115,7 +123,7 @@ class LifecycleEvidenceReuseMatrixTests(unittest.TestCase):
                          [row["phase"] for row in snapshots.phase_invalidation(baseline, self.compile())])
         docs.write_text(original)
         refreshed = self.compile(target="c" * 40)
-        self.assertEqual("candidate_or_target_drift",
+        self.assertEqual("target_drift",
                          snapshots.phase_invalidation(baseline, refreshed)[0]["reason"])
         managed = self.compile(managed_outputs={"integration/write-cas.py": "unexpected-old"})
         self.assertEqual(["integration"],
