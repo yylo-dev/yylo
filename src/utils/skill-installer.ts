@@ -31,6 +31,7 @@ export interface SkillInstallResult {
   changed: boolean;
   version: string;
   acquisition: 'npx' | 'git';
+  warnings?: string[];
 }
 
 const execFileAsync = promisify(execFile);
@@ -38,6 +39,16 @@ const execFileAsync = promisify(execFile);
 export class SkillInstaller {
   static readonly REPOSITORY = 'https://github.com/yylo-dev/yylo-skills.git';
   static readonly SKILLS = [
+    'artifact-yylo',
+    'ledger-tasks-yylo',
+    'plan-ledger-tasks-yylo',
+    'ralph-loop-yylo',
+    'understand-project-yylo',
+    'wiki-yylo',
+    'workflow-yylo',
+  ] as const;
+
+  private static readonly LEGACY_SKILLS = [
     'kanban-workflow',
     'plan-kanban-tasks',
     'ralph-loop',
@@ -232,7 +243,7 @@ export class SkillInstaller {
       const names = entries.map((entry) => entry.name).sort();
       if (entries.some((entry) => !entry.isDirectory())
           || names.join('\0') !== [...this.SKILLS].sort().join('\0')) {
-        throw new Error(`Staged ${group.name} skills are not the canonical four-skill set`);
+        throw new Error(`Staged ${group.name} skills are not the canonical seven-skill set`);
       }
       const digests = new Map<string, string>();
       for (const skill of this.SKILLS) {
@@ -261,9 +272,22 @@ export class SkillInstaller {
     stage: string,
     record: InstallRecord,
     force: boolean,
-  ): Promise<boolean> {
+  ): Promise<{ changed: boolean; warnings: string[] }> {
     const replacements: { source: string; destination: string; backup: string; prepared: string }[] = [];
+    const retirements: { destination: string; backup: string }[] = [];
+    const warnings: string[] = [];
     const transaction = randomUUID();
+    const recordPath = this.recordPath(projectDir);
+    await assertSafeManagedWritePath(projectDir, recordPath);
+    const previousRecordBytes = await fs.readFile(recordPath).catch(() => undefined);
+    let previousRecord: InstallRecord | undefined;
+    try {
+      previousRecord = previousRecordBytes
+        ? JSON.parse(previousRecordBytes.toString('utf8')) as InstallRecord
+        : undefined;
+    } catch {
+      // An invalid record grants no retirement authority.
+    }
 
     for (const group of this.SKILL_GROUPS) {
       for (const skill of this.SKILLS) {
@@ -285,12 +309,32 @@ export class SkillInstaller {
           });
         }
       }
+
+      for (const legacy of this.LEGACY_SKILLS) {
+        const destination = path.join(projectDir, group.destDir, legacy);
+        if (!(await fs.pathExists(destination))) continue;
+        await assertSafeManagedWritePath(projectDir, destination);
+        const expected = previousRecord?.schemaVersion === 1
+          && previousRecord.repository === this.REPOSITORY
+          && previousRecord.skills.includes(legacy)
+          ? previousRecord.digests?.[group.name]?.[legacy]
+          : undefined;
+        let current: string | undefined;
+        try {
+          current = await this.directoryDigest(destination);
+        } catch {
+          // Unsafe or unreadable legacy content is preserved.
+        }
+        if (expected && current === expected) {
+          retirements.push({ destination, backup: `${destination}.yylo-retired-${transaction}` });
+        } else {
+          warnings.push(`Preserved customized or unrecorded legacy skill at ${path.relative(projectDir, destination)}`);
+        }
+      }
     }
 
-    const recordPath = this.recordPath(projectDir);
-    await assertSafeManagedWritePath(projectDir, recordPath);
-    const previousRecord = await fs.readFile(recordPath).catch(() => undefined);
     const applied: typeof replacements = [];
+    const retired: typeof retirements = [];
     try {
       for (const item of replacements) {
         await fs.ensureDir(path.dirname(item.destination));
@@ -301,15 +345,23 @@ export class SkillInstaller {
         await fs.rename(item.prepared, item.destination);
         applied.push(item);
       }
+      for (const item of retirements) {
+        await fs.rename(item.destination, item.backup);
+        retired.push(item);
+      }
       await fs.ensureDir(path.dirname(recordPath));
       await fs.writeJson(recordPath, record, { spaces: 2 });
       for (const item of replacements) await fs.remove(item.backup);
+      for (const item of retirements) await fs.remove(item.backup);
     } catch (error) {
+      for (const item of [...retired].reverse()) {
+        if (await fs.pathExists(item.backup)) await fs.rename(item.backup, item.destination);
+      }
       for (const item of [...applied].reverse()) {
         await fs.remove(item.destination).catch(() => undefined);
         if (await fs.pathExists(item.backup)) await fs.rename(item.backup, item.destination);
       }
-      if (previousRecord) await fs.outputFile(recordPath, previousRecord);
+      if (previousRecordBytes) await fs.outputFile(recordPath, previousRecordBytes);
       else await fs.remove(recordPath).catch(() => undefined);
       throw error;
     } finally {
@@ -317,8 +369,9 @@ export class SkillInstaller {
         await fs.remove(item.prepared).catch(() => undefined);
         await fs.remove(item.backup).catch(() => undefined);
       }
+      for (const item of retirements) await fs.remove(item.backup).catch(() => undefined);
     }
-    return replacements.length > 0;
+    return { changed: replacements.length > 0 || retirements.length > 0, warnings };
   }
 
   static async installRemote(
@@ -351,7 +404,7 @@ export class SkillInstaller {
           );
         }
       }
-      const changed = await this.installStage(
+      const installation = await this.installStage(
         projectDir,
         stage,
         {
@@ -367,7 +420,12 @@ export class SkillInstaller {
       );
       await this.ensurePiSettings(projectDir, options.silent ?? true);
       if (!options.silent) console.log(`✓ Installed YYLO skills ${version} via ${acquisition}`);
-      return { changed, version, acquisition };
+      return {
+        changed: installation.changed,
+        version,
+        acquisition,
+        ...(installation.warnings.length > 0 ? { warnings: installation.warnings } : {}),
+      };
     } finally {
       await fs.remove(stage);
     }
