@@ -57,6 +57,27 @@ The first guarded release-helper checkpoint is exact `--set v0.1.0-rc.1`; later 
 
 Next: [run an agent](#beginner-agent-workflow), [manage a typed task](#typed-task-and-merge-flow), or [build a managed workflow](#managed-workflows-and-evidence).
 
+### Install agent skills explicitly
+
+YYLO skill content is versioned independently in the public
+[`yylo-dev/yylo-skills`](https://github.com/yylo-dev/yylo-skills) repository and
+is not bundled in `@yylo/cli`. Install the latest stable release, or pin an exact
+stable version:
+
+```bash
+yy skills install
+yy skills install --version 1.0.0
+yy skills update --force
+yy skills status
+```
+
+Only `skills install` and `skills update` access the network. Acquisition is
+staged through `npx skills add` first and falls back to a shallow exact-tag Git
+clone. The four canonical skills are copied to `.agents/skills`,
+`.claude/skills`, and `.pi/skills`. Differing YYLO skill directories are refused
+unless `--force` is supplied; unrelated skills are preserved. `skills list` and
+`skills status` use only the local install record.
+
 ## What YYLO owns
 
 | Need | Public surface | Boundary |
