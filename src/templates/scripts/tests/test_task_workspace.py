@@ -1913,6 +1913,14 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
         repeated = task_runtime.apply_umbrella_recovery(
             self.controller, "X", plan_path, declaration, authorization)
         self.assertEqual(repeated["outcome"], "already_applied")
+        state_before_verify = task_runtime.read_state(self.controller)
+        verified = task_runtime.verify_umbrella_recovery(
+            self.controller, "X", plan_path, declaration, authorization)
+        self.assertEqual(verified["schema_version"],
+                         task_runtime.LEGACY_DELIVERY_VERIFICATION_SCHEMA)
+        self.assertEqual(verified["outcome"], "verified")
+        self.assertFalse(verified["mutation"])
+        self.assertEqual(task_runtime.read_state(self.controller), state_before_verify)
         status = task_runtime.status(self.controller, "X")
         self.assertEqual(status["umbrella_admission_status"]["authority"], "authorized_superseding")
         self.assertEqual(status["delivery_checkpoint_status"]["current_checkpoint_id"], "Y")
