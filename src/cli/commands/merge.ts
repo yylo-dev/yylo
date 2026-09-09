@@ -144,7 +144,7 @@ export function configureMergeQueueCommand(
 ): void {
   const merge = program.command('merge').description('Observe delivery or explicitly run one fenced target owner');
   merge.command('status')
-    .description('Read-only bounded queue summary; request detail or legacy exhaustive output explicitly')
+    .description('Read-only bounded queue state, producer fence, prior evidence, and one eligible action')
     .option('--detail [task-id]', 'Bounded detail for TASK_ID, or the active FIFO attempt')
     .option('--full', 'Legacy exhaustive diagnostic representation')
     .option('--json', 'Force structured JSON when stdout is interactive')

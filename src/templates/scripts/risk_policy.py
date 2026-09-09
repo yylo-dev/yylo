@@ -547,9 +547,14 @@ def _validate_full_suite_execution(receipt: dict[str, Any], command: dict[str, A
     states = timing.get("states") if isinstance(timing, dict) else None
     phase_names = [item.get("state") for item in states] if isinstance(states, list) else []
     terminal = {"PASSED", "FAILED", "TIMED_OUT", "INTERRUPTED", "SETUP_FAILED"}
+    legacy_timing_keys = {"schema_version", "states", "wall_duration_ms",
+                          "critical_path_contribution_ms"}
+    phase_timing_keys = legacy_timing_keys | {
+        "resource_wait_ms", "setup_ms", "execution_ms", "settlement_ms",
+        "first_failure_ms", "overall_elapsed_ms"}
+    timing_keys = frozenset(timing) if isinstance(timing, dict) else frozenset()
     if (not isinstance(timing, dict)
-            or set(timing) != {"schema_version", "states", "wall_duration_ms",
-                               "critical_path_contribution_ms"}
+            or timing_keys not in {frozenset(legacy_timing_keys), frozenset(phase_timing_keys)}
             or timing.get("schema_version") != VALIDATION_TIMING_SCHEMA
             or phase_names[:4] != ["WAITING_FOR_RESOURCE", "SETUP", "RUNNING", "TEARDOWN"]
             or len(phase_names) != 5 or phase_names[-1] not in terminal
@@ -560,6 +565,19 @@ def _validate_full_suite_execution(receipt: dict[str, Any], command: dict[str, A
             or not isinstance(timing.get("wall_duration_ms"), int)
             or timing["wall_duration_ms"] < 0
             or timing.get("critical_path_contribution_ms") != timing["wall_duration_ms"]
+            or (timing_keys == phase_timing_keys and (
+                timing.get("overall_elapsed_ms") != timing["wall_duration_ms"]
+                or timing.get("resource_wait_ms") != states[0]["duration_ms"]
+                or timing.get("setup_ms") != states[1]["duration_ms"]
+                or timing.get("execution_ms") != states[2]["duration_ms"]
+                or timing.get("settlement_ms") != states[3]["duration_ms"]
+                or (timing.get("first_failure_ms") is not None
+                    and (not isinstance(timing.get("first_failure_ms"), int)
+                         or isinstance(timing.get("first_failure_ms"), bool)
+                         or not 0 <= timing["first_failure_ms"] <= timing["overall_elapsed_ms"]))
+                or (phase_names[-1] == "PASSED" and timing.get("first_failure_ms") is not None)
+                or (phase_names[-1] != "PASSED"
+                    and timing.get("first_failure_ms") != timing["overall_elapsed_ms"])))
             or not isinstance(resource, dict)
             or set(resource) != {"id", "lock_identity_sha256", "wait_timeout_seconds",
                                  "owner_diagnostics"}

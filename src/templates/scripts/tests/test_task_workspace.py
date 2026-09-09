@@ -3965,6 +3965,12 @@ raise SystemExit(2)
         self.assertEqual(payload["changed_paths"], ["src/committed.txt"])
         self.assertEqual(payload["uncommitted_paths"], ["src/tracked-dirty.txt", "src/uncommitted.txt"])
         self.assertEqual(payload["changed_paths_scope"], "base_sha..tip committed diff")
+        self.assertEqual(payload["producer_fence"]["attempt"], 1)
+        self.assertEqual(payload["mutation_eligibility"]["operation"], "finish")
+        self.assertTrue(payload["mutation_eligibility"]["eligible"])
+        self.assertEqual(payload["mutation_eligibility"]["safe_next_action"],
+                         "yy task preflight X")
+        self.assertTrue(payload["mutation_eligibility"]["authority_checked_live_by_executor"])
 
     def test_status_reports_uncommitted_only_and_clean_cases(self) -> None:
         self.payload("start", "X")
@@ -4357,6 +4363,17 @@ raise SystemExit(2)
         self.assertTrue((self.workspaces / "X").is_dir())
         self.assertEqual(self.payload("finish", "X")["outcome"], "already_queued")
 
+    def test_state_ineligible_preflight_refuses_before_runtime_or_validation(self) -> None:
+        self.payload("start", "X")
+        state = task_runtime.read_state(self.controller)
+        state["tasks"]["X"]["state"] = "QUEUED"
+        task_runtime.write_state(self.controller, state)
+        with mock.patch.object(task_runtime, "require_current_runtime",
+                               side_effect=AssertionError("runtime must not run")):
+            with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
+                                        "cannot preflight from QUEUED"):
+                task_runtime.preflight(self.controller.resolve(), "X")
+
     def test_empty_commit_is_not_a_finished_feature(self) -> None:
         self.payload("start", "X")
         git(self.workspaces / "X", "commit", "--allow-empty", "-m", "empty")
@@ -4381,6 +4398,13 @@ raise SystemExit(2)
         evidence = self.payload("status", "X")["validation"][0]
         self.assertTrue(evidence["timed_out"])
         self.assertLess(evidence["duration_ms"], 1500)
+        timing = evidence["timing"]
+        self.assertEqual(timing["overall_elapsed_ms"], timing["wall_duration_ms"])
+        self.assertEqual(timing["first_failure_ms"], timing["overall_elapsed_ms"])
+        phase_total = (timing["resource_wait_ms"] + timing["setup_ms"]
+                       + timing["execution_ms"] + timing["settlement_ms"])
+        self.assertLessEqual(phase_total, timing["overall_elapsed_ms"])
+        self.assertLessEqual(timing["overall_elapsed_ms"] - phase_total, 4)
         self.assertGreater(evidence["stdout_truncated_bytes"], 0)
         self.assertGreater(evidence["stderr_truncated_bytes"], 0)
         self.assertLessEqual(len(evidence["stdout_tail"].encode()), 1024)
@@ -7029,6 +7053,23 @@ class MinimumRcLifecycleContractTests(unittest.TestCase):
             third = lifecycle.consume_or_execute_command_result(
                 root, repository, drifted, execute, phase="merge_validation", task_id="T")
             self.assertEqual((third["decision"], calls), ("executed", ["run", "run"]))
+            failed_body = {**body, "environment": {"CI": "failure"}}
+            failed_closure = {**failed_body,
+                              "input_closure_sha256": lifecycle.digest(failed_body)}
+            failure_calls = []
+            def fail_once() -> dict:
+                failure_calls.append("run")
+                return {"exit_code": 7, "timed_out": False, "cancelled": False,
+                        "result_integrity": {"eligible_pass": False}}
+            failed = lifecycle.consume_or_execute_command_result(
+                root, repository, failed_closure, fail_once,
+                phase="task_closure", task_id="T")
+            repeated_failure = lifecycle.consume_or_execute_command_result(
+                root, repository, failed_closure, fail_once,
+                phase="merge_validation", task_id="T")
+            self.assertEqual((failed["decision"], repeated_failure["decision"], failure_calls),
+                             ("executed", "failure_stands", ["run"]))
+            self.assertEqual(repeated_failure["reference"], failed["reference"])
             path = Path(first["reference"]["path"])
             tampered = json.loads(path.read_text())
             tampered["result"]["exit_code"] = 7
