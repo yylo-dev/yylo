@@ -75,7 +75,7 @@ export const MANAGED_PROMPT_MACROS = Object.fromEntries(
   ]),
 ) as Record<string, { path: string }>;
 
-interface ManagedAssetRecord {
+export interface ManagedAssetRecord {
   type: string;
   templateVersion: string;
   sourceSha256: string;
@@ -149,14 +149,17 @@ function sha256(content: Buffer | string): string {
   return createHash('sha256').update(content).digest('hex');
 }
 
-function recordsIdentity(assets: Record<string, ManagedAssetRecord>): string {
+export function managedAssetRecordsIdentity(
+  assets: Record<string, ManagedAssetRecord>,
+): string {
   return sha256(JSON.stringify(Object.entries(assets).sort(([left], [right]) =>
-    left.localeCompare(right)).map(([destination, record]) => ({
-    destination,
-    type: record.type,
-    sourceSha256: record.sourceSha256,
-    installedSha256: record.installedSha256,
-  }))));
+    Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8')))
+    .map(([destination, record]) => ({
+      destination,
+      type: record.type,
+      sourceSha256: record.sourceSha256,
+      installedSha256: record.installedSha256,
+    }))));
 }
 
 function instructionBundleIdentity(
@@ -168,7 +171,7 @@ function instructionBundleIdentity(
     semanticVersion: INSTRUCTION_BUNDLE_DECLARATION.semanticVersion,
     packageVersion: identityVersion,
     assetCount: Object.keys(assets).length,
-    assetsSha256: recordsIdentity(assets),
+    assetsSha256: managedAssetRecordsIdentity(assets),
   };
   return { ...core, bundleSha256: sha256(JSON.stringify(core)) };
 }
@@ -191,7 +194,7 @@ function validateManifest(manifest: unknown, manifestPath: string): ManagedAsset
         !/^[0-9a-f]{64}$/.test(identity.assetsSha256) ||
         !/^[0-9a-f]{64}$/.test(identity.bundleSha256) ||
         identity.assetCount !== Object.keys(parsed.assets).length ||
-        identity.assetsSha256 !== recordsIdentity(parsed.assets) ||
+        identity.assetsSha256 !== managedAssetRecordsIdentity(parsed.assets) ||
         identity.packageVersion !== parsed.packageVersion ||
         identity.bundleSha256 !== sha256(JSON.stringify({
           schemaVersion: identity.schemaVersion,

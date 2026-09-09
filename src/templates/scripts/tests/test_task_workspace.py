@@ -2194,6 +2194,19 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
         started = self.payload("start", "X")
         self.assertEqual(started["state"], "WORKING")
 
+    def test_installed_instruction_bundle_uses_canonical_utf8_record_identity(self) -> None:
+        keys = ["😀", "a", ".dot", "é", "A", "_under"]
+        assets = {destination: {
+            "type": "script", "templateVersion": "1.2.3",
+            "sourceSha256": str(index) * 64, "installedSha256": str(index) * 64}
+                  for index, destination in enumerate(keys, start=1)}
+        self.assertEqual(task_runtime._managed_inventory_records_identity(assets),
+                         "d965b07f2505b7a1c7c7c5dfb8151409191fc8dfa37b81b4bc9ec9a2db4c6f82")
+        inventory = {"schemaVersion": 2, "packageName": "@yylo/cli",
+                     "packageVersion": "1.2.3", "assets": assets}
+        task_runtime._bind_instruction_bundle_identity(inventory)
+        self.assertTrue(task_runtime._managed_inventory_identity_valid(inventory))
+
     def test_installed_instruction_bundle_identity_rejects_mixed_hashes(self) -> None:
         assets = {}
         assets_sha = hashlib.sha256(b"[]").hexdigest()
