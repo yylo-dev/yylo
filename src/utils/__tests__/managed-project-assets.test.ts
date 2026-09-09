@@ -11,6 +11,7 @@ import {
   MANAGED_CONTROLLER_ASSETS,
   MANAGED_PROMPT_MACROS,
   ManagedProjectAssets,
+  managedAssetRecordsIdentity,
 } from '../managed-project-assets.js';
 import { runBoundedTestProcess } from '../../test-utils/bounded-process.js';
 import { withManagedUpdateRollback } from '../managed-update-transaction.js';
@@ -53,6 +54,18 @@ describe('ManagedProjectAssets', {
 
     const inventory = await fs.readJson(inventoryPath);
     expect(inventory.packageName).toBe('@yylo/cli');
+    const assetsSha256 = managedAssetRecordsIdentity(inventory.assets);
+    expect(inventory.instructionBundle.assetsSha256).toBe(assetsSha256);
+    const identityCore = {
+      schemaVersion: inventory.instructionBundle.schemaVersion,
+      semanticVersion: inventory.instructionBundle.semanticVersion,
+      packageVersion: inventory.instructionBundle.packageVersion,
+      assetCount: inventory.instructionBundle.assetCount,
+      assetsSha256,
+    };
+    expect(inventory.instructionBundle.bundleSha256).toBe(
+      sha256(JSON.stringify(identityCore)),
+    );
     for (const [destination, identity] of Object.entries(
       inventory.assets as Record<string, { sourceSha256: string; installedSha256: string }>,
     )) {
@@ -190,6 +203,19 @@ describe('ManagedProjectAssets', {
     const report = await ManagedProjectAssets.inspectGeneration(projectDir);
     expect(report.coherent).toBe(true);
     expect(report.instructionBundle?.schemaVersion).toBe('juno_instruction_bundle.v1');
+  });
+
+  it('uses canonical UTF-8 ordering and encoding for managed record identity', () => {
+    const keys = ['😀', 'a', '.dot', 'é', 'A', '_under'];
+    const assets = Object.fromEntries(keys.map((destination, index) => [destination, {
+      type: 'script',
+      templateVersion: '1.2.3',
+      sourceSha256: String(index + 1).repeat(64),
+      installedSha256: String(index + 1).repeat(64),
+    }]));
+    expect(managedAssetRecordsIdentity(assets)).toBe(
+      'd965b07f2505b7a1c7c7c5dfb8151409191fc8dfa37b81b4bc9ec9a2db4c6f82',
+    );
   });
 
   it('writes one complete semantic instruction-bundle identity on fresh install', async () => {
