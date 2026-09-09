@@ -474,7 +474,7 @@ describe('Main Command', () => {
       it('should rewrite a leading %shortcut for claude prompts', async () => {
         const options: MainCommandOptions = {
           subagent: 'claude',
-          prompt: '%ralph-loop investigate this regression',
+          prompt: '%ralph-loop-yylo investigate this regression',
           cwd: '/test',
           maxIterations: 1,
           interactive: false,
@@ -489,7 +489,7 @@ describe('Main Command', () => {
         const { createExecutionRequest } = await import('../../core/engine.js');
         expect(createExecutionRequest).toHaveBeenCalledWith(
           expect.objectContaining({
-            instruction: '/ralph-loop investigate this regression',
+            instruction: '/ralph-loop-yylo investigate this regression',
           }),
         );
       });
@@ -497,7 +497,7 @@ describe('Main Command', () => {
       it('should rewrite a leading %shortcut for pi prompts', async () => {
         const options: MainCommandOptions = {
           subagent: 'pi',
-          prompt: '%ralph-loop investigate this regression',
+          prompt: '%ralph-loop-yylo investigate this regression',
           cwd: '/test',
           maxIterations: 1,
           interactive: false,
@@ -512,7 +512,7 @@ describe('Main Command', () => {
         const { createExecutionRequest } = await import('../../core/engine.js');
         expect(createExecutionRequest).toHaveBeenCalledWith(
           expect.objectContaining({
-            instruction: '/skill:ralph-loop investigate this regression',
+            instruction: '/skill:ralph-loop-yylo investigate this regression',
           }),
         );
       });
@@ -521,7 +521,7 @@ describe('Main Command', () => {
         const payload = '## oD5g4o\nWhat is the root cause of 504\n@@no_code';
         const options: MainCommandOptions = {
           subagent: 'pi',
-          prompt: `%ralph-loop ${payload}`,
+          prompt: `%ralph-loop-yylo ${payload}`,
           cwd: '/test',
           maxIterations: 1,
           interactive: false,
@@ -535,14 +535,14 @@ describe('Main Command', () => {
 
         const { createExecutionRequest } = await import('../../core/engine.js');
         expect(createExecutionRequest).toHaveBeenCalledWith(
-          expect.objectContaining({ instruction: `/skill:ralph-loop ${payload}` }),
+          expect.objectContaining({ instruction: `/skill:ralph-loop-yylo ${payload}` }),
         );
       });
 
       it('should rewrite a leading %shortcut for codex prompts', async () => {
         const options: MainCommandOptions = {
           subagent: 'codex',
-          prompt: '%ralph-loop investigate this regression',
+          prompt: '%ralph-loop-yylo investigate this regression',
           cwd: '/test',
           maxIterations: 1,
           interactive: false,
@@ -557,7 +557,7 @@ describe('Main Command', () => {
         const { createExecutionRequest } = await import('../../core/engine.js');
         expect(createExecutionRequest).toHaveBeenCalledWith(
           expect.objectContaining({
-            instruction: '$ralph-loop investigate this regression',
+            instruction: '$ralph-loop-yylo investigate this regression',
           }),
         );
       });
@@ -565,7 +565,7 @@ describe('Main Command', () => {
       it('should only rewrite %shortcut when it is at the very start of the prompt', async () => {
         const options: MainCommandOptions = {
           subagent: 'pi',
-          prompt: 'please run %ralph-loop now',
+          prompt: 'please run %ralph-loop-yylo now',
           cwd: '/test',
           maxIterations: 1,
           interactive: false,
@@ -580,7 +580,7 @@ describe('Main Command', () => {
         const { createExecutionRequest } = await import('../../core/engine.js');
         expect(createExecutionRequest).toHaveBeenCalledWith(
           expect.objectContaining({
-            instruction: 'please run %ralph-loop now',
+            instruction: 'please run %ralph-loop-yylo now',
           }),
         );
       });
@@ -588,7 +588,7 @@ describe('Main Command', () => {
       it('should support braced %{} shortcut form at the start of the prompt', async () => {
         const options: MainCommandOptions = {
           subagent: 'pi',
-          prompt: '%{ralph-loop} investigate this regression',
+          prompt: '%{ralph-loop-yylo} investigate this regression',
           cwd: '/test',
           maxIterations: 1,
           interactive: false,
@@ -603,13 +603,13 @@ describe('Main Command', () => {
         const { createExecutionRequest } = await import('../../core/engine.js');
         expect(createExecutionRequest).toHaveBeenCalledWith(
           expect.objectContaining({
-            instruction: '/skill:ralph-loop investigate this regression',
+            instruction: '/skill:ralph-loop-yylo investigate this regression',
           }),
         );
       });
 
       it('should strip a leading markdown delimiter and rewrite %shortcut for pi prompt files', async () => {
-        vi.mocked(fs.readFile).mockResolvedValueOnce('---\n\n%ralph-loop investigate this regression');
+        vi.mocked(fs.readFile).mockResolvedValueOnce('---\n\n%ralph-loop-yylo investigate this regression');
 
         const options: MainCommandOptions = {
           subagent: 'pi',
@@ -629,14 +629,14 @@ describe('Main Command', () => {
         const { createExecutionRequest } = await import('../../core/engine.js');
         expect(createExecutionRequest).toHaveBeenCalledWith(
           expect.objectContaining({
-            instruction: '/skill:ralph-loop investigate this regression',
+            instruction: '/skill:ralph-loop-yylo investigate this regression',
             live: true,
           }),
         );
       });
 
       it('should strip a leading markdown delimiter before existing /skill directives', async () => {
-        vi.mocked(fs.readFile).mockResolvedValueOnce('---\n\n/skill:ralph-loop investigate this regression');
+        vi.mocked(fs.readFile).mockResolvedValueOnce('---\n\n/skill:ralph-loop-yylo investigate this regression');
 
         const options: MainCommandOptions = {
           subagent: 'pi',
@@ -656,7 +656,7 @@ describe('Main Command', () => {
         const { createExecutionRequest } = await import('../../core/engine.js');
         expect(createExecutionRequest).toHaveBeenCalledWith(
           expect.objectContaining({
-            instruction: '/skill:ralph-loop investigate this regression',
+            instruction: '/skill:ralph-loop-yylo investigate this regression',
             live: true,
           }),
         );
@@ -1382,7 +1382,7 @@ describe('Main Command', () => {
           await new Promise((r) => setTimeout(r, 50));
 
           // Simulate heredoc content via stdin
-          dataCallback!('/ralph-loop Do Task 45OLrc\n');
+          dataCallback!('/ralph-loop-yylo Do Task 45OLrc\n');
           endCallback!();
 
           await handlerPromise;
@@ -1390,7 +1390,7 @@ describe('Main Command', () => {
           const { createExecutionRequest } = await import('../../core/engine.js');
           expect(createExecutionRequest).toHaveBeenCalledWith(
             expect.objectContaining({
-              instruction: '/ralph-loop Do Task 45OLrc',
+              instruction: '/ralph-loop-yylo Do Task 45OLrc',
             }),
           );
           expect(processExitSpy).toHaveBeenCalledWith(0);

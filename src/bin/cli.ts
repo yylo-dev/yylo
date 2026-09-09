@@ -1649,8 +1649,8 @@ ${chalk.blue('Examples:')}
   ypl --resume <session-id> '@@close_loop'  ${chalk.gray('# live resume; do not prefix with "clone C"')}
 
   ${chalk.gray('# Interactive live TUI mode')}
-  yylo pi --live -p '/skill:ralph-loop' -i 1
-  ypl '/skill:ralph-loop' -i 1     ${chalk.gray('# shortcut for: yy pi --live ...')}
+  yylo pi --live -p '/skill:ralph-loop-yylo' -i 1
+  ypl '/skill:ralph-loop-yylo' -i 1     ${chalk.gray('# shortcut for: yy pi --live ...')}
 
   ${chalk.gray('# Named Pi session branches (per shell/pane continue scope)')}
   ypl 'init'                       ${chalk.gray('# creates/resets the main branch from a root Pi run')}
