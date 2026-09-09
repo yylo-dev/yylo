@@ -49,6 +49,7 @@
     "README.md",
     "juno-benchmark",
     "juno-code",
+    "juno-code/docs/lifecycle-simplification-migration.md",
     "scripts",
     "telegram_bot"
   ],
