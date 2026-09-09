@@ -176,6 +176,7 @@ describe('Init Command', () => {
       expect(options.some((opt) => opt.flags.includes('--task'))).toBe(true);
       expect(options.some((opt) => opt.flags.includes('--git-url'))).toBe(true);
       expect(options.some((opt) => opt.flags.includes('--interactive'))).toBe(true);
+      expect(options.some((opt) => opt.flags.includes('--target-branch'))).toBe(true);
 
       // Issue #32: Added back --subagent and --git-repo for inline mode support
       expect(options.some((opt) => opt.flags.includes('--subagent'))).toBe(true);
@@ -504,7 +505,14 @@ describe('Init Command', () => {
             .mocked(fs.writeFile)
             .mock.calls.some(([filePath]) => String(filePath).endsWith('.env.yylo')),
         ).toBe(true);
-        expect(ManagedProjectAssets.update).toHaveBeenCalledWith('/current/dir', { silent: false });
+        expect(
+          vi.mocked(fs.writeFile).mock.calls.some(([filePath]) =>
+            String(filePath).endsWith('.gitignore')),
+        ).toBe(true);
+        expect(ManagedProjectAssets.update).toHaveBeenCalledWith('/current/dir', {
+          silent: false,
+          localization: {},
+        });
         expect(processExitSpy).toHaveBeenCalledWith(0);
       });
 

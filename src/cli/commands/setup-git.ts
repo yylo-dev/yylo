@@ -11,6 +11,7 @@ import * as readline from 'node:readline';
 
 import { GitManager, GitUrlUtils, type GitRepositoryInfo } from '../../core/git.js';
 import type { SetupGitOptions } from '../types.js';
+import { ManagedProjectAssets } from '../../utils/managed-project-assets.js';
 
 // Import environment detector for headless mode checks
 import { isHeadlessEnvironment } from '../../utils/environment.js';
@@ -209,6 +210,9 @@ class GitSetupInteractive {
       console.log(chalk.blue(`Setting up upstream: ${url}`));
       await this.gitManager.setupUpstream(url);
       await this.gitManager.updateJunoTaskConfig(url);
+      await ManagedProjectAssets.update(process.cwd(), {
+        silent: true, localization: { gitRemoteUrl: url },
+      });
       console.log(chalk.green(`✅ Upstream URL configured: ${url}`));
 
       // Get updated info
@@ -395,6 +399,9 @@ export async function setupGitCommandHandler(
 
       await gitManager.setupUpstream(url);
       await gitManager.updateJunoTaskConfig(url);
+      await ManagedProjectAssets.update(workingDirectory, {
+        silent: true, localization: { gitRemoteUrl: url },
+      });
 
       console.log(chalk.green(`✅ Upstream URL configured: ${url}`));
 

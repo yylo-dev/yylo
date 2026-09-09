@@ -425,9 +425,21 @@ def load_config(controller: Path) -> dict[str, Any]:
                 "full_suite_validation"}
     optional = {"selectable_paths", "hydration_workflow", "validation_profiles", "documentation_validation",
                 "legacy_umbrella_creation"}
-    if (not isinstance(value, dict) or not required.issubset(value) or set(value) - required - optional
-            or value.get("schema_version") != CONFIG_SCHEMA):
-        raise TaskWorkspaceError(f"task workspace policy must contain exactly the {CONFIG_SCHEMA} fields")
+    if not isinstance(value, dict):
+        raise TaskWorkspaceError("task workspace policy must be a JSON object")
+    missing = sorted(required - set(value))
+    extra = sorted(set(value) - required - optional)
+    if missing or extra:
+        details = []
+        if missing:
+            details.append("missing fields: " + ", ".join(missing))
+        if extra:
+            details.append("extra fields: " + ", ".join(extra))
+        raise TaskWorkspaceError(
+            f"task workspace policy field mismatch ({'; '.join(details)})")
+    if value.get("schema_version") != CONFIG_SCHEMA:
+        raise TaskWorkspaceError(
+            f"task workspace policy schema_version must be {CONFIG_SCHEMA}")
     value.setdefault("selectable_paths", [])
     value.setdefault("hydration_workflow", ".juno_task/config/worktree-hydration.yaml")
     value.setdefault("legacy_umbrella_creation", False)

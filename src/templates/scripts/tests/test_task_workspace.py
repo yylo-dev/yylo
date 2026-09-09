@@ -811,6 +811,16 @@ class ValidationProfilesRoundTripTests(unittest.TestCase):
                                        "argv": [sys.executable, "-c", "pass"]},
         }
 
+    def test_policy_field_mismatch_names_missing_and_extra_keys(self) -> None:
+        config = self.base_config()
+        del config["full_suite_validation"]
+        config["unexpected_policy"] = True
+        self.write_config(config)
+        with self.assertRaisesRegex(
+                task_runtime.TaskWorkspaceError,
+                r"missing fields: full_suite_validation; extra fields: unexpected_policy"):
+            task_runtime.load_config(self.controller)
+
     def test_absent_profiles_stay_absent_across_renormalization(self) -> None:
         self.write_config(self.base_config())
         first = task_runtime.load_config(self.controller)
