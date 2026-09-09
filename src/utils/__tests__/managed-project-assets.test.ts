@@ -198,7 +198,7 @@ describe('ManagedProjectAssets', {
     expect(manifest.schemaVersion).toBe(2);
     expect(manifest.instructionBundle).toEqual(expect.objectContaining({
       schemaVersion: 'juno_instruction_bundle.v1',
-      semanticVersion: '2.0.0',
+      semanticVersion: '1.0.0',
       packageVersion: manifest.packageVersion,
       assetCount: Object.keys(manifest.assets).length,
       assetsSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
