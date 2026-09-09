@@ -44,10 +44,6 @@ const canonicalImplementation = readFileSync(
   path.join('src', 'templates', 'skills', 'canonical', 'ralph-loop', 'references', 'implement.md'),
 );
 assertBoundedReviewContract(canonicalImplementation, 'canonical implementation instruction');
-const implementationPaths = ['claude', 'codex', 'pi'].map(
-  (agent) => `skills/${agent}/ralph-loop/references/implement.md`,
-);
-
 for (const asset of assets) {
   const source = readFileSync(path.join('src', 'templates', asset.source));
   const built = readFileSync(path.join('dist', 'templates', asset.source));
@@ -104,28 +100,14 @@ try {
     readFileSync(path.join(packDirectory, 'package', 'dist/templates/prompts/life_cycle.md')),
     'packed @@life_cycle prompt',
   );
-  for (const relativePath of implementationPaths) {
-    const source = readFileSync(path.join('src', 'templates', relativePath));
-    const builtPath = path.join('dist', 'templates', relativePath);
-    const packedPath = `dist/templates/${relativePath}`;
-    assert.ok(
-      inventory.has(packedPath),
-      `npm package omits implementation instruction: ${packedPath}`,
-    );
-    assert.deepEqual(
-      source,
-      canonicalImplementation,
-      `source implementation instruction drift: ${relativePath}`,
-    );
-    assert.deepEqual(
-      readFileSync(builtPath),
-      source,
-      `built implementation instruction drift: ${relativePath}`,
-    );
-    const packed = readFileSync(path.join(packDirectory, 'package', packedPath));
-    assert.deepEqual(packed, source, `packed implementation instruction drift: ${relativePath}`);
-    assertBoundedReviewContract(packed, `packed implementation instruction ${relativePath}`);
-  }
+  const bundledSkillPayloads = [...inventory].filter(
+    (entry) => entry.startsWith('dist/templates/skills/') && entry.endsWith('/SKILL.md'),
+  );
+  assert.deepEqual(
+    bundledSkillPayloads,
+    [],
+    'npm package must not contain canonical skill payloads',
+  );
 } finally {
   rmSync(packDirectory, { recursive: true, force: true });
 }
