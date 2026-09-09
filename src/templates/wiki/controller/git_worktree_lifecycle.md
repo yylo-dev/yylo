@@ -195,18 +195,16 @@ candidate, and preflight/finish refuse unless it binds the exact submitted tip.
 Checkpoint completion means `IMPLEMENTED`; only the owner's landed target result
 means `INTEGRATED`.
 
-The ordinary `yy task` surface has no umbrella start, child checkpoint, or
-conversion command. Existing umbrella schemas are finite legacy inputs under
-`yy migrate legacy-lifecycle plan|authorize|apply|verify|checkpoint` only.
-Plan and verify are read-only; apply requires the controller-issued receipt for
-one exact reviewed plan, and checkpoint only drains an already-WORKING legacy
-attempt. These aliases call the same managed task runtime and never create a
-child worktree or a second executor. Historical receipts, dirty bytes and
-predecessor evidence remain immutable, unsupported state refuses, and no child
-is represented as separately integrated. See
-`juno-code/docs/lifecycle-simplification-migration.md` for state dispositions,
-live-authority restrictions and the owner-proved retirement condition. Live
-conversion and release activation remain separately authorized maintenance.
+New umbrella execution is disabled by default. The old `--umbrella-admission`,
+`child-checkpoint`, and recovery schemas are finite legacy inputs only when an
+explicit compatibility policy admits fixture/drain handling. Historical
+receipts are immutable. Recovery plan/apply remains bounded and identity-bound,
+preserves dirty bytes and predecessor evidence, and refuses unsupported state
+without creating child worktrees or widening scope. No legacy child is broadly
+marked done, and no old checkpoint is represented as separate integration.
+Removal is permitted only after the conversion inventory proves there are no
+active legacy umbrella records; release activation and live conversion remain
+separately authorized maintenance.
 
 ## Checkout-aware entry points
 
@@ -284,6 +282,8 @@ python3 "$CANDIDATE/.juno_task/scripts/merge_queue.py" --controller "$CONTROLLER
 ```
 
 ## Integration owner lifecycle
+
+For a fresh consumer, create a clean, detached, full owner at the exact configured target, then run `yy integration register /absolute/integration-owner` from the clean, attached controller. Registration enables worktree config; seeds absent owner role/authority/base, controller role/base, repo-local routing, and package runtime identity; verifies exact readback; and binds the owner. Repetition is idempotent. Partial, differing, or stale identity is never overwritten; use receipt-directed migration or repair instead. No manual `git config` is required.
 
 ```text
 status [--fetch]

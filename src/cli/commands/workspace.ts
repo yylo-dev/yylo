@@ -37,9 +37,12 @@ function humanInfo(report: WorkspaceTopology): string {
     line('Submodules', report.submodules.length),
     line('Invoker CLI', report.runtime.cliVersion),
     line('Controller executable', report.runtime.controllerVersion),
-    line('Managed scripts package', report.runtime.managedGeneration.packageVersion),
-    line('Managed scripts target', report.runtime.managedGeneration.targetSha),
-    line('Managed scripts healthy', report.runtime.managedGeneration.healthy),
+    line('Managed scripts package', report.runtime.managedGeneration.packageVersion ??
+      'not applicable (unbound consumer)'),
+    line('Managed scripts target', report.runtime.managedGeneration.targetSha ??
+      'not applicable (unbound consumer)'),
+    line('Managed scripts healthy', report.runtime.managedGeneration.healthy ??
+      'not applicable (unbound consumer)'),
     'Findings',
     ...findingLines,
   ].join('\n');
