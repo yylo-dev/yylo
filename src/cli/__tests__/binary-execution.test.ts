@@ -275,10 +275,6 @@ describe('Binary Execution Tests', () => {
         PROJECT_ROOT,
         'dist/templates/extensions/pi/juno-skill-preprocessor.ts',
       );
-      const builtRalphSkill = path.join(
-        PROJECT_ROOT,
-        'dist/templates/skills/pi/ralph-loop/SKILL.md',
-      );
       const homeDir = path.join(tempDir, 'home');
       const projectDir = path.join(tempDir, 'project');
       const builtPackageRoot = path.join(tempDir, 'built-package');
@@ -287,10 +283,6 @@ describe('Binary Execution Tests', () => {
       const fixturePiExtension = path.join(
         builtPackageDir,
         'templates/extensions/pi/juno-skill-preprocessor.ts',
-      );
-      const fixtureRalphSkill = path.join(
-        builtPackageDir,
-        'templates/skills/pi/ralph-loop/SKILL.md',
       );
       const fakeBin = path.join(tempDir, 'fake-bin');
       const servicesDir = path.join(homeDir, '.yylo', 'services');
@@ -314,12 +306,15 @@ describe('Binary Execution Tests', () => {
       );
       expect(await fs.pathExists(builtYpl)).toBe(true);
       expect(await fs.pathExists(builtPiExtension)).toBe(true);
-      expect(await fs.pathExists(builtRalphSkill)).toBe(true);
+      expect(await fs.pathExists(path.join(PROJECT_ROOT, 'dist/templates/skills'))).toBe(false);
       await fs.copy(path.join(PROJECT_ROOT, 'dist'), builtPackageDir);
       await fs.copy(path.join(PROJECT_ROOT, 'package.json'), path.join(builtPackageRoot, 'package.json'));
       await fs.symlink(path.join(PROJECT_ROOT, 'node_modules'), path.join(builtPackageRoot, 'node_modules'));
       await fs.copy(fixturePiExtension, installedExtension);
-      await fs.copy(fixtureRalphSkill, installedSkill);
+      await fs.writeFile(
+        installedSkill,
+        '---\nname: ralph-loop\n---\nFixture instructions for $ARGUMENTS\n',
+      );
       await execa(path.join(PROJECT_ROOT, 'node_modules/.bin/esbuild'), [
         installedExtension,
         '--bundle',
@@ -1078,7 +1073,7 @@ exit 1
       expect(await fs.pathExists(path.join(tempDir, 'AGENTS.md'))).toBe(true);
       expect(await fs.pathExists(path.join(tempDir, 'CLAUDE.md'))).toBe(true);
       for (const root of ['.agents/skills', '.claude/skills', '.pi/skills']) {
-        expect(await fs.pathExists(path.join(tempDir, root, 'kanban-workflow/SKILL.md'))).toBe(true);
+        expect(await fs.pathExists(path.join(tempDir, root, 'kanban-workflow/SKILL.md'))).toBe(false);
       }
       expect(await fs.readFile(configPath, 'utf8')).toBe(configBytes);
       const updatedPolicy = await fs.readJson(policyPath);
@@ -1095,12 +1090,10 @@ exit 1
       });
       for (const destination of [
         'AGENTS.md', 'CLAUDE.md',
-        '.agents/skills/kanban-workflow/SKILL.md',
-        '.claude/skills/ralph-loop/references/implement.md',
-        '.pi/skills/understand-project/SKILL.md',
         '.juno_task/prompts/lifecycle/task-implementation.md',
         '.juno_task/workflows/yy-task-run.yaml',
       ]) expect(manifest.assets[destination], destination).toBeDefined();
+      expect(Object.keys(manifest.assets).some((entry) => entry.includes('/skills/'))).toBe(false);
       const dirtyPaths = execFileSync(
         'git', ['status', '--porcelain=v1', '--untracked-files=all'],
         { cwd: tempDir, encoding: 'utf8' },
