@@ -10,6 +10,7 @@ import { checkpointControllerAfterFinalization } from '../../utils/controller-ch
 export type TaskWorkspaceOperation =
   | 'start'
   | 'run'
+  | 'resume'
   | 'recover-predispatch'
   | 'recover-wall-budget'
   | 'status'
@@ -185,6 +186,11 @@ export function configureTaskWorkspaceCommand(
     .description('Execute the controller-owned typed task workflow through QUEUED')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
     .action((taskId: string) => invoke('run', taskId, []));
+  task
+    .command('resume')
+    .description('Resume through the existing fenced task-run owner from the earliest verified stage')
+    .argument('<task-id>', 'Canonical YYLO Ledger task ID')
+    .action((taskId: string) => invoke('resume', taskId, []));
   task
     .command('recover-predispatch')
     .description('Release one receipt-proven no-provider task-run attempt without spending model budget')

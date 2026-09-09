@@ -25,6 +25,7 @@ describe('task workspace CLI', () => {
 
   it.each([
     { operation: 'run', expected: undefined },
+    { operation: 'resume', expected: undefined },
     { operation: 'start', expected: [] },
     { operation: 'status', expected: undefined },
     { operation: 'admission', expected: undefined },
@@ -53,7 +54,7 @@ describe('task workspace CLI', () => {
     configureTaskWorkspaceCommand(program, async () => undefined);
     const task = program.commands.find((command) => command.name() === 'task');
     expect(task?.commands.map((command) => command.name())).toEqual([
-      'run', 'recover-predispatch', 'recover-wall-budget', 'start', 'admission', 'preflight', 'checkpoint',
+      'run', 'resume', 'recover-predispatch', 'recover-wall-budget', 'start', 'admission', 'preflight', 'checkpoint',
       'child-checkpoint', 'hydrate', 'status', 'finish', 'doctor', 'sync', 'lease-status',
       'lease-heartbeat', 'lease-handoff', 'lease-successor', 'lease-revoke', 'lease-release',
       'recovery-plan', 'recovery-authorize', 'recovery-apply', 'runtime-bootstrap',
@@ -196,7 +197,7 @@ describe('task workspace CLI', () => {
     expect(invoke).toHaveBeenLastCalledWith('lease-status', 'T1', []);
   });
 
-  it.each(['run', 'start', 'hydrate', 'finish', 'recovery-authorize', 'recovery-apply',
+  it.each(['run', 'resume', 'start', 'hydrate', 'finish', 'recovery-authorize', 'recovery-apply',
            'lease-heartbeat', 'lease-handoff', 'lease-successor', 'lease-revoke', 'lease-release'] as const)(
     'checkpoints durable controller state after task %s without replacing its outcome',
     async (operation) => {
