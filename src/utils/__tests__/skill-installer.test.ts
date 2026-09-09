@@ -1,716 +1,219 @@
-/**
- * Skill Installer Tests
- * Tests for the SkillInstaller utility that manages agent skill files
- *
- * The SkillInstaller copies skill files from package templates into project directories:
- *   - codex skills -> .agents/skills/
- *   - claude skills -> .claude/skills/
- *   - pi skills    -> .pi/skills/
- *
- * It also provisions `.pi/settings.json` (if missing) so Pi can cross-load
- * Claude skills from `.claude/skills/`.
- *
- * These tests verify correct behavior for installation, content-based updates,
- * file listing, auto-update logic, and Pi settings provisioning.
- */
-
-import { spawnSync } from 'node:child_process';
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs-extra';
-import * as path from 'node:path';
 import * as os from 'node:os';
+import * as path from 'node:path';
 import { SkillInstaller } from '../skill-installer.js';
 
-describe('SkillInstaller', () => {
-  let testDir: string;
+const GROUPS = ['.agents/skills', '.claude/skills', '.pi/skills'];
+const SKILLS = ['kanban-workflow', 'plan-kanban-tasks', 'ralph-loop', 'understand-project'];
+
+type Runner = (command: string, args: string[], cwd?: string) => Promise<{ stdout: string; stderr: string }>;
+
+describe('SkillInstaller remote acquisition', () => {
+  let project: string;
+  let runner: ReturnType<typeof vi.spyOn>;
+
+  const populateNpxStage = async (stage: string, marker = 'canonical') => {
+    for (const group of GROUPS) {
+      for (const skill of SKILLS) {
+        const root = path.join(stage, group, skill);
+        await fs.ensureDir(root);
+        await fs.writeFile(path.join(root, 'SKILL.md'), `---\nname: ${skill}\n---\n${marker}\n`);
+        await fs.writeFile(path.join(root, 'README.md'), `# ${skill}\n`);
+        if (skill === 'ralph-loop') {
+          await fs.ensureDir(path.join(root, 'scripts'));
+          await fs.writeFile(path.join(root, 'scripts', 'kanban.sh'), '#!/bin/sh\n', { mode: 0o755 });
+        }
+      }
+    }
+  };
+
+  const populateClone = async (clone: string) => {
+    for (const skill of SKILLS) {
+      const root = path.join(clone, 'skills', skill);
+      await fs.ensureDir(root);
+      await fs.writeFile(path.join(root, 'SKILL.md'), `---\nname: ${skill}\n---\ncanonical\n`);
+      await fs.writeFile(path.join(root, 'README.md'), `# ${skill}\n`);
+      if (skill === 'ralph-loop') {
+        await fs.ensureDir(path.join(root, 'scripts'));
+        await fs.writeFile(path.join(root, 'scripts', 'kanban.sh'), '#!/bin/sh\n', { mode: 0o755 });
+      }
+    }
+  };
+
+  const defaultRunner: Runner = async (command, args, cwd) => {
+    if (command === 'git' && args.includes('ls-files')) return { stdout: '', stderr: '' };
+    if (command === 'git' && args.includes('ls-remote')) {
+      return {
+        stdout: args.includes('--refs')
+          ? [
+              'a\trefs/tags/v0.9.0',
+              'b\trefs/tags/v1.0.0-rc.1',
+              'c\trefs/tags/v1.0.0',
+            ].join('\n') + '\n'
+          : 'c\trefs/tags/v1.0.0\n',
+        stderr: '',
+      };
+    }
+    if (command === 'npx') {
+      await populateNpxStage(cwd!);
+      return { stdout: 'installed', stderr: '' };
+    }
+    if (command === 'git' && args[0] === 'clone') {
+      await populateClone(args.at(-1)!);
+      return { stdout: '', stderr: '' };
+    }
+    throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
+  };
 
   beforeEach(async () => {
-    testDir = path.join(
-      os.tmpdir(),
-      `skill-installer-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    );
-    await fs.ensureDir(testDir);
+    project = await fs.mkdtemp(path.join(os.tmpdir(), 'yylo-skill-installer-test-'));
+    await fs.ensureDir(path.join(project, '.juno_task'));
+    runner = vi
+      .spyOn(SkillInstaller as unknown as { runCommand: Runner }, 'runCommand')
+      .mockImplementation(defaultRunner);
   });
 
   afterEach(async () => {
-    if (testDir) {
-      await fs.remove(testDir);
+    vi.restoreAllMocks();
+    await fs.remove(project);
+  });
+
+  it('resolves the latest stable SemVer and stages one targeted npx copy install', async () => {
+    const result = await SkillInstaller.installRemote(project);
+    expect(result).toEqual({ changed: true, version: 'v1.0.0', acquisition: 'npx' });
+    const npx = runner.mock.calls.find(([command]) => command === 'npx');
+    expect(npx?.[1]).toEqual(expect.arrayContaining([
+      '--yes', 'skills', 'add',
+      'https://github.com/yylo-dev/yylo-skills/tree/v1.0.0',
+      '--copy', '--agent', 'codex', 'claude-code', 'pi',
+    ]));
+    for (const group of GROUPS) {
+      for (const skill of SKILLS) {
+        expect(await fs.pathExists(path.join(project, group, skill, 'SKILL.md'))).toBe(true);
+      }
     }
   });
 
-  describe('getSkillGroups', () => {
-    it('should return the configured skill groups', () => {
-      const groups = SkillInstaller.getSkillGroups();
-      expect(groups).toEqual([
-        { name: 'codex', destDir: '.agents/skills' },
-        { name: 'claude', destDir: '.claude/skills' },
-        { name: 'pi', destDir: '.pi/skills' },
-      ]);
-    });
-
-    it('should return a copy (not the internal array)', () => {
-      const groups1 = SkillInstaller.getSkillGroups();
-      const groups2 = SkillInstaller.getSkillGroups();
-      expect(groups1).not.toBe(groups2);
-      expect(groups1).toEqual(groups2);
-    });
+  it('normalizes and verifies an exact stable version', async () => {
+    const result = await SkillInstaller.installRemote(project, { version: '1.0.0' });
+    expect(result.version).toBe('v1.0.0');
+    expect(runner.mock.calls.some(([command, args]) =>
+      command === 'git' && args.includes('refs/tags/v1.0.0'))).toBe(true);
+    await expect(SkillInstaller.installRemote(project, { version: '1.0.0-rc.1' }))
+      .rejects.toThrow('Invalid stable skill version');
   });
 
-  describe('needsUpdate', () => {
-    it('should return false when project is not initialized', async () => {
-      const result = await SkillInstaller.needsUpdate(testDir);
-      expect(result).toBe(false);
+  it('falls back to a shallow exact-tag clone only after npx fails', async () => {
+    runner.mockImplementation(async (command, args, cwd) => {
+      if (command === 'npx') throw new Error('npx unavailable');
+      return defaultRunner(command, args, cwd);
     });
-
-    it('should return false when .juno_task does not exist', async () => {
-      const result = await SkillInstaller.needsUpdate(testDir);
-      expect(result).toBe(false);
-    });
-
-    it('should handle initialized project gracefully', async () => {
-      await fs.ensureDir(path.join(testDir, '.juno_task'));
-      const result = await SkillInstaller.needsUpdate(testDir);
-      // Result depends on whether templates have skill files
-      expect(typeof result).toBe('boolean');
-    });
+    const result = await SkillInstaller.installRemote(project, { version: 'v1.0.0' });
+    expect(result.acquisition).toBe('git');
+    const clone = runner.mock.calls.find(([command, args]) => command === 'git' && args[0] === 'clone');
+    expect(clone?.[1]).toEqual(expect.arrayContaining(['--depth', '1', '--branch', 'v1.0.0', '--single-branch']));
   });
 
-  describe('install', () => {
-    const initializeMetadataController = async (withAgentIgnores: boolean) => {
-      expect(spawnSync('git', ['init', '-q'], { cwd: testDir }).status).toBe(0);
-      await fs.ensureDir(path.join(testDir, '.juno_task'));
-      await fs.writeJson(path.join(testDir, '.juno_task/config.json'), {
-        controllerWorkspace: {
-          mode: 'metadata-only',
-          policy: '.juno_task/config/metadata-controller.json',
-        },
-      });
-      if (withAgentIgnores) {
-        await fs.writeFile(
-          path.join(testDir, '.gitignore'),
-          ['/AGENTS.md', '/CLAUDE.md', '/.agents/', '/.claude/', '/.pi/', ''].join('\n'),
-        );
+  it('fails without destination mutation when both acquisition methods fail', async () => {
+    runner.mockImplementation(async (command, args, cwd) => {
+      if (command === 'npx' || (command === 'git' && args[0] === 'clone')) throw new Error('offline');
+      return defaultRunner(command, args, cwd);
+    });
+    await expect(SkillInstaller.installRemote(project, { version: '1.0.0' }))
+      .rejects.toThrow('Skill acquisition failed with npx');
+    for (const group of GROUPS) expect(await fs.pathExists(path.join(project, group))).toBe(false);
+  });
+
+  it('rejects noncanonical staged paths and symbolic links', async () => {
+    runner.mockImplementation(async (command, args, cwd) => {
+      if (command === 'npx') {
+        await populateNpxStage(cwd!);
+        await fs.ensureDir(path.join(cwd!, '.agents/skills/unexpected'));
+        return { stdout: '', stderr: '' };
       }
-    };
-
-    it('refuses controller installation until the ignored agent surface is admitted', async () => {
-      await initializeMetadataController(false);
-
-      await expect(SkillInstaller.install(testDir, true)).rejects.toThrow(
-        'requires the reviewed ignored-runtime policy',
-      );
-      expect(await fs.pathExists(path.join(testDir, '.agents'))).toBe(false);
-      expect(await fs.pathExists(path.join(testDir, '.claude'))).toBe(false);
-      expect(await fs.pathExists(path.join(testDir, '.pi'))).toBe(false);
+      if (command === 'git' && args[0] === 'clone') throw new Error('fallback disabled');
+      return defaultRunner(command, args, cwd);
     });
+    await expect(SkillInstaller.installRemote(project, { version: '1.0.0' }))
+      .rejects.toThrow('not the canonical four-skill set');
 
-    it('refuses to overwrite tracked controller agent instructions as user evidence', async () => {
-      await initializeMetadataController(true);
-      await fs.writeFile(path.join(testDir, 'AGENTS.md'), 'committed owner instructions\n');
-      expect(spawnSync('git', ['add', '-f', 'AGENTS.md'], { cwd: testDir }).status).toBe(0);
-
-      await expect(SkillInstaller.install(testDir, true)).rejects.toThrow(
-        'tracked user evidence; reviewed evacuation is required: AGENTS.md',
-      );
-      expect(await fs.readFile(path.join(testDir, 'AGENTS.md'), 'utf8')).toBe('committed owner instructions\n');
-      expect(await fs.pathExists(path.join(testDir, '.agents'))).toBe(false);
-    });
-
-    it('installs ignored instructions and core skills in a metadata-only controller', async () => {
-      await initializeMetadataController(true);
-
-      expect(await SkillInstaller.install(testDir, true)).toBe(true);
-      expect(await fs.pathExists(path.join(testDir, 'AGENTS.md'))).toBe(true);
-      expect(await fs.pathExists(path.join(testDir, 'CLAUDE.md'))).toBe(true);
-      const missingSkills: string[] = [];
-      for (const root of ['.agents/skills', '.claude/skills', '.pi/skills']) {
-        for (const skill of ['kanban-workflow', 'plan-kanban-tasks', 'ralph-loop', 'understand-project']) {
-          const relative = path.join(root, skill, 'SKILL.md');
-          if (!(await fs.pathExists(path.join(testDir, relative)))) missingSkills.push(relative);
-        }
+    runner.mockImplementation(async (command, args, cwd) => {
+      if (command === 'npx') {
+        await populateNpxStage(cwd!);
+        await fs.symlink('/tmp', path.join(cwd!, '.pi/skills/ralph-loop/escape'));
+        return { stdout: '', stderr: '' };
       }
-      expect(missingSkills).toEqual([]);
-      expect(await SkillInstaller.needsUpdate(testDir)).toBe(false);
-      expect(await SkillInstaller.install(testDir, true)).toBe(false);
+      if (command === 'git' && args[0] === 'clone') throw new Error('fallback disabled');
+      return defaultRunner(command, args, cwd);
     });
-
-    it('should not fail when templates directory is empty', async () => {
-      await fs.ensureDir(path.join(testDir, '.juno_task'));
-      // Even if no skill files exist in templates, install should not throw
-      const result = await SkillInstaller.install(testDir, true);
-      expect(typeof result).toBe('boolean');
-    });
-
-    it('should create destination directories', async () => {
-      await fs.ensureDir(path.join(testDir, '.juno_task'));
-      await SkillInstaller.install(testDir, true);
-
-      // If templates had files, destination dirs would be created
-      // This test just verifies no errors
-    });
-
-    it('should return false when no skill files to install', async () => {
-      await fs.ensureDir(path.join(testDir, '.juno_task'));
-      // With empty template dirs (only .gitkeep), nothing should be installed
-      const result = await SkillInstaller.install(testDir, true);
-      // .gitkeep files are excluded, so with empty templates result is false
-      expect(typeof result).toBe('boolean');
-    });
+    await expect(SkillInstaller.installRemote(project, { version: '1.0.0' }))
+      .rejects.toThrow('symbolic link');
   });
 
-  describe('autoUpdate', () => {
-    it('should return false when project is not initialized', async () => {
-      const result = await SkillInstaller.autoUpdate(testDir);
-      expect(result).toBe(false);
-    });
+  it('preflights every conflict before writing anything', async () => {
+    const conflict = path.join(project, '.pi/skills/understand-project/SKILL.md');
+    await fs.outputFile(conflict, 'owner bytes\n');
+    await fs.outputFile(path.join(project, '.agents/skills/unrelated/SKILL.md'), 'unrelated\n');
 
-    it('should not throw on initialized projects', async () => {
-      await fs.ensureDir(path.join(testDir, '.juno_task'));
-      const result = await SkillInstaller.autoUpdate(testDir);
-      expect(typeof result).toBe('boolean');
-    });
-
-    it('should support force parameter', async () => {
-      await fs.ensureDir(path.join(testDir, '.juno_task'));
-      const result = await SkillInstaller.autoUpdate(testDir, true);
-      expect(typeof result).toBe('boolean');
-    });
+    await expect(SkillInstaller.installRemote(project, { version: '1.0.0' }))
+      .rejects.toThrow('Skill conflict at .pi/skills/understand-project');
+    expect(await fs.readFile(conflict, 'utf8')).toBe('owner bytes\n');
+    expect(await fs.readFile(path.join(project, '.agents/skills/unrelated/SKILL.md'), 'utf8'))
+      .toBe('unrelated\n');
+    expect(await fs.pathExists(path.join(project, '.agents/skills/kanban-workflow'))).toBe(false);
+    expect(await fs.pathExists(path.join(project, '.juno_task/runtime/skills-install.json'))).toBe(false);
   });
 
-  describe('listSkillGroups', () => {
-    it('should return all configured skill groups', async () => {
-      const groups = await SkillInstaller.listSkillGroups(testDir);
-      expect(groups.length).toBe(4);
-      expect(groups[0].name).toBe('codex');
-      expect(groups[0].destDir).toBe('.agents/skills');
-      expect(groups[1].name).toBe('claude');
-      expect(groups[1].destDir).toBe('.claude/skills');
-      expect(groups[2].name).toBe('pi');
-      expect(groups[2].destDir).toBe('.pi/skills');
-      expect(groups[3].name).toBe('ext:pi');
-      expect(groups[3].destDir).toBe('.pi/extensions');
-    });
+  it('force replaces only canonical skill directories and preserves unrelated skills', async () => {
+    const conflict = path.join(project, '.pi/skills/understand-project/SKILL.md');
+    const unrelated = path.join(project, '.agents/skills/unrelated/SKILL.md');
+    await fs.outputFile(conflict, 'owner bytes\n');
+    await fs.outputFile(unrelated, 'unrelated\n');
 
-    it('should show files as not installed when destination is empty', async () => {
-      const groups = await SkillInstaller.listSkillGroups(testDir);
-
-      for (const group of groups) {
-        for (const file of group.files) {
-          expect(file.installed).toBe(false);
-        }
-      }
-    });
-
-    it('should return empty files array when no skills are bundled', async () => {
-      const groups = await SkillInstaller.listSkillGroups(testDir);
-
-      // With only .gitkeep in templates (which is excluded), files should be empty
-      for (const group of groups) {
-        // May or may not have files depending on template content
-        expect(Array.isArray(group.files)).toBe(true);
-      }
-    });
+    await SkillInstaller.installRemote(project, { version: '1.0.0', force: true });
+    expect(await fs.readFile(conflict, 'utf8')).toContain('name: understand-project');
+    expect(await fs.readFile(unrelated, 'utf8')).toBe('unrelated\n');
+    const record = await SkillInstaller.getInstallRecord(project);
+    expect(record).toMatchObject({ version: 'v1.0.0', acquisition: 'npx', skills: SKILLS });
   });
 
-  describe('install with actual skill files', () => {
-    it('should install skill files to correct destinations', async () => {
-      await fs.ensureDir(path.join(testDir, '.juno_task'));
+  it('keeps list and status inspection local with no command execution', async () => {
+    await SkillInstaller.installRemote(project, { version: '1.0.0' });
+    runner.mockClear();
+    expect(await SkillInstaller.needsUpdate(project)).toBe(false);
+    expect(await SkillInstaller.listSkillGroups(project)).toHaveLength(3);
+    expect(await SkillInstaller.getInstallRecord(project)).toMatchObject({ version: 'v1.0.0' });
+    expect(runner).not.toHaveBeenCalled();
 
-      // Simulate by calling install - actual files depend on template content
-      const result = await SkillInstaller.install(testDir, true);
-      expect(typeof result).toBe('boolean');
-    });
-
-    it('installs invocation contracts and the fixed Pi preprocessor from package sources', async () => {
-      await fs.ensureDir(path.join(testDir, '.juno_task'));
-      await SkillInstaller.install(testDir, true);
-
-      const ralph = await fs.readFile(path.join(testDir, '.pi/skills/ralph-loop/SKILL.md'), 'utf8');
-      const understand = await fs.readFile(
-        path.join(testDir, '.agents/skills/understand-project/SKILL.md'),
-        'utf8',
-      );
-      const extension = await fs.readFile(
-        path.join(testDir, '.pi/extensions/juno-skill-preprocessor.ts'),
-        'utf8',
-      );
-      expect(ralph.match(/\$ARGUMENTS/g)).toHaveLength(1);
-      expect(understand.match(/\$1/g)).toHaveLength(1);
-      expect(understand.match(/\$2/g)).toHaveLength(1);
-      expect(understand.match(/\$ARGUMENTS/g)).toHaveLength(1);
-      expect(extension).toContain('unconsumedRawArguments');
-      expect(extension).toContain('expandSkillInvocation');
-    });
-
-    it('should preserve existing files in destination directories', async () => {
-      await fs.ensureDir(path.join(testDir, '.juno_task'));
-
-      // Create pre-existing files in destination directories
-      const agentsDir = path.join(testDir, '.agents', 'skills');
-      const claudeDir = path.join(testDir, '.claude', 'skills');
-      await fs.ensureDir(agentsDir);
-      await fs.ensureDir(claudeDir);
-
-      await fs.writeFile(path.join(agentsDir, 'user-custom-skill.md'), '# My Custom Skill');
-      await fs.writeFile(path.join(claudeDir, 'my-project-skill.md'), '# Project Skill');
-
-      // Install skills
-      await SkillInstaller.install(testDir, true);
-
-      // Verify pre-existing files are NOT deleted
-      const userSkill = await fs.readFile(path.join(agentsDir, 'user-custom-skill.md'), 'utf-8');
-      expect(userSkill).toBe('# My Custom Skill');
-
-      const projectSkill = await fs.readFile(path.join(claudeDir, 'my-project-skill.md'), 'utf-8');
-      expect(projectSkill).toBe('# Project Skill');
-    });
+    await fs.writeFile(
+      path.join(project, '.agents/skills/kanban-workflow/SKILL.md'),
+      'locally changed\n',
+    );
+    expect(await SkillInstaller.needsUpdate(project)).toBe(true);
+    expect(runner).not.toHaveBeenCalled();
   });
 
-  describe('content-based updates', () => {
-    it('should detect when installed files differ from package', async () => {
-      await fs.ensureDir(path.join(testDir, '.juno_task'));
-
-      // First install
-      await SkillInstaller.install(testDir, true);
-
-      // After installation, a second call should not update (same content)
-      const secondResult = await SkillInstaller.install(testDir, true);
-      // With empty templates, always false
-      expect(typeof secondResult).toBe('boolean');
+  it('enforces metadata-controller ignored-surface safety before networking', async () => {
+    await fs.writeJson(path.join(project, '.juno_task/config.json'), {
+      controllerWorkspace: {
+        mode: 'metadata-only',
+        policy: '.juno_task/config/metadata-controller.json',
+      },
     });
+    await expect(SkillInstaller.installRemote(project)).rejects.toThrow(
+      'requires the reviewed ignored-runtime policy',
+    );
+    expect(runner).not.toHaveBeenCalled();
   });
 
-  describe('force install', () => {
-    it('should reinstall even if content matches', async () => {
-      await fs.ensureDir(path.join(testDir, '.juno_task'));
-
-      // First install
-      await SkillInstaller.install(testDir, true);
-
-      // Force install should re-copy files
-      const forceResult = await SkillInstaller.install(testDir, true, true);
-      expect(typeof forceResult).toBe('boolean');
-    });
-  });
-
-  describe('edge cases', () => {
-    it('should handle non-existent project directory gracefully', async () => {
-      const nonExistent = path.join(testDir, 'does-not-exist');
-      const result = await SkillInstaller.autoUpdate(nonExistent);
-      expect(result).toBe(false);
-    });
-
-    it('should handle permission errors gracefully', async () => {
-      // autoUpdate catches errors internally
-      const result = await SkillInstaller.autoUpdate('/root/no-access-dir');
-      expect(result).toBe(false);
-    });
-  });
-
-  describe('nested folder support', () => {
-    let mockSkillsDir: string;
-    let mockExtensionsDir: string;
-
-    beforeEach(async () => {
-      // Create a mock templates/skills directory with nested folder structures
-      mockSkillsDir = path.join(testDir, 'mock-templates', 'skills');
-
-      // Create codex skills with nested folders
-      const codexDir = path.join(mockSkillsDir, 'codex');
-      await fs.ensureDir(path.join(codexDir, 'analysis', 'prompts'));
-      await fs.ensureDir(path.join(codexDir, 'debugging', 'scripts'));
-      await fs.writeFile(path.join(codexDir, 'README.md'), '# Codex Skills');
-      await fs.writeFile(path.join(codexDir, 'analysis', 'analyze.md'), '# Analysis Skill');
-      await fs.writeFile(
-        path.join(codexDir, 'analysis', 'prompts', 'system.txt'),
-        'You are an analyzer',
-      );
-      await fs.writeFile(path.join(codexDir, 'debugging', 'debug.md'), '# Debug Skill');
-      await fs.writeFile(
-        path.join(codexDir, 'debugging', 'scripts', 'trace.sh'),
-        '#!/bin/bash\necho trace',
-      );
-
-      // Create claude skills with nested folders
-      const claudeDir = path.join(mockSkillsDir, 'claude');
-      await fs.ensureDir(path.join(claudeDir, 'refactor', 'templates'));
-      await fs.writeFile(path.join(claudeDir, 'refactor', 'refactor.md'), '# Refactor Skill');
-      await fs.writeFile(
-        path.join(claudeDir, 'refactor', 'templates', 'component.txt'),
-        'Template content',
-      );
-      await fs.writeFile(path.join(claudeDir, 'top-level.md'), '# Top Level Skill');
-      await fs.ensureDir(path.join(mockSkillsDir, 'pi'));
-      mockExtensionsDir = path.join(testDir, 'mock-templates', 'extensions');
-      await fs.ensureDir(path.join(mockExtensionsDir, 'pi'));
-      await fs.writeFile(path.join(mockExtensionsDir, 'pi', 'fixture.ts'), 'export {};\n');
-
-      // Create project dir with .juno_task
-      await fs.ensureDir(path.join(testDir, 'project', '.juno_task'));
-
-      // Mock getPackageSkillsDir to return our mock directory
-      vi.spyOn(
-        SkillInstaller as unknown as { getPackageSkillsDir: () => string | null },
-        'getPackageSkillsDir',
-      ).mockReturnValue(mockSkillsDir);
-      vi.spyOn(
-        SkillInstaller as unknown as { getPackageExtensionsDir: () => string | null },
-        'getPackageExtensionsDir',
-      ).mockReturnValue(mockExtensionsDir);
-    });
-
-    afterEach(() => {
-      vi.restoreAllMocks();
-    });
-
-    it('refuses a dangling package skill source before creating destinations', async () => {
-      const projectDir = path.join(testDir, 'project');
-      await fs.symlink(
-        'missing-package-source.md',
-        path.join(mockSkillsDir, 'codex', 'dangling.md'),
-      );
-
-      await expect(SkillInstaller.preflightInstall(projectDir)).rejects.toThrow(
-        'Package file source cannot be resolved',
-      );
-      expect(await fs.pathExists(path.join(projectDir, '.agents'))).toBe(false);
-      expect(await fs.pathExists(path.join(projectDir, '.pi'))).toBe(false);
-    });
-
-    it('refuses a dangling package extension source before creating destinations', async () => {
-      const projectDir = path.join(testDir, 'project');
-      await fs.symlink(
-        'missing-package-extension.ts',
-        path.join(mockExtensionsDir, 'pi', 'dangling.ts'),
-      );
-
-      await expect(SkillInstaller.preflightInstall(projectDir)).rejects.toThrow(
-        'Package file source cannot be resolved',
-      );
-      expect(await fs.pathExists(path.join(projectDir, '.agents'))).toBe(false);
-      expect(await fs.pathExists(path.join(projectDir, '.pi'))).toBe(false);
-    });
-
-    it('should install files from nested subdirectories', async () => {
-      const projectDir = path.join(testDir, 'project');
-      const result = await SkillInstaller.install(projectDir, true);
-
-      expect(result).toBe(true);
-
-      // Verify codex nested files were installed
-      const agentsSkillsDir = path.join(projectDir, '.agents', 'skills');
-      expect(await fs.pathExists(path.join(agentsSkillsDir, 'README.md'))).toBe(true);
-      expect(await fs.pathExists(path.join(agentsSkillsDir, 'analysis', 'analyze.md'))).toBe(true);
-      expect(
-        await fs.pathExists(path.join(agentsSkillsDir, 'analysis', 'prompts', 'system.txt')),
-      ).toBe(true);
-      expect(await fs.pathExists(path.join(agentsSkillsDir, 'debugging', 'debug.md'))).toBe(true);
-      expect(
-        await fs.pathExists(path.join(agentsSkillsDir, 'debugging', 'scripts', 'trace.sh')),
-      ).toBe(true);
-
-      // Verify claude nested files were installed
-      const claudeSkillsDir = path.join(projectDir, '.claude', 'skills');
-      expect(await fs.pathExists(path.join(claudeSkillsDir, 'top-level.md'))).toBe(true);
-      expect(await fs.pathExists(path.join(claudeSkillsDir, 'refactor', 'refactor.md'))).toBe(true);
-      expect(
-        await fs.pathExists(path.join(claudeSkillsDir, 'refactor', 'templates', 'component.txt')),
-      ).toBe(true);
-    });
-
-    it('should preserve file content in nested directories', async () => {
-      const projectDir = path.join(testDir, 'project');
-      await SkillInstaller.install(projectDir, true);
-
-      const agentsSkillsDir = path.join(projectDir, '.agents', 'skills');
-      const claudeSkillsDir = path.join(projectDir, '.claude', 'skills');
-
-      expect(
-        await fs.readFile(path.join(agentsSkillsDir, 'analysis', 'prompts', 'system.txt'), 'utf-8'),
-      ).toBe('You are an analyzer');
-      expect(
-        await fs.readFile(
-          path.join(claudeSkillsDir, 'refactor', 'templates', 'component.txt'),
-          'utf-8',
-        ),
-      ).toBe('Template content');
-    });
-
-    it('should make .sh files executable in nested directories', async () => {
-      const projectDir = path.join(testDir, 'project');
-      await SkillInstaller.install(projectDir, true);
-
-      const traceScript = path.join(
-        projectDir,
-        '.agents',
-        'skills',
-        'debugging',
-        'scripts',
-        'trace.sh',
-      );
-      const stat = await fs.stat(traceScript);
-      // Check executable bit (owner execute)
-      expect(stat.mode & 0o100).toBeTruthy();
-    });
-
-    it('should skip hidden files and __pycache__ in nested directories', async () => {
-      // Add hidden files and __pycache__ in nested dirs
-      const codexDir = path.join(mockSkillsDir, 'codex');
-      await fs.writeFile(path.join(codexDir, 'analysis', '.hidden-file'), 'hidden');
-      await fs.ensureDir(path.join(codexDir, 'analysis', '__pycache__'));
-      await fs.writeFile(path.join(codexDir, 'analysis', '__pycache__', 'cached.pyc'), 'bytecode');
-      await fs.ensureDir(path.join(codexDir, '.hidden-dir'));
-      await fs.writeFile(path.join(codexDir, '.hidden-dir', 'secret.txt'), 'secret');
-
-      const projectDir = path.join(testDir, 'project');
-      await SkillInstaller.install(projectDir, true);
-
-      const agentsSkillsDir = path.join(projectDir, '.agents', 'skills');
-      // Hidden files should NOT be copied
-      expect(await fs.pathExists(path.join(agentsSkillsDir, 'analysis', '.hidden-file'))).toBe(
-        false,
-      );
-      expect(await fs.pathExists(path.join(agentsSkillsDir, 'analysis', '__pycache__'))).toBe(
-        false,
-      );
-      expect(await fs.pathExists(path.join(agentsSkillsDir, '.hidden-dir'))).toBe(false);
-
-      // Non-hidden files should still be copied
-      expect(await fs.pathExists(path.join(agentsSkillsDir, 'analysis', 'analyze.md'))).toBe(true);
-    });
-
-    it('should content-compare nested files and skip unchanged ones', async () => {
-      const projectDir = path.join(testDir, 'project');
-
-      // First install
-      await SkillInstaller.install(projectDir, true);
-
-      // Modify one nested file in destination
-      const destFile = path.join(
-        projectDir,
-        '.agents',
-        'skills',
-        'analysis',
-        'prompts',
-        'system.txt',
-      );
-      await fs.writeFile(destFile, 'Modified by user');
-
-      // Second install should overwrite modified file (content differs)
-      await SkillInstaller.install(projectDir, true);
-
-      // File should be restored to template content
-      expect(await fs.readFile(destFile, 'utf-8')).toBe('You are an analyzer');
-    });
-
-    it('should preserve user files in nested destination directories', async () => {
-      const projectDir = path.join(testDir, 'project');
-
-      // Create user files in nested directories that overlap with skill dirs
-      const userDir = path.join(projectDir, '.agents', 'skills', 'analysis', 'custom');
-      await fs.ensureDir(userDir);
-      await fs.writeFile(path.join(userDir, 'my-analysis.md'), '# My Custom Analysis');
-
-      // Install skills
-      await SkillInstaller.install(projectDir, true);
-
-      // User files should still exist
-      expect(await fs.pathExists(path.join(userDir, 'my-analysis.md'))).toBe(true);
-      expect(await fs.readFile(path.join(userDir, 'my-analysis.md'), 'utf-8')).toBe(
-        '# My Custom Analysis',
-      );
-
-      // Skill files should also exist
-      expect(
-        await fs.pathExists(path.join(projectDir, '.agents', 'skills', 'analysis', 'analyze.md')),
-      ).toBe(true);
-    });
-
-    it('should report nested files in listSkillGroups', async () => {
-      const projectDir = path.join(testDir, 'project');
-
-      // List before install
-      const beforeInstall = await SkillInstaller.listSkillGroups(projectDir);
-      const codexGroup = beforeInstall.find((g) => g.name === 'codex')!;
-
-      // Should include nested file paths with forward slashes
-      const fileNames = codexGroup.files.map((f) => f.name);
-      expect(fileNames).toContain('README.md');
-      expect(fileNames).toContain('analysis/analyze.md');
-      expect(fileNames).toContain('analysis/prompts/system.txt');
-      expect(fileNames).toContain('debugging/debug.md');
-      expect(fileNames).toContain('debugging/scripts/trace.sh');
-
-      // Before install, nothing should be marked as installed
-      for (const file of codexGroup.files) {
-        expect(file.installed).toBe(false);
-      }
-
-      // Install and verify status updates
-      await SkillInstaller.install(projectDir, true);
-      const afterInstall = await SkillInstaller.listSkillGroups(projectDir);
-      const codexAfter = afterInstall.find((g) => g.name === 'codex')!;
-
-      for (const file of codexAfter.files) {
-        expect(file.installed).toBe(true);
-        expect(file.upToDate).toBe(true);
-      }
-    });
-
-    it('should detect nested files needing update via needsUpdate', async () => {
-      const projectDir = path.join(testDir, 'project');
-
-      // Before install, needs update should be true (files missing)
-      expect(await SkillInstaller.needsUpdate(projectDir)).toBe(true);
-
-      // After install, should not need update
-      await SkillInstaller.install(projectDir, true);
-      expect(await SkillInstaller.needsUpdate(projectDir)).toBe(false);
-
-      // Modify a nested file -> should need update again
-      const nestedFile = path.join(
-        projectDir,
-        '.agents',
-        'skills',
-        'analysis',
-        'prompts',
-        'system.txt',
-      );
-      await fs.writeFile(nestedFile, 'Modified content');
-      expect(await SkillInstaller.needsUpdate(projectDir)).toBe(true);
-    });
-
-    it('should force reinstall all nested files', async () => {
-      const projectDir = path.join(testDir, 'project');
-
-      // Install normally
-      await SkillInstaller.install(projectDir, true);
-
-      // Force install should return true even when content matches
-      const forceResult = await SkillInstaller.install(projectDir, true, true);
-      expect(forceResult).toBe(true);
-
-      // All files should still be present
-      const agentsSkillsDir = path.join(projectDir, '.agents', 'skills');
-      expect(
-        await fs.pathExists(path.join(agentsSkillsDir, 'analysis', 'prompts', 'system.txt')),
-      ).toBe(true);
-      expect(
-        await fs.pathExists(path.join(agentsSkillsDir, 'debugging', 'scripts', 'trace.sh')),
-      ).toBe(true);
-    });
-
-    it('should create Pi settings.json during install', async () => {
-      const projectDir = path.join(testDir, 'project');
-      await SkillInstaller.install(projectDir, true);
-
-      const settingsPath = path.join(projectDir, '.pi', 'settings.json');
-      expect(await fs.pathExists(settingsPath)).toBe(true);
-
-      const settings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
-      expect(settings.skills).toEqual(['.claude/skills']);
-      expect(settings.quietStartup).toBe(true);
-    });
-
-    it('should handle deeply nested directories (3+ levels)', async () => {
-      // Add deeply nested structure
-      const codexDir = path.join(mockSkillsDir, 'codex');
-      await fs.ensureDir(path.join(codexDir, 'level1', 'level2', 'level3', 'level4'));
-      await fs.writeFile(
-        path.join(codexDir, 'level1', 'level2', 'level3', 'level4', 'deep-skill.py'),
-        '#!/usr/bin/env python3\nprint("deep")',
-      );
-
-      const projectDir = path.join(testDir, 'project');
-      await SkillInstaller.install(projectDir, true);
-
-      const deepFile = path.join(
-        projectDir,
-        '.agents',
-        'skills',
-        'level1',
-        'level2',
-        'level3',
-        'level4',
-        'deep-skill.py',
-      );
-      expect(await fs.pathExists(deepFile)).toBe(true);
-      expect(await fs.readFile(deepFile, 'utf-8')).toBe('#!/usr/bin/env python3\nprint("deep")');
-
-      // .py files should be executable
-      const stat = await fs.stat(deepFile);
-      expect(stat.mode & 0o100).toBeTruthy();
-    });
-  });
-
-  describe('ensurePiSettings', () => {
-    it('should create .pi/settings.json when it does not exist', async () => {
-      await SkillInstaller.ensurePiSettings(testDir);
-
-      const settingsPath = path.join(testDir, '.pi', 'settings.json');
-      expect(await fs.pathExists(settingsPath)).toBe(true);
-
-      const settings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
-      expect(settings).toEqual({ skills: ['.claude/skills'], quietStartup: true });
-    });
-
-    it('should upgrade legacy auto-generated settings with quietStartup', async () => {
-      const piDir = path.join(testDir, '.pi');
-      const settingsPath = path.join(piDir, 'settings.json');
-      await fs.ensureDir(piDir);
-
-      await fs.writeFile(settingsPath, JSON.stringify({ skills: ['.claude/skills'] }, null, 2));
-
-      await SkillInstaller.ensurePiSettings(testDir);
-
-      const settings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
-      expect(settings).toEqual({ skills: ['.claude/skills'], quietStartup: true });
-    });
-
-    it('should not overwrite existing .pi/settings.json', async () => {
-      const piDir = path.join(testDir, '.pi');
-      const settingsPath = path.join(piDir, 'settings.json');
-      await fs.ensureDir(piDir);
-
-      const userSettings = { skills: ['.claude/skills', '/custom/path'], theme: 'dark' };
-      await fs.writeFile(settingsPath, JSON.stringify(userSettings, null, 2));
-
-      await SkillInstaller.ensurePiSettings(testDir);
-
-      const settings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
-      expect(settings).toEqual(userSettings);
-    });
-
-    it('should create .pi directory if it does not exist', async () => {
-      const piDir = path.join(testDir, '.pi');
-      expect(await fs.pathExists(piDir)).toBe(false);
-
-      await SkillInstaller.ensurePiSettings(testDir);
-
-      expect(await fs.pathExists(piDir)).toBe(true);
-      expect(await fs.pathExists(path.join(piDir, 'settings.json'))).toBe(true);
-    });
-
-    it('should be called during install()', async () => {
-      await fs.ensureDir(path.join(testDir, '.juno_task'));
-      await SkillInstaller.install(testDir, true);
-
-      const settingsPath = path.join(testDir, '.pi', 'settings.json');
-      expect(await fs.pathExists(settingsPath)).toBe(true);
-    });
-
-    it('should not interfere with repeated install() calls', async () => {
-      await fs.ensureDir(path.join(testDir, '.juno_task'));
-
-      // First install creates settings
-      await SkillInstaller.install(testDir, true);
-      const settingsPath = path.join(testDir, '.pi', 'settings.json');
-      const firstContent = await fs.readFile(settingsPath, 'utf-8');
-
-      // Second install should not modify settings
-      await SkillInstaller.install(testDir, true);
-      const secondContent = await fs.readFile(settingsPath, 'utf-8');
-      expect(secondContent).toBe(firstContent);
-    });
+  it('creates Pi settings once and preserves user settings', async () => {
+    await SkillInstaller.installRemote(project, { version: '1.0.0' });
+    expect(await fs.readJson(path.join(project, '.pi/settings.json')))
+      .toEqual({ skills: ['.claude/skills'], quietStartup: true });
+    const custom = { theme: 'dark', skills: ['/owner/skills'] };
+    await fs.writeJson(path.join(project, '.pi/settings.json'), custom);
+    await SkillInstaller.installRemote(project, { version: '1.0.0', force: true });
+    expect(await fs.readJson(path.join(project, '.pi/settings.json'))).toEqual(custom);
   });
 });

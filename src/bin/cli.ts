@@ -1284,12 +1284,10 @@ function setupScriptManagementCommands(program: Command): void {
     const [
       { ScriptInstaller },
       { ManagedProjectAssets },
-      { SkillInstaller },
       { withManagedUpdateRollback },
     ] = await Promise.all([
       import('../utils/script-installer.js'),
       import('../utils/managed-project-assets.js'),
-      import('../utils/skill-installer.js'),
       import('../utils/managed-update-transaction.js'),
     ]);
 
@@ -1299,7 +1297,6 @@ function setupScriptManagementCommands(program: Command): void {
     const recovery = await ScriptInstaller.preflightUpdate(
       workingDirectory, Boolean(options.force),
     );
-    await SkillInstaller.preflightInstall(workingDirectory);
     const metadataOnlyController = await ScriptInstaller.isMetadataOnlyController(workingDirectory);
 
     if (options.force) {
@@ -1319,23 +1316,17 @@ function setupScriptManagementCommands(program: Command): void {
         const scriptsUpdated = recovery
           ? false
           : await ScriptInstaller.forceUpdateAll(workingDirectory, true);
-        const skillsUpdated = recovery
-          ? false
-          : await SkillInstaller.install(workingDirectory, true, true, true);
         if (metadataOnlyController) {
           await ScriptInstaller.assertMetadataControllerUpdateComplete(
             workingDirectory, recovery ?? undefined,
           );
-          if (!recovery && await SkillInstaller.needsUpdate(workingDirectory)) {
-            throw new Error('Metadata-controller agent surface remains incomplete after update');
-          }
         }
-        return { scriptsUpdated, skillsUpdated, assets };
+        return { scriptsUpdated, assets };
       });
       console.log(chalk.green(recovery
         ? `✓ Recovered exact target-bound controller bundle at ${recovery.targetSha}`
         : '✓ Force updated scripts, requirements, and managed project assets'));
-      if (!outcome.scriptsUpdated && !outcome.skillsUpdated &&
+      if (!outcome.scriptsUpdated &&
           outcome.assets.installed.length + outcome.assets.updated.length === 0) {
         console.log(chalk.yellow('No project assets updated. Is this an initialized yylo project with .juno_task/?'));
       }
@@ -1351,19 +1342,15 @@ function setupScriptManagementCommands(program: Command): void {
       }
       const assets = await ManagedProjectAssets.update(workingDirectory, { silent: false });
       const scriptsUpdated = await ScriptInstaller.autoUpdate(workingDirectory, false);
-      const skillsUpdated = await SkillInstaller.install(workingDirectory, true);
       if (metadataOnlyController) {
         await ScriptInstaller.assertMetadataControllerUpdateComplete(workingDirectory);
-        if (await SkillInstaller.needsUpdate(workingDirectory)) {
-          throw new Error('Metadata-controller agent surface remains incomplete after update');
-        }
       }
-      return { scriptsUpdated, skillsUpdated, assets };
+      return { scriptsUpdated, assets };
     };
-    const { scriptsUpdated, skillsUpdated, assets } = metadataOnlyController
+    const { scriptsUpdated, assets } = metadataOnlyController
       ? await withManagedUpdateRollback(workingDirectory, update)
       : await update();
-    if (!scriptsUpdated && !skillsUpdated && assets.installed.length + assets.updated.length === 0 && assets.conflicts.length === 0) {
+    if (!scriptsUpdated && assets.installed.length + assets.updated.length === 0 && assets.conflicts.length === 0) {
       console.log(chalk.green(metadataOnlyController
         ? '✓ Metadata-controller runtime scripts and agent surface are already up to date'
         : '✓ Managed project assets are already up to date'));
@@ -1400,26 +1387,23 @@ ${chalk.gray('This updates scripts from the currently installed yylo package/tem
     .action(async (options: { cwd?: string }) => {
       const argvCwd = extractOptionValueFromArgv(process.argv.slice(2), '--cwd', '-w');
       const workingDirectory = options.cwd?.trim() || argvCwd?.trim() || process.cwd();
-      const [{ ManagedProjectAssets }, { ScriptInstaller }, { SkillInstaller }] = await Promise.all([
+      const [{ ManagedProjectAssets }, { ScriptInstaller }] = await Promise.all([
         import('../utils/managed-project-assets.js'),
         import('../utils/script-installer.js'),
-        import('../utils/skill-installer.js'),
       ]);
       if (await ScriptInstaller.isMetadataOnlyController(workingDirectory)) {
-        await SkillInstaller.assertInstallAllowed(workingDirectory);
         const recovery = await ScriptInstaller.assertManagedControllerPackageUpdateAllowed(
           workingDirectory,
         );
         await ScriptInstaller.assertMetadataControllerUpdateComplete(
           workingDirectory, recovery ?? undefined,
         );
-        const [generation, agentSurfaceStale, bundle] = await Promise.all([
+        const [generation, bundle] = await Promise.all([
           ScriptInstaller.inspectManagedControllerGeneration(workingDirectory),
-          recovery ? false : SkillInstaller.needsUpdate(workingDirectory),
           ManagedProjectAssets.inspectGeneration(workingDirectory, recovery ?? undefined),
         ]);
         if (generation.present) {
-          if (generation.healthy && !agentSurfaceStale) {
+          if (generation.healthy) {
             console.log(chalk.green(
               `✓ Receipt-bound controller scripts and instruction bundle ` +
               `${bundle.instructionBundle?.bundleSha256} are coherent at ${generation.targetSha} ` +
@@ -1429,7 +1413,6 @@ ${chalk.gray('This updates scripts from the currently installed yylo package/tem
           }
           console.error(chalk.red('✗ Receipt-bound controller script generation is unhealthy'));
           for (const finding of generation.findings) console.error(`  ${finding}`);
-          if (agentSurfaceStale) console.error('  incomplete or stale: ignored controller agent surface');
           if (generation.targetSha) console.error(chalk.yellow(
             `Recover explicitly with \`yy integration runtime-refresh --previous-sha ${generation.targetSha} ` +
             `--target-sha ${generation.targetSha}\`.`,
@@ -1441,7 +1424,7 @@ ${chalk.gray('This updates scripts from the currently installed yylo package/tem
           ScriptInstaller.getMissingScripts(workingDirectory),
           ScriptInstaller.getOutdatedScripts(workingDirectory),
         ]);
-        if (missing.length === 0 && outdated.length === 0 && !agentSurfaceStale) {
+        if (missing.length === 0 && outdated.length === 0) {
           console.log(chalk.green(
             `✓ Schema-2 instruction bundle ${bundle.instructionBundle?.bundleSha256} and ` +
             'bootstrap controller scripts are coherent (no integration generation receipt)',
@@ -1451,7 +1434,6 @@ ${chalk.gray('This updates scripts from the currently installed yylo package/tem
         console.error(chalk.red('✗ Bootstrap controller scripts are incomplete or stale'));
         for (const entry of missing) console.error(`  missing: .juno_task/scripts/${entry}`);
         for (const entry of outdated) console.error(`  outdated: .juno_task/scripts/${entry}`);
-        if (agentSurfaceStale) console.error('  incomplete or stale: ignored controller agent surface');
         console.error(chalk.yellow('Run `yy scripts update` only for this unbound bootstrap state.'));
         process.exitCode = 1;
         return;
@@ -2261,33 +2243,6 @@ async function main(): Promise<void> {
     }
   }
 
-  // Auto-update agent skill files in .agents/skills/ and .claude/skills/
-  // Skills are installed for ALL agents regardless of which subagent is selected
-  try {
-    if (mayAutoUpdateProjectAssets) {
-      const { SkillInstaller } = await import('../utils/skill-installer.js');
-
-    if (isForceUpdate) {
-      console.log(chalk.blue('🔄 Force updating agent skill files...'));
-      await SkillInstaller.autoUpdate(process.cwd(), true);
-      console.log(chalk.green('✓ Agent skill files updated'));
-    } else {
-      const updated = await SkillInstaller.autoUpdate(process.cwd());
-
-      if (updated && process.env.YYLO_DEBUG === '1') {
-        console.error('[DEBUG] Agent skill files auto-updated');
-      }
-    }
-    }
-  } catch (error) {
-    if (process.env.YYLO_DEBUG === '1') {
-      console.error(
-        '[DEBUG] Skill auto-update failed:',
-        error instanceof Error ? error.message : String(error),
-      );
-    }
-  }
-
   // Determine verbose level from argv (before Commander parses)
   const isQuiet = process.argv.includes('--quiet') || process.argv.includes('-q') || process.argv.includes('--silent');
   const isVerbose: number = isQuiet ? 0 : normalizeVerbose(
@@ -2445,9 +2400,18 @@ ${chalk.blue.bold('Support:')}
 `,
   );
 
+  // Commander treats the root --version option as global even after a nested
+  // command. Preserve the documented skills --version spelling by routing it
+  // to that command's hidden, unambiguous internal option before parsing.
+  const commandArgv = [...process.argv];
+  if (commandArgv[2] === 'skills' && ['install', 'update'].includes(commandArgv[3] ?? '')) {
+    const versionIndex = commandArgv.indexOf('--version', 4);
+    if (versionIndex >= 0) commandArgv[versionIndex] = '--skill-version';
+  }
+
   // Parse and execute
   try {
-    await program.parseAsync(process.argv);
+    await program.parseAsync(commandArgv);
   } catch (error) {
     handleCLIError(error, isVerbose);
   }
