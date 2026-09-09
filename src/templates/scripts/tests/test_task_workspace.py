@@ -7505,6 +7505,56 @@ class MinimumRcLifecycleContractTests(unittest.TestCase):
                              "coherence.managed_output_mismatch"}.issubset(codes))
             self.assertEqual(report["outcome"], "FAILED")
 
+    def test_grouped_coherence_allows_retired_unmanaged_template_to_preserve_runtime_evidence(self) -> None:
+        lifecycle = task_runtime.lifecycle_runtime
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "-b", "product"], cwd=root, check=True,
+                           stdout=subprocess.DEVNULL)
+            subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=root,
+                           check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+            definition = {
+                "assets": [{
+                    "source": "scripts/managed.py",
+                    "destination": ".juno_task/scripts/managed.py",
+                    "installClass": "script",
+                }],
+                "admissionOutputs": [],
+            }
+            files = {
+                ".juno_task/config/task-workspace.json": "{}\n",
+                "juno-code/src/templates/managed-assets.json": json.dumps(definition) + "\n",
+                "juno-code/src/templates/scripts/retired.py": "# retired package template\n",
+                ".juno_task/scripts/retired.py": "# retired package template\n",
+                "juno-code/src/templates/scripts/managed.py": "# managed runtime\n",
+                ".juno_task/scripts/managed.py": "# managed runtime\n",
+            }
+            for relative, content in files.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "base"], cwd=root, check=True,
+                           stdout=subprocess.DEVNULL)
+            (root / "juno-code/src/templates/scripts/retired.py").unlink()
+            (root / "juno-code/src/templates/scripts/managed.py").unlink()
+            subprocess.run(["git", "add", "-u"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "retire templates"], cwd=root, check=True,
+                           stdout=subprocess.DEVNULL)
+            head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root,
+                                           text=True).strip()
+            changed = subprocess.check_output(
+                ["git", "diff", "--name-only", "HEAD^..HEAD"], cwd=root,
+                text=True).splitlines()
+            report = lifecycle.grouped_coherence(root, root, head, changed)
+            mismatches = [row for row in report["findings"]
+                          if row["code"] == "coherence.runtime_template_mismatch"]
+            self.assertEqual(len(mismatches), 1)
+            self.assertEqual(mismatches[0]["path"],
+                             "juno-code/src/templates/scripts/managed.py")
+            self.assertEqual(mismatches[0]["twin"], ".juno_task/scripts/managed.py")
+
     def test_grouped_coherence_bin_delegate_normalization_and_build_outputs(self) -> None:
         lifecycle = task_runtime.lifecycle_runtime
         with tempfile.TemporaryDirectory() as temporary:
