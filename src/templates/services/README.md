@@ -298,7 +298,7 @@ Headless turn cost display is provider-neutral. Set `headlessUi.turnCostDisplayT
 yylo -b shell -s pi -m :sonnet -i 1 -v -p "your task"
 
 # Run Pi in live interactive mode (auto-exits on non-aborted completion)
-yylo pi --live -p '/skill:ralph-loop' -i 1
+yylo pi --live -p '/skill:ralph-loop-yylo' -i 1
 
 # Override the :gpt default when a different provider or model is required
 yylo pi --live -m :sonnet -p "your task" -i 1
