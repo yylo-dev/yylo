@@ -5290,6 +5290,17 @@ def _managed_inventory_entries_valid(assets: Any) -> bool:
         return False
 
 
+def _managed_inventory_records_identity(assets: dict[str, Any]) -> str:
+    """Hash records in locale-independent UTF-8 destination order."""
+    projected = [{"destination": destination, "type": record.get("type"),
+                  "sourceSha256": record.get("sourceSha256"),
+                  "installedSha256": record.get("installedSha256")}
+                 for destination, record in sorted(
+                     assets.items(), key=lambda item: item[0].encode("utf-8"))]
+    return hashlib.sha256(json.dumps(
+        projected, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
 def _managed_inventory_identity_valid(inventory: Any) -> bool:
     if not isinstance(inventory, dict) or inventory.get("schemaVersion") not in {1, 2}:
         return False
@@ -5304,12 +5315,7 @@ def _managed_inventory_identity_valid(inventory: Any) -> bool:
         return True
     identity = inventory.get("instructionBundle")
     assets = inventory["assets"]
-    projected = [{"destination": destination, "type": record.get("type"),
-                  "sourceSha256": record.get("sourceSha256"),
-                  "installedSha256": record.get("installedSha256")}
-                 for destination, record in sorted(assets.items())]
-    assets_sha = hashlib.sha256(
-        json.dumps(projected, separators=(",", ":")).encode()).hexdigest()
+    assets_sha = _managed_inventory_records_identity(assets)
     core = {"schemaVersion": identity.get("schemaVersion") if isinstance(identity, dict) else None,
             "semanticVersion": identity.get("semanticVersion") if isinstance(identity, dict) else None,
             "packageVersion": identity.get("packageVersion") if isinstance(identity, dict) else None,
@@ -5329,14 +5335,9 @@ def _bind_instruction_bundle_identity(inventory: dict[str, Any]) -> None:
     if inventory.get("schemaVersion") != 2:
         return
     assets = inventory["assets"]
-    projected = [{"destination": destination, "type": record.get("type"),
-                  "sourceSha256": record.get("sourceSha256"),
-                  "installedSha256": record.get("installedSha256")}
-                 for destination, record in sorted(assets.items())]
     core = {"schemaVersion": "juno_instruction_bundle.v1", "semanticVersion": "1.0.0",
             "packageVersion": inventory["packageVersion"], "assetCount": len(assets),
-            "assetsSha256": hashlib.sha256(
-                json.dumps(projected, separators=(",", ":")).encode()).hexdigest()}
+            "assetsSha256": _managed_inventory_records_identity(assets)}
     inventory["instructionBundle"] = {**core, "bundleSha256": hashlib.sha256(
         json.dumps(core, separators=(",", ":")).encode()).hexdigest()}
 
