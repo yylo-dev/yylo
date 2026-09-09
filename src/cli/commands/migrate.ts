@@ -3,6 +3,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'fs-extra';
 import { Command } from 'commander';
+import {
+  invokeTaskWorkspace,
+  type TaskWorkspaceInvoker,
+} from './task.js';
 
 export type MigrationInvocation = (args: string[]) => Promise<void>;
 
@@ -53,10 +57,76 @@ export async function invokeMigration(args: string[]): Promise<void> {
 export function configureMigrationCommand(
   program: Command,
   invoke: MigrationInvocation = invokeMigration,
+  invokeLegacyLifecycle: TaskWorkspaceInvoker = invokeTaskWorkspace,
 ): void {
   const migrate = program
     .command('migrate')
     .description('Inventory and plan a reviewed Juno architecture migration');
+  const legacyLifecycle = migrate
+    .command('legacy-lifecycle')
+    .description('Finite inventory, conversion, or drain of an existing legacy umbrella attempt');
+  legacyLifecycle
+    .command('inventory')
+    .description('Read-only reconciliation of preserved task states before conversion')
+    .argument('[task-id]', 'Optional exact legacy task ID filter')
+    .action((taskId?: string) => invokeLegacyLifecycle('doctor', taskId ?? '', []));
+  legacyLifecycle
+    .command('plan')
+    .description('Read-only exact conversion plan for one already-WORKING legacy umbrella')
+    .argument('<task-id>', 'Existing canonical legacy umbrella task ID')
+    .requiredOption('--umbrella-admission <file>', 'Frozen ordered-child exact-scope input')
+    .requiredOption('--output <file>', 'New exclusive recovery plan path')
+    .action((taskId: string, options: { umbrellaAdmission: string; output: string }) =>
+      invokeLegacyLifecycle('recovery-plan', taskId, [], [
+        '--umbrella-admission', options.umbrellaAdmission, '--output', options.output,
+      ]));
+  legacyLifecycle
+    .command('authorize')
+    .description('Issue one controller receipt for the exact reviewed conversion plan')
+    .argument('<task-id>', 'Existing canonical legacy umbrella task ID')
+    .requiredOption('--umbrella-admission <file>', 'Frozen ordered-child exact-scope input')
+    .requiredOption('--plan <file>', 'Exact reviewed recovery plan')
+    .action((taskId: string, options: { umbrellaAdmission: string; plan: string }) =>
+      invokeLegacyLifecycle('recovery-authorize', taskId, [], [
+        '--umbrella-admission', options.umbrellaAdmission, '--plan', options.plan,
+      ]));
+  legacyLifecycle
+    .command('apply')
+    .description('Apply one authorized conversion; live use requires separate owner authority')
+    .argument('<task-id>', 'Existing canonical legacy umbrella task ID')
+    .requiredOption('--umbrella-admission <file>', 'Frozen ordered-child exact-scope input')
+    .requiredOption('--plan <file>', 'Exact reviewed recovery plan')
+    .requiredOption('--authorization-receipt <file>', 'Canonical immutable authorization for the exact plan')
+    .action((taskId: string, options: {
+      umbrellaAdmission: string; plan: string; authorizationReceipt: string;
+    }) => invokeLegacyLifecycle('recovery-apply', taskId, [], [
+      '--umbrella-admission', options.umbrellaAdmission, '--plan', options.plan,
+      '--authorization-receipt', options.authorizationReceipt,
+    ]));
+  legacyLifecycle
+    .command('verify')
+    .description('Read-only verification of the exact applied conversion and preserved evidence')
+    .argument('<task-id>', 'Existing canonical legacy umbrella task ID')
+    .requiredOption('--umbrella-admission <file>', 'Frozen ordered-child exact-scope input')
+    .requiredOption('--plan <file>', 'Exact reviewed recovery plan')
+    .requiredOption('--authorization-receipt <file>', 'Canonical immutable authorization for the exact plan')
+    .action((taskId: string, options: {
+      umbrellaAdmission: string; plan: string; authorizationReceipt: string;
+    }) => invokeLegacyLifecycle('recovery-verify', taskId, [], [
+      '--umbrella-admission', options.umbrellaAdmission, '--plan', options.plan,
+      '--authorization-receipt', options.authorizationReceipt,
+    ]));
+  legacyLifecycle
+    .command('checkpoint')
+    .description('Drain one existing unconverted legacy attempt; never starts child authority')
+    .argument('<task-id>', 'Existing canonical legacy umbrella task ID')
+    .argument('<child-id>', 'Existing admitted ordered reporting child ID')
+    .option('--lease-token <token>', 'Current fencing lease token for this gated mutation')
+    .action((taskId: string, childId: string, options: { leaseToken?: string }) =>
+      invokeLegacyLifecycle('child-checkpoint', taskId, [], [
+        '--child', childId,
+        ...(options.leaseToken ? ['--lease-token', options.leaseToken] : []),
+      ]));
   migrate
     .command('inventory')
     .description('Freeze Git plus exact config/plan/prompt identities and redacted environment sources')

@@ -82,6 +82,7 @@ UMBRELLA_ADMISSION_SCHEMA = "juno_task_umbrella_admission.v1"
 UMBRELLA_RECOVERY_PLAN_SCHEMA = "juno_task_umbrella_recovery_plan.v1"
 UMBRELLA_SUPERSESSION_SCHEMA = "juno_task_umbrella_admission_supersession.v1"
 UMBRELLA_AUTHORIZATION_SCHEMA = "juno_task_umbrella_recovery_authorization.v1"
+LEGACY_DELIVERY_VERIFICATION_SCHEMA = "juno_task_legacy_delivery_verification.v1"
 UMBRELLA_EXECUTION_MODE = "umbrella_owned_sequential"
 UMBRELLA_RESERVATIONS_SCHEMA = "juno_task_umbrella_child_reservations.v1"
 UMBRELLA_CHILD_CHECKPOINT_SCHEMA = "juno_task_umbrella_child_checkpoint.v1"
@@ -2435,12 +2436,12 @@ def record_control_audit(controller: Path, surface: str, operation: str,
                          task_id: Optional[str] = None) -> dict[str, str]:
     routing = routing_identity(controller)
     forwarded_policy = routing.get("policy_operation")
-    expected_policy = ("kanban" if operation in {"status", "admission", "preflight", "recovery-plan", "evidence-status", "doctor", "lease-status"}
+    expected_policy = ("kanban" if operation in {"status", "admission", "preflight", "recovery-plan", "recovery-verify", "evidence-status", "doctor", "lease-status"}
                        else "orchestration")
     if surface == "task" and operation not in {
             "start", "run", "resume", "recover-predispatch", "recover-wall-budget", "status", "admission", "hydrate", "preflight", "finish",
             "checkpoint", "child-checkpoint", "evidence-run", "evidence-status", "evidence-await",
-            "recovery-plan", "recovery-authorize", "recovery-apply", "sync", "doctor",
+            "recovery-plan", "recovery-authorize", "recovery-apply", "recovery-verify", "sync", "doctor",
             "lease-status", "lease-heartbeat", "lease-handoff", "lease-successor",
             "lease-revoke", "lease-release"}:
         raise TaskWorkspaceError(f"unsupported task audit operation: {operation}")
@@ -3904,6 +3905,95 @@ def apply_umbrella_recovery(controller: Path, task_id: str, plan_path: Path,
                    "delivery_checkpoint_progress": []}
         state["tasks"][task_id] = updated; write_state(controller, state)
     return {**updated, "outcome": "applied", "admission_status": "authorized_superseding"}
+
+
+def verify_umbrella_recovery(controller: Path, task_id: str, plan_path: Path,
+                             input_path: Path, authorization_path: Path) -> dict[str, Any]:
+    """Verify one finite legacy conversion without changing controller bytes."""
+    authorization_path = authorization_path.expanduser().resolve()
+    canonical = (controller / ".juno_task/receipts/task-admission-authorizations").resolve()
+    try:
+        authorization_path.relative_to(canonical)
+    except ValueError as exc:
+        raise TaskWorkspaceError(
+            "authorization receipt is not in the canonical immutable controller receipt root") from exc
+    plan, plan_file_sha = read_json_object(plan_path, "umbrella recovery plan")
+    authorization, authorization_file_sha = read_json_object(
+        authorization_path, "umbrella recovery authorization")
+    plan_sha = stable_sha256(plan)
+    if (plan.get("schema_version") != UMBRELLA_RECOVERY_PLAN_SCHEMA
+            or plan.get("task_id") != task_id
+            or authorization.get("schema_version") != UMBRELLA_AUTHORIZATION_SCHEMA
+            or authorization.get("task_id") != task_id
+            or authorization.get("action") != "supersede_umbrella_admission"
+            or authorization.get("plan_sha256") != plan_sha
+            or authorization.get("plan_file_sha256") != plan_file_sha
+            or authorization.get("predecessor_receipt_sha256")
+                != plan.get("predecessor_receipt_sha256")):
+        raise TaskWorkspaceError(
+            "legacy conversion verification inputs do not bind one exact reviewed plan")
+    config = load_config(controller)
+    repository = product_repository(controller, config)
+    with state_lock(controller):
+        state = read_state(controller)
+        expected = _recovery_plan_locked(
+            controller, task_id, input_path, config, repository, state)
+        if expected != plan:
+            raise TaskWorkspaceError(
+                "legacy conversion verification plan is stale or an immutable input changed")
+        record = state["tasks"].get(task_id)
+        issued = authorization_ledger(state).get(authorization.get("authorization_id"))
+        if (not isinstance(record, dict) or not isinstance(issued, dict)
+                or issued.get("path") != str(authorization_path)
+                or issued.get("sha256") != authorization_file_sha
+                or issued.get("plan_sha256") != plan_sha
+                or issued.get("plan_file_sha256") != plan_file_sha):
+            raise TaskWorkspaceError(
+                "legacy conversion authorization is not bound by the trusted controller ledger")
+        supersessions = record.get("admission_supersessions", [])
+        if (len(supersessions) != 1
+                or stable_sha256(supersessions[0])
+                    != record.get("admission_supersession_sha256")
+                or supersessions[0].get("reviewed_plan_sha256") != plan_sha
+                or supersessions[0].get("authorization_receipt", {}).get("sha256")
+                    != authorization_file_sha):
+            raise TaskWorkspaceError("legacy conversion supersession identity drifted")
+        expected_contract = _legacy_delivery_conversion(
+            task_id, plan["umbrella_admission"])
+        conversion = record.get("delivery_conversion")
+        if (not isinstance(conversion, dict)
+                or conversion.get("schema_version")
+                    != "juno_task_umbrella_to_delivery_conversion.v1"
+                or conversion.get("contract") != expected_contract
+                or conversion.get("reviewed_plan_sha256") != plan_sha
+                or conversion.get("authorization_receipt_sha256")
+                    != authorization_file_sha
+                or conversion.get("predecessor_receipt_sha256")
+                    != plan["predecessor_receipt_sha256"]
+                or conversion.get("preserved_prior_changed_paths")
+                    != plan["prior_changed_paths"]
+                or conversion.get("preserved_prior_commit_history")
+                    != plan["prior_commit_history"]):
+            raise TaskWorkspaceError("legacy delivery conversion identity drifted")
+        reservations = child_reservations(state)
+        owners = delivery_tracking_owners(state)
+        children = plan["umbrella_admission"]["ordered_child_ids"]
+        if any(reservations.get(child) != task_id or owners.get(child) != task_id
+               for child in children):
+            raise TaskWorkspaceError("legacy reporting ownership drifted after conversion")
+    return {
+        "schema_version": LEGACY_DELIVERY_VERIFICATION_SCHEMA,
+        "task_id": task_id,
+        "outcome": "verified",
+        "plan_sha256": plan_sha,
+        "plan_file_sha256": plan_file_sha,
+        "authorization_receipt_sha256": authorization_file_sha,
+        "predecessor_receipt_sha256": plan["predecessor_receipt_sha256"],
+        "conversion_contract_sha256": expected_contract["contract_sha256"],
+        "preserved_prior_changed_paths_sha256": stable_sha256(plan["prior_changed_paths"]),
+        "preserved_prior_commit_history_sha256": stable_sha256(plan["prior_commit_history"]),
+        "mutation": False,
+    }
 
 
 def _persist_failed_validation(controller: Path, task_id: str, frozen: dict[str, Any], validations: list[dict[str, Any]]) -> None:
@@ -8013,7 +8103,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("operation", choices=(
         "start", "run", "resume", "recover-predispatch", "recover-wall-budget", "status", "admission", "hydrate", "preflight", "finish",
         "checkpoint", "child-checkpoint", "evidence-run", "evidence-status", "evidence-await",
-        "recovery-plan", "recovery-authorize", "recovery-apply", "runtime-bootstrap",
+        "recovery-plan", "recovery-authorize", "recovery-apply", "recovery-verify", "runtime-bootstrap",
         "sync", "doctor", "lease-status", "lease-heartbeat", "lease-handoff",
         "lease-successor", "lease-revoke", "lease-release"))
     value.add_argument("--task")
@@ -8146,6 +8236,14 @@ def main(argv: list[str] | None = None) -> int:
                     raise TaskWorkspaceError(
                         "recovery-apply requires --umbrella-admission, --plan, and --authorization-receipt")
                 result = apply_umbrella_recovery(
+                    controller, args.task, args.plan, args.umbrella_admission,
+                    args.authorization_receipt)
+            elif args.operation == "recovery-verify":
+                if (not args.umbrella_admission or not args.plan
+                        or not args.authorization_receipt or args.output):
+                    raise TaskWorkspaceError(
+                        "recovery-verify requires --umbrella-admission, --plan, and --authorization-receipt")
+                result = verify_umbrella_recovery(
                     controller, args.task, args.plan, args.umbrella_admission,
                     args.authorization_receipt)
             else:
