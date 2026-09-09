@@ -101,15 +101,23 @@ class RiskPolicyTest(unittest.TestCase):
                                 "cited_contract": "PDR 2.2 reviewer-scope and anti-scope-creep gate"}
                                for i in range(findings)]}
         response_path, response_sha = self.object_file(f"response-{session}.json", result)
+        prompt_path, prompt_sha = self.object_file(
+            f"prompt-{session}.json", {"candidate": binding["candidate_sha"],
+                                        "policy": binding["policy_identity"],
+                                        "reviewer": role})
         receipt = {"schema_version": rp.MANAGED_RUNNER_SCHEMA, "mode": "reviewer",
                    "state": "succeeded", "semantic_outcome": "completed", "session_id": session,
                    "tool_id": tool_id or f"bolt_{role}",
                    "completed_at": f"2026-08-09T00:00:0{sequence}Z",
                    "identity": {"candidate_sha": binding["candidate_sha"]},
                    "review_binding": binding,
-                   "artifacts": {"response": {"path": response_path,
-                                                "bytes": Path(response_path).stat().st_size,
-                                                "sha256": response_sha}}}
+                   "artifacts": {
+                       "prompt": {"path": prompt_path,
+                                  "bytes": Path(prompt_path).stat().st_size,
+                                  "sha256": prompt_sha},
+                       "response": {"path": response_path,
+                                    "bytes": Path(response_path).stat().st_size,
+                                    "sha256": response_sha}}}
         path, mark = self.object_file(f"runner-{session}.json", receipt)
         return {"runner_receipt_path": path, "runner_receipt_sha256": mark}
 
@@ -357,6 +365,12 @@ class RiskPolicyTest(unittest.TestCase):
                                severity="medium", impact_category="bounded_product_defect")
         accepted = self.finish(normal, [advisory])
         compact = accepted["reviews"][0]
+        self.assertEqual({"reviewer", "sequence", "verdict", "finding_count",
+                          "advisory_count", "blocking_count", "findings",
+                          "rejected_observation_count", "rejection_counters",
+                          "review_reference"}, set(compact))
+        self.assertEqual(rp.REVIEW_REFERENCE_SCHEMA,
+                         compact["review_reference"]["schema_version"])
         self.assertEqual(("passed", 1, 0),
                          (accepted["status"], compact["advisory_count"], compact["blocking_count"]))
         promoted = self.review(normal, "reviewer", 1, "promoted", findings=1,
@@ -485,6 +499,12 @@ class RiskPolicyTest(unittest.TestCase):
         self.assertEqual(reused["semantic_evidence_reused"]["origin_reviews"],
                          repeated["semantic_evidence_reused"]["origin_reviews"])
         receipt = json.loads(Path(reviews[0]["runner_receipt_path"]).read_text())
+        prompt_path = Path(receipt["artifacts"]["prompt"]["path"])
+        prompt_bytes = prompt_path.read_bytes()
+        prompt_path.write_text("{}\n")
+        with self.assertRaisesRegex(rp.RiskPolicyError, "request identity"):
+            self.finish(plan, previous=prior_ref, full_suite_admission=None)
+        prompt_path.write_bytes(prompt_bytes)
         Path(receipt["artifacts"]["response"]["path"]).write_text("{}\n")
         with self.assertRaisesRegex(rp.RiskPolicyError, "digest does not match"):
             self.finish(plan, previous=prior_ref, full_suite_admission=None)
