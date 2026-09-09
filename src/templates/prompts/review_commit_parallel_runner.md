@@ -6,7 +6,7 @@ Reviewer: `{{ reviewer_index }}`
 Repository: `{{ repository }}`
 Base: `{{ base_sha }}`
 Tip: `{{ tip_sha }}`
-Requirements checklist: `{{ checklist_path }}`
+Canonical task/PDR revision: `{{ checklist_path }}`
 Consolidated prior findings: `{{ findings_summary_path }}`
 Validation evidence: `{{ validation_evidence_path }}`
 
@@ -20,7 +20,7 @@ Validation evidence: `{{ validation_evidence_path }}`
 
 Launch this review only through a fresh `yy pi` context. Never use bare `pi`, a direct agent/provider CLI, or an indirect provider/model override. Inherit project defaults or use only an ordinary explicit selector exactly approved by project `workflowModels`.
 
-Review only: do not edit, commit, update Kanban, launch another reviewer, repair findings, mutate refs, or change any worktree. Inspect exactly `{{ base_sha }}..{{ tip_sha }}`. Treat validation evidence as evidence, not as a substitute for code and requirement inspection.
+Review only: do not edit, commit, update Kanban, create advisory tasks, launch another reviewer, repair findings, mutate refs, or change any worktree. Inspect exactly `{{ base_sha }}..{{ tip_sha }}`. Treat validation evidence as evidence, not as a substitute for code and requirement inspection. The managed runner's single immutable receipt binds this rendered request and your terminal structured result; do not create a second review record.
 
 ## Review scope
 
@@ -57,4 +57,4 @@ For every admitted finding, provide the structured contract's stable finding ID,
 
 Severity is evaluated only after scope admission. The recommendation is not final policy authority. The queue deterministically promotes supported install/runtime/config/core/product-breaking evidence to `high` and security/privacy or destructive-data-loss evidence to `critical`. If the finding bound prevents a complete response, set the structured `truncated=true` signal and report the omitted count; never represent a truncated review as PASS. Return PASS only after reviewing the complete frozen candidate and finding no independently actionable admitted defect. PASS means no admitted in-scope defect remains, not that the product cannot be improved.
 
-For a high-risk pair, Reviewer A and Reviewer B run sequentially but independently against the same frozen base and tip. Reviewer B starts only after Reviewer A has no blocking finding and remains blind to Reviewer A conclusions. The orchestrator consolidates and deduplicates completed receipts before disposition.
+For a high-risk pair, Reviewer A and Reviewer B run sequentially but independently against the same frozen base and tip. Reviewer B starts only after Reviewer A has no blocking finding and remains blind to Reviewer A conclusions. The orchestrator consolidates and deduplicates completed receipts once before disposition. Low/medium advisories remain bounded evidence on this delivery; they never create Ledger tasks automatically.

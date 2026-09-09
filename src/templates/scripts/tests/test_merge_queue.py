@@ -389,6 +389,9 @@ class MergeQueueTests(unittest.TestCase):
         self.assertIn(f"Tip: `{candidate_sha}`", text)
         self.assertIn("Reviewer: `1:reviewer_a`", text)
         self.assertIn("Queue-bound risk plan", text)
+        requirement_identity = task_runtime.canonical_requirement_identity(self.controller, "A")
+        self.assertIn("Canonical task/PDR revision identity", text)
+        self.assertIn(requirement_identity["requirements_sha256"], text)
         self.assertIn('"affected_validation":[{"exit_code":0,"id":"affected"}]', text)
         self.assertIn("No prior reviewed candidate is bound", text)
         self.assertNotIn("Preimplementation acceptance contract", text)
@@ -1706,6 +1709,10 @@ class MergeQueueTests(unittest.TestCase):
                                                     else "PDR 2.2 reviewer-scope gate")}]
                                if findings or advisory else [])}
         result_path, result_sha = self.object_file(f"result-{reviewer}-{sequence}.json", result)
+        prompt_path, prompt_sha = self.object_file(
+            f"prompt-{reviewer}-{sequence}.json",
+            {"candidate": binding["candidate_sha"], "policy": binding["policy_identity"],
+             "reviewer": reviewer})
         receipt = {"schema_version": risk_runtime.MANAGED_RUNNER_SCHEMA, "mode": "reviewer",
                    "state": "succeeded", "semantic_outcome": "completed",
                    "session_id": f"session-{reviewer}-{sequence}",
@@ -1713,9 +1720,13 @@ class MergeQueueTests(unittest.TestCase):
                    "completed_at": f"2026-08-09T00:00:0{sequence}Z",
                    "identity": {"candidate_sha": binding["candidate_sha"]},
                    "review_binding": binding,
-                   "artifacts": {"response": {"path": result_path,
-                                                "bytes": Path(result_path).stat().st_size,
-                                                "sha256": result_sha}}}
+                   "artifacts": {
+                       "prompt": {"path": prompt_path,
+                                  "bytes": Path(prompt_path).stat().st_size,
+                                  "sha256": prompt_sha},
+                       "response": {"path": result_path,
+                                    "bytes": Path(result_path).stat().st_size,
+                                    "sha256": result_sha}}}
         receipt_path, receipt_sha = self.object_file(f"runner-{reviewer}-{sequence}.json", receipt)
         return {"runner_receipt_path": receipt_path, "runner_receipt_sha256": receipt_sha}
 
@@ -3637,11 +3648,11 @@ steps:
         board_path = self.controller / ".juno_task/runtime/fake-kanban.json"
         board = json.loads(board_path.read_text())
         advisories = [task for key, task in board.items() if key.startswith("ADV")]
-        self.assertEqual(1, len(advisories))
-        self.assertEqual(1, len(reviewed["advisory_followups"]))
+        self.assertEqual([], advisories)
+        self.assertEqual(1, len(reviewed["delivery_advisories"]))
         self.assertEqual(tip, self.queue_payload("next", "X")["candidate_sha"])
 
-    def test_advisory_is_persisted_idempotently_and_same_candidate_continues(self) -> None:
+    def test_advisory_stays_on_delivery_and_same_candidate_continues(self) -> None:
         tip = self.commit_feature("X", "src/security/auth.py", "runtime\n")
         self.queue_payload("next")
         advisory = lambda *args, **kwargs: self.fake_review(*args, **kwargs, advisory=True)
@@ -3649,20 +3660,25 @@ steps:
             reviewed = merge_runtime.merge_review(self.controller.resolve(), "X")
         self.assertEqual("RISK_EVIDENCE_READY", reviewed["outcome"])
         self.assertEqual(tip, reviewed["candidate_sha"])
-        self.assertEqual(1, len(reviewed["advisory_followups"]))
+        self.assertEqual(1, len(reviewed["delivery_advisories"]))
         board_path = self.controller / ".juno_task/runtime/fake-kanban.json"
         board = json.loads(board_path.read_text())
         advisories = [task for key, task in board.items() if key.startswith("ADV")]
-        self.assertEqual(1, len(advisories))
-        self.assertEqual(tip, advisories[0]["fields"]["source_candidate_sha"])
+        self.assertEqual([], advisories)
         compact = risk_runtime._compact_review(
             self.fake_review(self.controller, self.repository, reviewed["risk"]["plan"],
                              "X", "reviewer_a", 1, None, 2, advisory=True),
             "reviewer_a", 1, tip, reviewed["risk"]["plan"]["policy_identity"],
             reviewed["risk"]["plan"])
-        repeated = merge_runtime.persist_advisory_followups(
-            self.controller, "X", tip, reviewed["risk"]["plan"]["policy_identity"], [compact])
-        self.assertEqual("reused", repeated[0]["outcome"])
+        repeated = merge_runtime.delivery_advisories([compact])
+        self.assertEqual(reviewed["delivery_advisories"][0]["finding_digest"],
+                         repeated[0]["finding_digest"])
+        self.assertEqual(2, len(reviewed["delivery_advisories"][0]["provenance"]))
+        detail = merge_runtime.status_projection(
+            self.controller.resolve(), level="detail", task_id="X")
+        self.assertEqual(1, detail["task"]["advisory_count"])
+        self.assertEqual(reviewed["delivery_advisories"][0]["finding_digest"],
+                         detail["task"]["delivery_advisories"][0]["finding_digest"])
         self.assertEqual(tip, self.queue_payload("next", "X")["candidate_sha"])
 
     def test_one_repair_round_exhausts_instead_of_starting_an_unbounded_review_loop(self) -> None:
