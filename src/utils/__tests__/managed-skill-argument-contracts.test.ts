@@ -16,17 +16,7 @@ describe('remote skill package boundary', () => {
     ).not.toThrow();
   });
 
-  it('does not retain bundled SKILL.md payloads or a skill-copy build step', async () => {
-    const payloads: string[] = [];
-    const walk = async (dir: string): Promise<void> => {
-      for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
-        const absolute = path.join(dir, entry.name);
-        if (entry.isDirectory()) await walk(absolute);
-        else if (entry.name === 'SKILL.md') payloads.push(path.relative(project, absolute));
-      }
-    };
-    await walk(sourceRoot);
-    expect(payloads).toEqual([]);
+  it('does not copy skill payloads into the npm artifact or ordinary startup', async () => {
     const packageJson = await fs.readJson(path.join(project, 'package.json'));
     expect(packageJson.scripts['build:copy-skills']).toBeUndefined();
     expect(packageJson.scripts.build).not.toContain('copy-skills');

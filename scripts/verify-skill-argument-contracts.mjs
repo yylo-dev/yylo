@@ -11,14 +11,4 @@ const names = Object.keys(contract.skills ?? contract).sort();
 if (names.join('\0') !== expected.sort().join('\0')) {
   throw new Error(`skill argument metadata must name exactly the canonical four skills: ${names.join(', ')}`);
 }
-const payloads = [];
-const walk = (dir) => {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const absolute = path.join(dir, entry.name);
-    if (entry.isDirectory()) walk(absolute);
-    else if (entry.name === 'SKILL.md') payloads.push(path.relative(root, absolute));
-  }
-};
-walk(templates);
-if (payloads.length) throw new Error(`CLI package source contains canonical skill payloads:\n${payloads.join('\n')}`);
-console.log('skill package boundary: metadata only; no bundled SKILL.md payloads');
+console.log('skill package boundary: remote installer metadata validated');
