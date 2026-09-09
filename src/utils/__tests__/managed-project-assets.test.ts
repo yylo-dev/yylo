@@ -126,9 +126,6 @@ describe('ManagedProjectAssets', {
     for (const destination of [
       'AGENTS.md',
       'CLAUDE.md',
-      '.agents/skills/ralph-loop/references/implement.md',
-      '.claude/skills/kanban-workflow/SKILL.md',
-      '.pi/skills/understand-project/SKILL.md',
       '.juno_task/prompts/lifecycle/task-implementation.md',
       '.juno_task/workflows/yy-task-run.yaml',
     ]) {
@@ -137,6 +134,7 @@ describe('ManagedProjectAssets', {
         sha256(await fs.readFile(path.join(projectDir, destination), 'utf8')),
       );
     }
+    expect(Object.keys(manifest.assets).some((entry) => entry.includes('/skills/'))).toBe(false);
     expect(manifest.instructionBundle.assetCount).toBe(Object.keys(manifest.assets).length);
     expect((await ManagedProjectAssets.inspectGeneration(projectDir)).coherent).toBe(true);
 
@@ -200,7 +198,7 @@ describe('ManagedProjectAssets', {
     expect(manifest.schemaVersion).toBe(2);
     expect(manifest.instructionBundle).toEqual(expect.objectContaining({
       schemaVersion: 'juno_instruction_bundle.v1',
-      semanticVersion: '1.0.0',
+      semanticVersion: '2.0.0',
       packageVersion: manifest.packageVersion,
       assetCount: Object.keys(manifest.assets).length,
       assetsSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
