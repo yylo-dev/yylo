@@ -2429,6 +2429,15 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
         }.issubset(admitted))
         self.assertNotIn(".juno_task/scripts", admitted)
 
+    def test_canonical_policy_admits_only_exact_lifecycle_acceptance_report(self) -> None:
+        canonical_policy = json.loads(
+            (SCRIPT.parent.parent / "config/task-workspace.json").read_text())
+        acceptance_path = "juno-code/docs/lifecycle-simplification-acceptance.md"
+        sibling_path = "juno-code/docs/lifecycle-simplification-acceptance-draft.md"
+
+        self.assertIn(acceptance_path, canonical_policy["allowed_paths"])
+        self.assertNotIn(sibling_path, canonical_policy["allowed_paths"])
+
     def test_start_freezes_explicit_policy_admitted_paths(self) -> None:
         started = task_runtime.start(self.controller, "X", ["optional"])
         self.assertEqual(started["creation_receipt"]["requested_paths"], ["optional"])
