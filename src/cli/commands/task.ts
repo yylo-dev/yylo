@@ -28,6 +28,7 @@ export type TaskWorkspaceOperation =
   | 'recovery-plan'
   | 'recovery-authorize'
   | 'recovery-apply'
+  | 'recovery-verify'
   | 'lease-status'
   | 'lease-heartbeat'
   | 'lease-handoff'
@@ -45,7 +46,7 @@ export type TaskRuntimeBootstrapOptions = { dryRun?: boolean; apply?: string };
 export type TaskRuntimeBootstrapInvoker = (options: TaskRuntimeBootstrapOptions) => Promise<void>;
 
 export function taskWorkspaceControlOperation(operation: TaskWorkspaceOperation): 'kanban' | 'orchestration' {
-  return ['status', 'admission', 'preflight', 'recovery-plan', 'evidence-status', 'doctor', 'lease-status'].includes(operation) ? 'kanban' : 'orchestration';
+  return ['status', 'admission', 'preflight', 'recovery-plan', 'recovery-verify', 'evidence-status', 'doctor', 'lease-status'].includes(operation) ? 'kanban' : 'orchestration';
 }
 
 export function packagedTaskRuntimeCandidates(): string[] {
@@ -140,7 +141,7 @@ export async function checkpointTaskWorkspaceAfterFinalization(
   checkpoint: TaskWorkspaceCheckpointer = checkpointControllerAfterFinalization,
   taskId?: string,
 ): Promise<void> {
-  if (['status', 'admission', 'preflight', 'recovery-plan', 'checkpoint', 'evidence-run', 'evidence-status', 'evidence-await', 'doctor', 'lease-status'].includes(operation)) return;
+  if (['status', 'admission', 'preflight', 'recovery-plan', 'recovery-verify', 'checkpoint', 'evidence-run', 'evidence-status', 'evidence-await', 'doctor', 'lease-status'].includes(operation)) return;
   if (taskId) await checkpoint(controllerRoot, exitCode, taskId);
   else await checkpoint(controllerRoot, exitCode);
 }
@@ -221,14 +222,12 @@ export function configureTaskWorkspaceCommand(
   task
     .command('start')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
-    .option('--path <path>', 'Exact tracked authored file or additional selectable product root; repeat for exact scope', (value, values: string[]) => [...values, value], [])
-    .option('--umbrella-admission <file>', 'Versioned ordered-child exact-scope input')
+    .option('--path <path>', 'Exact authored file (including one policy-declared new file) or selectable product root; repeat for exact scope', (value, values: string[]) => [...values, value], [])
     .option('--lease-token <token>', 'Current fencing lease token for this gated mutation')
-    .action((taskId: string, options: { path: string[]; umbrellaAdmission?: string; leaseToken?: string }) => {
-      const admission = options.umbrellaAdmission ? ['--umbrella-admission', options.umbrellaAdmission] : [];
-      if (options.leaseToken) admission.push('--lease-token', options.leaseToken);
-      return invoke('start', taskId, options.path, admission);
-    });
+    .action((taskId: string, options: { path: string[]; leaseToken?: string }) => invoke(
+      'start', taskId, options.path,
+      options.leaseToken ? ['--lease-token', options.leaseToken] : [],
+    ));
   task.command('admission')
     .description('Read-only exact authored-path and dirty-path admission check')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
@@ -245,17 +244,6 @@ export function configureTaskWorkspaceCommand(
     .action((taskId: string, options: { accept?: string; leaseToken?: string }) => invoke(
       'checkpoint', taskId, [], [
         ...(options.accept ? ['--accept-checkpoint', options.accept] : []),
-        ...(options.leaseToken ? ['--lease-token', options.leaseToken] : []),
-      ],
-    ));
-  task.command('child-checkpoint')
-    .description('Record one admitted umbrella child sequential committed increment')
-    .argument('<task-id>', 'Canonical umbrella YYLO Ledger task ID')
-    .argument('<child-id>', 'Admitted ordered tracking-only child task ID')
-    .option('--lease-token <token>', 'Current fencing lease token for this gated mutation')
-    .action((taskId: string, childId: string, options: { leaseToken?: string }) => invoke(
-      'child-checkpoint', taskId, [], [
-        '--child', childId,
         ...(options.leaseToken ? ['--lease-token', options.leaseToken] : []),
       ],
     ));
@@ -331,31 +319,6 @@ export function configureTaskWorkspaceCommand(
     .requiredOption('--lease-token <token>', 'Current fencing lease token')
     .action((taskId: string, options: { leaseToken: string }) => invoke(
       'lease-release', taskId, [], ['--lease-token', options.leaseToken],
-    ));
-  task.command('recovery-plan')
-    .argument('<task-id>', 'Canonical umbrella YYLO Ledger task ID')
-    .requiredOption('--umbrella-admission <file>', 'Frozen ordered-child exact-scope input')
-    .requiredOption('--output <file>', 'New exclusive recovery plan path')
-    .action((taskId: string, options: { umbrellaAdmission: string; output: string }) => invoke(
-      'recovery-plan', taskId, [], ['--umbrella-admission', options.umbrellaAdmission,
-        '--output', options.output],
-    ));
-  task.command('recovery-authorize')
-    .argument('<task-id>', 'Canonical umbrella YYLO Ledger task ID')
-    .requiredOption('--umbrella-admission <file>', 'Frozen ordered-child exact-scope input')
-    .requiredOption('--plan <file>', 'Exact reviewed recovery plan')
-    .action((taskId: string, options: { umbrellaAdmission: string; plan: string }) => invoke(
-      'recovery-authorize', taskId, [], ['--umbrella-admission', options.umbrellaAdmission,
-        '--plan', options.plan],
-    ));
-  task.command('recovery-apply')
-    .argument('<task-id>', 'Canonical umbrella YYLO Ledger task ID')
-    .requiredOption('--umbrella-admission <file>', 'Frozen ordered-child exact-scope input')
-    .requiredOption('--plan <file>', 'Exact reviewed recovery plan')
-    .requiredOption('--authorization-receipt <file>', 'Canonical immutable authorization for the exact plan')
-    .action((taskId: string, options: { umbrellaAdmission: string; plan: string; authorizationReceipt: string }) => invoke(
-      'recovery-apply', taskId, [], ['--umbrella-admission', options.umbrellaAdmission,
-        '--plan', options.plan, '--authorization-receipt', options.authorizationReceipt],
     ));
   task.command('runtime-bootstrap')
     .description('Plan or apply guarded package-bound target task-runtime recovery')
