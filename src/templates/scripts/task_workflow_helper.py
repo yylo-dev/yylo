@@ -1600,7 +1600,9 @@ def consume_or_execute_command_result(
             except (OSError, json.JSONDecodeError) as exc:
                 raise LifecycleContractError("canonical command result is unreadable") from exc
             verify_canonical_command_result(receipt, repository, closure)
-            return {"decision": "reused", "receipt": receipt,
+            decision = ("failure_stands" if receipt.get("outcome_identity", {}).get("verdict") == "FAILED"
+                        else "reused")
+            return {"decision": decision, "receipt": receipt,
                     "reference": {"path": str(path.resolve()),
                                   "sha256": hashlib.sha256(raw).hexdigest(),
                                   "command_id": receipt["command_id"]}}
@@ -1631,7 +1633,8 @@ def consume_or_execute_command_result(
             source = {"kind": "legacy_import", "schema_version": legacy_receipt["schema_version"],
                       "path": str(source_path.resolve()),
                       "sha256": legacy_reference["sha256"]}
-            decision = "reused"
+            decision = ("failure_stands" if _terminal_result_verdict(result) == "FAILED"
+                        else "reused")
         else:
             result = execute()
             if _terminal_result_verdict(result) == "UNSETTLED":
@@ -1745,7 +1748,7 @@ def evidence_decision(command_id: str, decision: str, *, closure: dict[str, Any]
                       source: Optional[dict[str, Any]] = None,
                       invalidation: Optional[list[dict[str, Any]]] = None,
                       reason: Optional[str] = None) -> dict[str, Any]:
-    if decision not in {"executed", "reused", "invalidated", "unknown", "skipped", "not_applicable"}:
+    if decision not in {"executed", "reused", "failure_stands", "invalidated", "unknown", "skipped", "not_applicable"}:
         raise LifecycleContractError(f"invalid command evidence decision: {decision}")
     return {"schema_version": COMMAND_DECISION_SCHEMA, "command_id": command_id,
             "decision": decision, "input_closure_sha256": closure.get("input_closure_sha256"),
@@ -1755,8 +1758,11 @@ def evidence_decision(command_id: str, decision: str, *, closure: dict[str, Any]
 def evidence_counters(decisions: list[dict[str, Any]]) -> dict[str, int]:
     result = {name: 0 for name in ("executed", "reused", "invalidated", "unknown", "skipped", "not_applicable")}
     for row in decisions:
-        if row.get("decision") in result:
-            result[row["decision"]] += 1
+        decision = row.get("decision")
+        if decision == "failure_stands":
+            result["reused"] += 1
+        elif decision in result:
+            result[decision] += 1
     return result
 
 

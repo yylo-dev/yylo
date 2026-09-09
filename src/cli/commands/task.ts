@@ -263,9 +263,11 @@ export function configureTaskWorkspaceCommand(
       'hydrate', taskId, [], options.leaseToken ? ['--lease-token', options.leaseToken] : [],
     ));
   task.command('status')
+    .description('Read-only state, producer fence, prior terminal evidence, and one eligible action')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
     .action((taskId: string) => invoke('status', taskId, []));
   task.command('finish')
+    .description('Queue only after live state/fence admission and exact reusable validation')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
     .option('--lease-token <token>', 'Current fencing lease token for this gated mutation')
     .action((taskId: string, options: { leaseToken?: string }) => invoke(
