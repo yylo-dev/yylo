@@ -1870,6 +1870,13 @@ def selected_task_paths(config: dict[str, Any], repository: Path, target_sha: st
             raise TaskWorkspaceError(f"required task path is not admitted by policy: {item}")
         output = git(repository, "ls-tree", target_sha, "--", item, check=False)
         lines = [line for line in output.splitlines() if line]
+        if not lines and not selectable and item in config["allowed_paths"]:
+            # A complete exact policy entry may reserve one new file without
+            # granting its parent or any sibling. The frozen target SHA binds
+            # the proven absence; the zero object is an explicit receipt
+            # identity, not a wildcard or inferred directory permission.
+            entries[item] = {"mode": "000000", "type": "absent", "object": "0" * 40}
+            continue
         if len(lines) != 1:
             raise TaskWorkspaceError(f"required task path is absent or ambiguous at target: {item}")
         metadata, actual_path = lines[0].split("\t", 1)
