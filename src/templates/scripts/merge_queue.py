@@ -2892,6 +2892,16 @@ def recover_incomplete(controller: Path, config: dict[str, Any], repository: Pat
 
 def merge_next(controller: Path, task_id: Optional[str] = None,
                expected_plan_id: Optional[str] = None) -> dict[str, Any]:
+    # An explicitly addressed ineligible task must fail before recovery,
+    # runtime checks, candidate construction, validation, or queue mutation.
+    if task_id is not None:
+        if not task_runtime.TASK_RE.fullmatch(task_id):
+            raise MergeQueueError("unsafe task id")
+        with task_runtime.state_lock(controller):
+            addressed = task_runtime.read_state(controller)["tasks"].get(task_id)
+        if not isinstance(addressed, dict) or addressed.get("state") not in {
+                "AWAITING_RISK", "REQUEUING_STALE"}:
+            raise MergeQueueError("explicit next task is not awaiting risk or release evidence")
     config = task_runtime.load_config(controller)
     repository = task_runtime.product_repository(controller, config)
     with target_lock(controller, repository, config["target_ref"]):
@@ -2900,13 +2910,11 @@ def merge_next(controller: Path, task_id: Optional[str] = None,
             return recovered
         require_runtime_before_new_work(controller, repository, config)
         if task_id is not None:
-            if not task_runtime.TASK_RE.fullmatch(task_id):
-                raise MergeQueueError("unsafe task id")
             with task_runtime.state_lock(controller):
                 record = task_runtime.read_state(controller)["tasks"].get(task_id)
             if not isinstance(record, dict) or record.get("state") not in {
                     "AWAITING_RISK", "REQUEUING_STALE"}:
-                raise MergeQueueError("explicit next task is not awaiting risk or release evidence")
+                raise MergeQueueError("explicit next task changed eligibility before execution")
             assert_static_plan(controller, task_id, "next", expected_plan_id)
             return resume_awaiting(controller, config, repository, record)
         record = select_next(controller, config)
@@ -3112,6 +3120,11 @@ def merge_resolve(controller: Path, task_id: str,
                   expected_plan_id: Optional[str] = None) -> dict[str, Any]:
     if not task_runtime.TASK_RE.fullmatch(task_id):
         raise MergeQueueError("unsafe task id")
+    with task_runtime.state_lock(controller):
+        addressed = task_runtime.read_state(controller)["tasks"].get(task_id)
+    if not isinstance(addressed, dict) or addressed.get("state") not in {
+            "CONFLICT", "CONFLICT_RESOLVED"}:
+        raise MergeQueueError("task has no bound CONFLICT candidate")
     initial_plan = assert_static_plan(controller, task_id, "resolve", expected_plan_id)
     config = task_runtime.load_config(controller)
     repository = task_runtime.product_repository(controller, config)
@@ -6220,6 +6233,12 @@ def merge_reopen(controller: Path, task_id: str,
     """Recoverable two-phase requeue after a new validated feature tip."""
     if not task_runtime.TASK_RE.fullmatch(task_id):
         raise MergeQueueError("unsafe task id")
+    with task_runtime.state_lock(controller):
+        addressed = task_runtime.read_state(controller)["tasks"].get(task_id)
+    if not isinstance(addressed, dict) or addressed.get("state") not in {
+            "REVIEW_FINDINGS", "REOPENING", "REQUEUING_STALE", "AWAITING_RISK",
+            "QUEUED", "CONFLICT_RESOLVED", "REVIEW_FINDINGS_EXHAUSTED"}:
+        raise MergeQueueError("task has no review findings or failed queue repair to reopen")
     assert_static_plan(controller, task_id, "reopen", expected_plan_id)
     config = task_runtime.load_config(controller)
     repository = task_runtime.product_repository(controller, config)
@@ -6976,6 +6995,11 @@ def status(controller: Path) -> dict[str, Any]:
             if repair.get("status") == "READY":
                 projection["reason_code"] = "deterministic_full_suite_repair_ready"
                 projection["safe_next_command"] = "yy merge arbiter run"
+        contract = _status_task_row(
+            controller, repository, config, projection["task_id"], record,
+            detail=False, action=True)
+        for key in ("producer_fence", "mutation_eligibility", "prior_terminal_evidence"):
+            projection[key] = contract[key]
     return {"schema_version": QUEUE_SCHEMA, "repository_identity": repository_identity(repository),
             "target_ref": config["target_ref"], "target_sha": task_runtime.ref_sha(repository, config["target_ref"]),
             "tasks": rows, "last_attempt": entry["last_attempt"],
@@ -7005,6 +7029,51 @@ def _bounded_status_value(value: Any, *, depth: int = 0) -> Any:
     return str(value)[:MERGE_STATUS_STRING_CHARS]
 
 
+def _merge_phase_timing(validation: Any) -> dict[str, Any]:
+    rows = validation if isinstance(validation, list) else []
+    totals = {"resource_wait_ms": 0, "execution_ms": 0, "settlement_ms": 0,
+              "overall_elapsed_ms": 0}
+    first_failure_ms: Optional[int] = None
+    elapsed_before = 0
+    for result in rows:
+        if not isinstance(result, dict):
+            continue
+        timing = result.get("timing") if isinstance(result.get("timing"), dict) else {}
+        wall = max(0, int(timing.get("overall_elapsed_ms",
+                                     timing.get("wall_duration_ms", result.get("duration_ms", 0))) or 0))
+        totals["resource_wait_ms"] += max(0, int(timing.get("resource_wait_ms", 0) or 0))
+        totals["execution_ms"] += max(0, int(timing.get("execution_ms", 0) or 0))
+        totals["settlement_ms"] += max(0, int(timing.get("settlement_ms", 0) or 0))
+        if first_failure_ms is None and (result.get("timed_out") or result.get("exit_code")):
+            first_failure_ms = elapsed_before + max(0, int(timing.get("first_failure_ms", wall) or wall))
+        elapsed_before += wall
+    totals["overall_elapsed_ms"] = elapsed_before
+    return {"schema_version": "juno_lifecycle_phase_timing.v1", **totals,
+            "first_failure_ms": first_failure_ms}
+
+
+def _merge_mutation_contract(task_id: str, state: Any) -> dict[str, Any]:
+    contracts = {
+        "QUEUED": ("arbiter-run", True, "queued_candidate", "FIFO and live authority must still admit the task", "yy merge arbiter run"),
+        "AWAITING_RISK": ("arbiter-run", True, "risk_evidence_pending", "candidate, policy, and evidence identity must change to invalidate prior findings", "yy merge arbiter run"),
+        "REQUEUING_STALE": ("arbiter-run", True, "target_refresh_pending", "compose against the current protected target", "yy merge arbiter run"),
+        "CONFLICT": ("resolve", True, "conflict_requires_resolution", "commit only the preserved conflict paths", f"yy merge resolve {task_id}"),
+        "CONFLICT_RESOLVED": ("resolve", True, "resolved_candidate_pending", "the resolved candidate or protected target identity must change", f"yy merge resolve {task_id}"),
+        "REVIEW_FINDINGS": ("reopen", True, "review_findings_require_delta", "append one admitted descendant repair commit", f"yy merge reopen {task_id}"),
+        "REOPENING": ("reopen", True, "reopen_incomplete", "complete the exact existing reopen transition", f"yy merge reopen {task_id}"),
+        "MERGING": ("resume", True, "finalization_pending", "live target/readback authority must settle", "yy merge resume"),
+        "REVIEW_FINDINGS_EXHAUSTED": (None, False, "review_findings_exhausted", "a newly authorized task with changed requirements/bytes is required", "operator stop: inspect consolidated findings"),
+        "MERGED": (None, False, "already_merged", "none; terminal evidence is immutable", "none"),
+        "WITHDRAWN": (None, False, "withdrawn", "explicitly create or authorize different work", "operator stop: task is withdrawn"),
+    }
+    operation, eligible, reason, invalidating, action = contracts.get(
+        state, (None, False, "unsupported_legacy_state", f"migrate or explicitly recover unsupported state {state}", "operator stop: inspect merge status --full"))
+    return {"operation": operation, "eligible": eligible, "reason_code": reason,
+            "invalidating_change": invalidating, "safe_next_action": action,
+            "operator_stop": not eligible,
+            "authority_checked_live_by_executor": True}
+
+
 def _status_task_row(controller: Path, repository: Path, config: dict[str, Any],
                      task_id: str, record: dict[str, Any], *, detail: bool,
                      action: bool = False) -> dict[str, Any]:
@@ -7025,6 +7094,23 @@ def _status_task_row(controller: Path, repository: Path, config: dict[str, Any],
     if row["kanban_sync_required"]:
         row["safe_next_command"] = task_runtime.KANBAN_SYNC_RECOVERY.format(task=task_id)
         row["reason_code"] = "kanban_sync_required"
+    eligibility = _merge_mutation_contract(task_id, record.get("state"))
+    if row.get("safe_next_command"):
+        eligibility.update({"operation": row["safe_next_command"].split()[2]
+                            if len(row["safe_next_command"].split()) > 2 else "recovery",
+                            "eligible": True, "reason_code": row.get("reason_code") or "typed_recovery_available",
+                            "safe_next_action": row["safe_next_command"], "operator_stop": False})
+    lease = task_runtime._lease_view(record)
+    observation = (task_runtime._observe_producer(lease.get("producer"))
+                   if isinstance(lease, dict) and lease.get("state") == task_runtime.decisions.LEASE_ACTIVE
+                   else task_runtime.decisions.LeaseObservation("inactive", "no active task producer"))
+    row["producer_fence"] = {"task_lease_state": lease.get("state") if isinstance(lease, dict) else "NONE",
+                             "task_lease_attempt": lease.get("attempt") if isinstance(lease, dict) else None,
+                             "producer_status": observation.status, "detail": observation.detail}
+    row["mutation_eligibility"] = eligibility
+    row["prior_terminal_evidence"] = _bounded_status_value(
+        record.get("prior_queue_failure") or attempt.get("failure")
+        or attempt.get("blocking_findings") or record.get("last_queue_outcome"))
     if detail:
         plan = risk.get("plan") if isinstance(risk.get("plan"), dict) else {}
         steps = progress.get("steps") if isinstance(progress.get("steps"), list) else []
@@ -7033,6 +7119,7 @@ def _status_task_row(controller: Path, repository: Path, config: dict[str, Any],
         repair = record.get("full_suite_repair") if isinstance(record.get("full_suite_repair"), dict) else {}
         row.update({
             "record_revision": digest(record),
+            "phase_timing": _merge_phase_timing(validation),
             "base_sha": record.get("base_sha"),
             "branch_ref": record.get("branch_ref"),
             "candidate_checkout": attempt.get("candidate_checkout"),

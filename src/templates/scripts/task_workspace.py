@@ -1057,7 +1057,14 @@ class ValidationTiming:
                             "duration_ms": max(0, int((now - self.phase_started) * 1000))})
         self.states.append({"state": outcome, "duration_ms": 0})
         wall_ms = max(0, int((now - self.started) * 1000))
+        durations = {row["state"]: row["duration_ms"] for row in self.states}
         return {"schema_version": VALIDATION_TIMING_SCHEMA, "states": self.states,
+                "resource_wait_ms": durations.get("WAITING_FOR_RESOURCE", 0),
+                "setup_ms": durations.get("SETUP", 0),
+                "execution_ms": durations.get("RUNNING", 0),
+                "settlement_ms": durations.get("TEARDOWN", 0),
+                "first_failure_ms": wall_ms if outcome != "PASSED" else None,
+                "overall_elapsed_ms": wall_ms,
                 "wall_duration_ms": wall_ms, "critical_path_contribution_ms": wall_ms}
 
 
@@ -4060,7 +4067,6 @@ def standing_checkpoint(controller: Path, task_id: str,
     config = load_config(controller)
     require_task(controller, task_id)
     repository = product_repository(controller, config)
-    runtime = require_current_runtime(repository, ref_sha(repository, config["target_ref"]), controller)
     with state_lock(controller):
         state = read_state(controller)
         record = state["tasks"].get(task_id)
@@ -4074,6 +4080,8 @@ def standing_checkpoint(controller: Path, task_id: str,
         if not checkpoint_admission.admitted:
             raise TaskWorkspaceError(checkpoint_admission.finding.message)
         frozen = json.loads(json.dumps(record))
+    # State/fence refusal precedes runtime resolution and all validation planning.
+    runtime = require_current_runtime(repository, ref_sha(repository, config["target_ref"]), controller)
     if submission_closure is None:
         _repo, worktree, head, changed, submission_closure = review_ready_closure(
             controller, config, frozen, repository, task_id, runtime)
@@ -4445,9 +4453,6 @@ def preflight(controller: Path, task_id: str) -> dict[str, Any]:
     config = load_config(controller)
     require_task(controller, task_id)
     configured_repository = product_repository(controller, config)
-    runtime = require_current_runtime(configured_repository,
-                                      ref_sha(configured_repository, config["target_ref"]),
-                                      controller)
     with state_lock(controller):
         state = read_state(controller)
         record = state["tasks"].get(task_id)
@@ -4460,6 +4465,10 @@ def preflight(controller: Path, task_id: str) -> dict[str, Any]:
         if not preflight_admission.admitted:
             raise TaskWorkspaceError(preflight_admission.finding.message)
         frozen_record = json.loads(json.dumps(record))
+    # State admission is intentionally cheaper than runtime/Git identity work.
+    runtime = require_current_runtime(configured_repository,
+                                      ref_sha(configured_repository, config["target_ref"]),
+                                      controller)
     _, worktree, head, changed, closure = review_ready_closure(
         controller, config, frozen_record, configured_repository, task_id, runtime
     )
@@ -4477,9 +4486,6 @@ def _finish_once(controller: Path, task_id: str,
     config = load_config(controller)
     require_task(controller, task_id)
     configured_repository = product_repository(controller, config)
-    runtime = require_current_runtime(configured_repository,
-                                      ref_sha(configured_repository, config["target_ref"]),
-                                      controller)
     queued_record: Optional[dict[str, Any]] = None
     with state_lock(controller):
         state = read_state(controller)
@@ -4497,6 +4503,10 @@ def _finish_once(controller: Path, task_id: str,
             queued_record = record
         else:
             frozen_record = json.loads(json.dumps(record))
+    # Never pay runtime/Git validation cost for a state- or fence-ineligible finish.
+    runtime = require_current_runtime(configured_repository,
+                                      ref_sha(configured_repository, config["target_ref"]),
+                                      controller)
     if queued_record is not None:
         # Idempotent retry: verify or repair the queue projection so a crash
         # between queue mutation and board projection cannot leave drift.
@@ -4707,10 +4717,22 @@ def status(controller: Path, task_id: str) -> dict[str, Any]:
     if not record:
         projection = decisions.status_projection(
             decisions.TaskSnapshot(task_id, None, child_reservations(state).get(task_id)))
+        eligibility = decisions.task_mutation_eligibility(
+            task_id, None, tracking_owner=child_reservations(state).get(task_id))
         projected: dict[str, Any] = {
             "schema_version": RECORD_SCHEMA, "task_id": task_id,
             "state": projection.state, "outcome": "status",
-            "runtime_generation": generation}
+            "runtime_generation": generation,
+            "producer_fence": {"state": "NONE", "attempt": None,
+                               "producer_status": "inactive",
+                               "detail": "no active task producer"},
+            "mutation_eligibility": {
+                "operation": eligibility.operation, "eligible": eligibility.eligible,
+                "reason_code": eligibility.reason_code,
+                "invalidating_change": eligibility.invalidating_change,
+                "safe_next_action": eligibility.safe_next_action,
+                "authority_checked_live_by_executor": True},
+            "prior_terminal_evidence": None}
         if projection.umbrella_owner_task_id is not None:
             projected["umbrella_owner_task_id"] = projection.umbrella_owner_task_id
             projected["next_action"] = projection.next_action
@@ -4773,6 +4795,29 @@ def status(controller: Path, task_id: str) -> dict[str, Any]:
         result.update({"current_target_sha": None, "target_available": False,
                        "target_moved": None, "target_error": "repository_unavailable"})
     result["resume_decision"] = _task_resume_projection(controller, task_id, record)
+    lease = _lease_view(record)
+    observation = (_observe_producer(lease.get("producer"))
+                   if isinstance(lease, dict) and lease.get("state") == decisions.LEASE_ACTIVE
+                   else decisions.LeaseObservation("inactive", "no active task producer"))
+    eligibility = decisions.task_mutation_eligibility(
+        task_id, record.get("state"), tracking_owner=child_reservations(state).get(task_id))
+    result["producer_fence"] = {
+        "state": lease.get("state") if isinstance(lease, dict) else "NONE",
+        "attempt": lease.get("attempt") if isinstance(lease, dict) else None,
+        "producer_status": observation.status, "detail": observation.detail}
+    result["mutation_eligibility"] = {
+        "operation": eligibility.operation, "eligible": eligibility.eligible,
+        "reason_code": eligibility.reason_code,
+        "invalidating_change": eligibility.invalidating_change,
+        "safe_next_action": eligibility.safe_next_action,
+        "authority_checked_live_by_executor": True}
+    failed_rows = record.get("validation") if isinstance(record.get("validation"), list) else []
+    failed = failed_rows[-1] if failed_rows and isinstance(failed_rows[-1], dict) else None
+    result["prior_terminal_evidence"] = (
+        {key: failed.get(key) for key in
+         ("id", "exit_code", "timed_out", "timing", "identity", "log_sha256")}
+        if record.get("last_validation_outcome") in {"FAILED", "TIMEOUT"} and failed is not None
+        else record.get("prior_queue_failure") or record.get("last_queue_outcome"))
     return result
 
 

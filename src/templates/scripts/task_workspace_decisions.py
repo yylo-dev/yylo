@@ -122,6 +122,17 @@ class StatusProjection:
 
 
 @dataclass(frozen=True)
+class MutationEligibility:
+    """One observational, code-owned lifecycle mutation decision."""
+
+    operation: Optional[str]
+    eligible: bool
+    reason_code: str
+    invalidating_change: str
+    safe_next_action: str
+
+
+@dataclass(frozen=True)
 class ReceiptFact:
     """Immutable facts about one persisted standing-evidence receipt.
 
@@ -429,6 +440,39 @@ def status_projection(snapshot: TaskSnapshot) -> StatusProjection:
             next_action=("implement inside the umbrella worktree; "
                          f"record progress with: yy task child-checkpoint {owner} {snapshot.task_id}"))
     return StatusProjection(state=NOT_STARTED)
+
+
+def task_mutation_eligibility(task_id: str, state: Optional[str], *,
+                              tracking_owner: Optional[str] = None) -> MutationEligibility:
+    """Project one supported action without granting caller or lease authority."""
+    if tracking_owner is not None and tracking_owner != task_id:
+        return MutationEligibility(
+            None, False, "tracking_only_child",
+            "the umbrella owner must advance to this child",
+            f"yy task status {tracking_owner}")
+    if state is None:
+        return MutationEligibility(
+            "start", True, "task_not_started", "create the exact-base task workspace",
+            f"yy task start {task_id}")
+    if state == WORKING:
+        return MutationEligibility(
+            "finish", True, "working_task", "commit an admitted clean task tip",
+            f"yy task preflight {task_id}")
+    if state == HYDRATION_FAILED:
+        return MutationEligibility(
+            "hydrate", True, "hydration_failed", "repair the reported hydration prerequisite",
+            f"yy task hydrate {task_id}")
+    if state == KANBAN_SYNC_STATE:
+        return MutationEligibility(
+            "sync", True, "kanban_sync_required", "restore the exact board projection",
+            f"yy task sync {task_id}")
+    if state == QUEUED:
+        return MutationEligibility(
+            None, False, "task_already_queued", "the fenced target executor must own delivery",
+            "yy merge arbiter run")
+    return MutationEligibility(
+        None, False, "task_state_ineligible", f"lifecycle state must leave {state}",
+        f"yy task status {task_id}")
 
 
 def plan_evidence_reuse(commands: list[dict[str, Any]],
