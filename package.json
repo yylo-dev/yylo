@@ -1,6 +1,6 @@
 {
   "name": "@yylo/cli",
-  "version": "0.2.2",
+  "version": "0.2.3-rc.1",
   "description": "YYLO (why-lo): task-driven AI subagent orchestration.",
   "keywords": [
     "Ralph",
@@ -155,7 +155,7 @@
     "access": "public"
   },
   "yyloBenchmark": {
-    "version": "0.1.0"
+    "version": "0.1.1-rc.1"
   },
   "yyloLedger": {
     "version": "0.2.0"
