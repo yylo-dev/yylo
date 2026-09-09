@@ -49,18 +49,17 @@ describe('task workspace CLI', () => {
     },
   );
 
-  it('exposes preflight, kanban sync, fencing leases, bounded umbrella recovery, and guarded runtime bootstrap below task', () => {
+  it('exposes one ordinary task surface without legacy umbrella commands', () => {
     const program = new Command();
     configureTaskWorkspaceCommand(program, async () => undefined);
     const task = program.commands.find((command) => command.name() === 'task');
     expect(task?.commands.map((command) => command.name())).toEqual([
       'run', 'resume', 'recover-predispatch', 'recover-wall-budget', 'start', 'admission', 'preflight', 'checkpoint',
-      'child-checkpoint', 'hydrate', 'status', 'finish', 'doctor', 'sync', 'lease-status',
+      'hydrate', 'status', 'finish', 'doctor', 'sync', 'lease-status',
       'lease-heartbeat', 'lease-handoff', 'lease-successor', 'lease-revoke', 'lease-release',
-      'recovery-plan', 'recovery-authorize', 'recovery-apply', 'runtime-bootstrap',
+      'runtime-bootstrap',
     ]);
-    expect(task?.commands.find((command) => command.name() === 'child-checkpoint')
-      ?.registeredArguments).toHaveLength(2);
+    expect(task?.helpInformation()).not.toContain('umbrella');
     expect(task?.commands.find((command) => command.name() === 'doctor')
       ?.registeredArguments[0]?.required).toBe(false);
     expect(task?.commands.find((command) => command.name() === 'runtime-bootstrap')
@@ -88,12 +87,12 @@ describe('task workspace CLI', () => {
     const pathOption = start?.options.find((option) => option.long === '--path');
 
     expect(pathOption?.description).toBe(
-      'Exact tracked authored file or additional selectable product root; repeat for exact scope',
+      'Exact authored file (including one policy-declared new file) or selectable product root; repeat for exact scope',
     );
     const help = start?.helpInformation();
     expect(help).toContain('--path <path>');
-    expect(help).toContain('Exact tracked authored file or');
-    expect(help).toContain('repeat for exact scope');
+    expect(help).toMatch(/policy-declared new\s+file/);
+    expect(help).toMatch(/repeat for exact\s+scope/);
   });
 
   it('uses baseline paths by default and forwards repeatable additional roots only for task start', async () => {
@@ -110,7 +109,7 @@ describe('task workspace CLI', () => {
     expect(invoke).toHaveBeenLastCalledWith('start', 'EXTRA', ['juno_kanban', 'frontend'], []);
   });
 
-  it('forwards umbrella admission and exact recovery plan/apply arguments', async () => {
+  it('forwards receipt-bound task-run recovery arguments without legacy umbrella options', async () => {
     const invoke = vi.fn(async () => undefined);
     const program = new Command().exitOverride().configureOutput({ writeOut: () => undefined });
     configureTaskWorkspaceCommand(program, invoke);
@@ -127,33 +126,16 @@ describe('task workspace CLI', () => {
       '--predispatch-receipt-sha256', 'a'.repeat(64),
       '--original-deadline-unix-ns', '1787895956343575000',
     ]);
-    await program.parseAsync(['node', 'yy', 'task', 'start', 'U1',
-      '--umbrella-admission', '/tmp/umbrella.json']);
-    expect(invoke).toHaveBeenLastCalledWith('start', 'U1', [],
-      ['--umbrella-admission', '/tmp/umbrella.json']);
-    await program.parseAsync(['node', 'yy', 'task', 'recovery-plan', 'U1',
-      '--umbrella-admission', '/tmp/umbrella.json', '--output', '/tmp/plan.json']);
-    expect(invoke).toHaveBeenLastCalledWith('recovery-plan', 'U1', [], [
-      '--umbrella-admission', '/tmp/umbrella.json', '--output', '/tmp/plan.json',
-    ]);
-    await program.parseAsync(['node', 'yy', 'task', 'recovery-authorize', 'U1',
-      '--umbrella-admission', '/tmp/umbrella.json', '--plan', '/tmp/plan.json']);
-    expect(invoke).toHaveBeenLastCalledWith('recovery-authorize', 'U1', [], [
-      '--umbrella-admission', '/tmp/umbrella.json', '--plan', '/tmp/plan.json',
-    ]);
-    await program.parseAsync(['node', 'yy', 'task', 'recovery-apply', 'U1',
-      '--umbrella-admission', '/tmp/umbrella.json', '--plan', '/tmp/plan.json',
-      '--authorization-receipt', '/tmp/authorization.json']);
-    expect(invoke).toHaveBeenLastCalledWith('recovery-apply', 'U1', [], [
-      '--umbrella-admission', '/tmp/umbrella.json', '--plan', '/tmp/plan.json',
-      '--authorization-receipt', '/tmp/authorization.json',
-    ]);
-    await program.parseAsync(['node', 'yy', 'task', 'child-checkpoint', 'U1', 'C1']);
-    expect(invoke).toHaveBeenLastCalledWith('child-checkpoint', 'U1', [], ['--child', 'C1']);
+    const task = program.commands.find((command) => command.name() === 'task');
+    const start = task?.commands.find((command) => command.name() === 'start');
+    expect(start?.options.map((option) => option.long)).not.toContain('--umbrella-admission');
+    expect(task?.commands.map((command) => command.name())).not.toContain('recovery-plan');
+    expect(task?.commands.map((command) => command.name())).not.toContain('child-checkpoint');
   });
 
   it('routes recovery planning through read-only kanban policy and apply through orchestration', () => {
     expect(taskWorkspaceControlOperation('recovery-plan')).toBe('kanban');
+    expect(taskWorkspaceControlOperation('recovery-verify')).toBe('kanban');
     expect(taskWorkspaceControlOperation('status')).toBe('kanban');
     expect(taskWorkspaceControlOperation('doctor')).toBe('kanban');
     expect(taskWorkspaceControlOperation('lease-status')).toBe('kanban');
@@ -213,7 +195,7 @@ describe('task workspace CLI', () => {
     },
   );
 
-  it.each(['status', 'preflight', 'recovery-plan', 'checkpoint', 'evidence-run', 'evidence-status', 'evidence-await', 'doctor', 'lease-status'] as const)(
+  it.each(['status', 'preflight', 'recovery-plan', 'recovery-verify', 'checkpoint', 'evidence-run', 'evidence-status', 'evidence-await', 'doctor', 'lease-status'] as const)(
     'does not checkpoint after read-only task %s',
     async (operation) => {
     const checkpoint = vi.fn(async () => ({ attempted: true, ok: true }));

@@ -29,7 +29,10 @@ product code.
 7. Observe delivery with `yy merge status` or `yy merge arbiter status`. The
    target owner uses one fenced `yy merge arbiter run` (or typed `yy merge drive`)
    instead of session polling. `next|resolve` are explicit recovery mutations.
-8. Integration always uses the ordinary task and merge lifecycle. Package publication is maintainer-only, outside `yy`, and requires separate authority.
+8. Integration always uses the ordinary task and merge lifecycle. The finite
+   `yy migrate legacy-lifecycle` surface is restricted to existing umbrella
+   inventory/drain/conversion; live apply requires separate owner authority.
+   Package publication is maintainer-only, outside `yy`, and requires separate authority.
 9. Never copy product code, bulky artifacts, or project-specific skill assets
    into this controller. Root instructions and core skills here are ignored local
    runtime files refreshed atomically from one bound immutable Juno package.
