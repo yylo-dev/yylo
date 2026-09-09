@@ -65,6 +65,7 @@
     "test:skill-contracts": "node scripts/verify-skill-argument-contracts.mjs",
     "test:template-bytecode-package": "node scripts/verify-template-bytecode-cleanup.mjs",
     "test:installed-test-fixture-package": "node scripts/verify-installed-test-fixture.mjs",
+    "test:fresh-init-package": "node scripts/verify-fresh-init-package.mjs",
     "test:config-migration-package": "node scripts/verify-config-migration.mjs",
     "test:bolt-package-canary": "node scripts/verify-bolt-package-canary.mjs",
     "test:benchmark-release-artifacts": "node scripts/verify-benchmark-release-artifacts.mjs",
