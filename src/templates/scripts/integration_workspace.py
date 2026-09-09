@@ -2121,7 +2121,14 @@ def sync(controller: Path) -> tuple[dict[str, Any], int]:
                 "error": str(exc), "receipt": reference}, 2
 
 
-def register(controller: Path, owner_path: Path, *, replace: bool = False) -> tuple[dict[str, Any], int]:
+def register(controller: Path, owner_path: Path, *, replace: bool = False,
+             runtime_executable: Path | None = None,
+             runtime_version: str | None = None) -> tuple[dict[str, Any], int]:
+    """Bootstrap missing first-run identity, then bind one verified owner.
+
+    Existing identity is evidence, never repair input: partial or differing role,
+    routing, and runtime values fail closed instead of being overwritten.
+    """
     import merge_queue as merge_runtime
     controller = exact_root(controller, "controller")
     policy, task_policy, _ = load_policy(controller)
@@ -2138,27 +2145,97 @@ def register(controller: Path, owner_path: Path, *, replace: bool = False) -> tu
         registered_paths = {str(item.get("worktree")) for item in parse_worktrees(repository)}
         if common != owner_common or str(owner) not in registered_paths:
             raise IntegrationError("integration owner is not a linked worktree of this repository")
-        if worktree_config(owner, "juno.workspace.role") != "integration-owner":
-            raise IntegrationError("integration owner role is not registered")
-        if worktree_config(owner, "juno.workspace.roleAuthority") != policy["owner_role_authority"]:
-            raise IntegrationError("integration owner does not carry protected authority")
         full, reasons = full_checkout(owner)
         if (git(owner, "symbolic-ref", "-q", "HEAD", check=False)
                 or git(owner, "status", "--porcelain=v1", "--untracked-files=all") or not full):
             raise IntegrationError("integration owner must be clean, detached, and full: "
                                    + ", ".join(reasons))
+        target_sha, owner_head = sha(repository, target_ref), sha(owner, "HEAD")
+        if not target_sha or not owner_head:
+            raise IntegrationError("integration owner bootstrap requires exact target and owner commits")
+
+        owner_identity = tuple(worktree_config(owner, key) for key in (
+            "juno.workspace.role", "juno.workspace.roleAuthority", "juno.workspace.roleBase"))
+        seed_owner = owner_identity == (None, None, None)
+        expected_owner = ("integration-owner", policy["owner_role_authority"], owner_head)
+        if seed_owner and owner_head != target_sha:
+            raise IntegrationError("unregistered integration owner HEAD must equal the exact target commit")
+        if not seed_owner and owner_identity != expected_owner:
+            raise IntegrationError("integration owner identity is partial, tampered, or stale")
+
+        controller_branch = git(controller, "symbolic-ref", "-q", "HEAD", check=False)
+        controller_head = sha(controller, "HEAD")
+        if not controller_branch or not controller_head:
+            raise IntegrationError("controller must be attached to its configured branch")
+        controller_role = worktree_config(controller, "juno.workspace.role")
+        controller_authority = worktree_config(controller, "juno.workspace.roleAuthority")
+        controller_base = worktree_config(controller, "juno.workspace.roleBase")
+        seed_controller = controller_role is None and controller_authority is None and controller_base is None
+        if not seed_controller and (controller_role != "controller" or controller_authority is not None
+                                    or not controller_base or sha(controller, controller_base) != controller_base):
+            raise IntegrationError("controller worktree identity is partial or invalid")
+
+        paths = git(repository, "config", "--local", "--get-all", "juno.controller.path",
+                    check=False).splitlines()
+        branches = git(repository, "config", "--local", "--get-all", "juno.controller.branch",
+                       check=False).splitlines()
+        if len(paths) > 1 or len(branches) > 1:
+            raise IntegrationError("controller routing registration is ambiguous")
+        if paths or branches:
+            if paths != [str(controller)] or branches != [controller_branch]:
+                raise IntegrationError("existing controller routing differs from this verified controller")
+
+        runtime_path = runtime_executable.expanduser().resolve() if runtime_executable else None
+        if bool(runtime_path) != bool(runtime_version):
+            raise IntegrationError("runtime executable and version must be supplied together")
+        if runtime_path and (not runtime_path.is_file() or not managed_valid_package_version(runtime_version)):
+            raise IntegrationError("invoking package runtime identity is invalid")
+        existing_runtime = worktree_config(controller, "juno.controller.runtimeExecutable")
+        existing_version = worktree_config(controller, "juno.controller.runtimeVersion")
+        if existing_runtime or existing_version:
+            if not runtime_path or existing_runtime != str(runtime_path) or existing_version != runtime_version:
+                raise IntegrationError("existing controller runtime identity differs from the invoking package")
+
         with merge_runtime.target_lock(controller, repository, target_ref):
             previous = registered_owner(repository)
             if previous and previous != str(owner) and not replace:
                 raise IntegrationError(
                     "a different canonical integration owner is already registered; use --replace"
                 )
+            git(repository, "config", "--local", "extensions.worktreeConfig", "true")
+            seeded: list[str] = []
+            if seed_owner:
+                for key, value in zip(("role", "roleAuthority", "roleBase"), expected_owner):
+                    git(owner, "config", "--worktree", f"juno.workspace.{key}", value)
+                    seeded.append(f"owner:{key}")
+            if seed_controller:
+                for key, value in (("role", "controller"), ("roleBase", controller_head)):
+                    git(controller, "config", "--worktree", f"juno.workspace.{key}", value)
+                    seeded.append(f"controller:{key}")
+            if not paths:
+                git(repository, "config", "--local", "juno.controller.path", str(controller))
+                git(repository, "config", "--local", "juno.controller.branch", controller_branch)
+                seeded.append("repository:controller-routing")
+            if runtime_path and not existing_runtime:
+                git(controller, "config", "--worktree", "juno.controller.runtimeExecutable",
+                    str(runtime_path))
+                git(controller, "config", "--worktree", "juno.controller.runtimeVersion",
+                    runtime_version)
+                seeded.append("controller:runtime")
             git(repository, "config", "--local", OWNER_CONFIG, str(owner))
-            if registered_owner(repository) != str(owner):
-                raise IntegrationError("canonical integration owner registration readback failed")
+            if (tuple(worktree_config(owner, key) for key in (
+                    "juno.workspace.role", "juno.workspace.roleAuthority", "juno.workspace.roleBase"))
+                    != expected_owner
+                    or worktree_config(controller, "juno.workspace.role") != "controller"
+                    or git(repository, "config", "--local", "--get", "juno.controller.path") != str(controller)
+                    or git(repository, "config", "--local", "--get", "juno.controller.branch") != controller_branch
+                    or registered_owner(repository) != str(owner)):
+                raise IntegrationError("first-run registration exact readback failed")
         receipt = {"schema_version": SCHEMA, "operation": "register", "outcome": "completed",
-                   "repository": str(repository), "target_ref": target_ref, "previous": previous,
-                   "owner": str(owner), "replace": replace}
+                   "repository": str(repository), "target_ref": target_ref, "target_sha": target_sha,
+                   "previous": previous, "owner": str(owner), "replace": replace,
+                   "controller": str(controller), "controller_branch": controller_branch,
+                   "seeded": seeded}
         reference = write_receipt(receipt_path, receipt)
         return {**receipt, "receipt": reference, "status": status_payload(controller)}, 0
     except (IntegrationError, task_workspace.TaskWorkspaceError,
@@ -2189,6 +2266,8 @@ def parser() -> argparse.ArgumentParser:
     register_command = commands.add_parser("register", allow_abbrev=False)
     register_command.add_argument("owner", type=Path)
     register_command.add_argument("--replace", action="store_true")
+    register_command.add_argument("--runtime-executable", type=Path)
+    register_command.add_argument("--runtime-version")
     for name in ("repair", "push"):
         command = commands.add_parser(name, allow_abbrev=False)
         mode = command.add_mutually_exclusive_group(required=name == "repair")
@@ -2224,7 +2303,9 @@ def main(argv: list[str] | None = None) -> int:
                     repair_receipt=args.apply)
                 code = 0
         elif args.operation == "register":
-            payload, code = register(args.controller, args.owner, replace=args.replace)
+            payload, code = register(
+                args.controller, args.owner, replace=args.replace,
+                runtime_executable=args.runtime_executable, runtime_version=args.runtime_version)
         elif args.operation == "repair":
             payload, code = repair(args.controller, dry_run=args.dry_run, apply=args.apply)
         else:
