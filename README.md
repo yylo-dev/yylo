@@ -23,7 +23,7 @@ yy init --task "Document the onboarding path" --subagent pi
 yy watch exec pwd
 ```
 
-A successful run prints the installed YYLO version, initializes `.juno_task/`, then emits a watch receipt with `"state":"COMPLETED"`, `"exit_code":0`, and nonzero `log_bytes`. This canary does not contact a model provider.
+A successful run prints the installed YYLO version, initializes `.juno_task/`, then emits a watch receipt with `"state":"COMPLETED"`, `"exit_code":0`, and nonzero `log_bytes`. This canary does not contact a model provider. In an empty, unborn Git repository, `yy init` creates the initial workspace commit, keeps the original branch as the product target, and creates a detached protected integration-owner worktree under the user state directory. Existing or dirty repositories are never committed or rearranged by this bootstrap.
 
 Inspect the initialized workspace and exact command surface:
 
