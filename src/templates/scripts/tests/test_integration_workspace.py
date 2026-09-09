@@ -444,6 +444,69 @@ class IntegrationWorkspaceTests(unittest.TestCase):
         self.assertEqual(foreign_code, 2)
         self.assertEqual(foreign["outcome"], "failed")
 
+    def test_first_run_registration_seeds_exact_identity_routing_and_runtime_idempotently(self) -> None:
+        for key in ("juno.workspace.role", "juno.workspace.roleAuthority",
+                    "juno.workspace.roleBase"):
+            git(self.owner, "config", "--worktree", "--unset-all", key)
+        executable = self.root / "cli.mjs"
+        executable.write_text("// package runtime\n")
+
+        first, code = runtime.register(
+            self.controller, self.owner, runtime_executable=executable,
+            runtime_version="0.2.2")
+        self.assertEqual((code, first["outcome"]), (0, "completed"), first)
+        self.assertTrue(first["status"]["healthy"], first["status"])
+        self.assertEqual(set(first["seeded"]), {
+            "owner:role", "owner:roleAuthority", "owner:roleBase",
+            "controller:role", "controller:roleBase",
+            "repository:controller-routing", "controller:runtime",
+        })
+        self.assertEqual(worktree := git(
+            self.owner, "config", "--worktree", "--get", "juno.workspace.role"),
+            "integration-owner")
+        self.assertEqual(git(self.owner, "config", "--worktree", "--get",
+                             "juno.workspace.roleBase"), self.base)
+        self.assertEqual(git(self.controller, "config", "--worktree", "--get",
+                             "juno.workspace.role"), "controller")
+        self.assertEqual(git(self.repo, "config", "--local", "--get",
+                             "juno.controller.path"), str(self.controller.resolve()))
+        self.assertEqual(git(self.repo, "config", "--local", "--get",
+                             "juno.controller.branch"), "refs/heads/controller")
+        self.assertEqual(git(self.controller, "config", "--worktree", "--get",
+                             "juno.controller.runtimeExecutable"), str(executable.resolve()))
+        resolver = SCRIPT.parent / "controller_resolver.py"
+        resolver_env = {key: value for key, value in os.environ.items() if key not in {
+            "JUNO_TASK_ROOT", "JUNO_CONTROLLER_BRANCH", "JUNO_WORKSPACE_ROLE"}}
+        routed = subprocess.run(
+            ["python3", str(resolver), "--cwd", str(self.owner), "--format", "json"],
+            cwd=self.owner, text=True, capture_output=True, env=resolver_env)
+        self.assertEqual(routed.returncode, 0, routed.stderr or routed.stdout)
+        routing = json.loads(routed.stdout)
+        self.assertTrue(routing["valid"], routing)
+        self.assertEqual(routing["path"], str(self.controller.resolve()))
+
+        second, second_code = runtime.register(
+            self.controller, self.owner, runtime_executable=executable,
+            runtime_version="0.2.2")
+        self.assertEqual((second_code, second["seeded"]), (0, []), second)
+        self.assertEqual(worktree, "integration-owner")
+
+        git(self.owner, "config", "--worktree", "juno.workspace.roleBase", "HEAD^")
+        refused, refused_code = runtime.register(
+            self.controller, self.owner, runtime_executable=executable,
+            runtime_version="0.2.2")
+        self.assertEqual(refused_code, 2)
+        self.assertIn("partial, tampered, or stale", refused["error"])
+        self.assertEqual(git(self.owner, "config", "--worktree", "--get",
+                             "juno.workspace.roleBase"), "HEAD^")
+        git(self.owner, "config", "--worktree", "juno.workspace.roleBase", self.base)
+        git(self.owner, "config", "--worktree", "juno.workspace.roleAuthority", "unprotected")
+        refused, refused_code = runtime.register(
+            self.controller, self.owner, runtime_executable=executable,
+            runtime_version="0.2.2")
+        self.assertEqual(refused_code, 2)
+        self.assertIn("partial, tampered, or stale", refused["error"])
+
     def test_repair_detaches_exact_attached_canonical_owner(self) -> None:
         runtime.register(self.controller, self.owner)
         git(self.owner, "switch", "product")

@@ -85,7 +85,17 @@ export async function invokeIntegration(
   }
   if (operation === 'register') {
     if (!options.owner) throw new Error('integration register requires an owner path');
-    argv.push(path.resolve(options.owner));
+    const runtimeExecutable = path.resolve(process.argv[1] ?? '');
+    const packagedRuntime = packagedIntegrationRuntimeCandidates().find((candidate) => fs.existsSync(candidate));
+    if (!packagedRuntime) throw new Error('integration register package runtime is missing');
+    const packagePath = path.resolve(path.dirname(packagedRuntime), '../../..', 'package.json');
+    const packageJson = await fs.readJson(packagePath) as { name?: string; version?: string };
+    if (packageJson.name !== '@yylo/cli' || typeof packageJson.version !== 'string' ||
+        !(await fs.pathExists(runtimeExecutable))) {
+      throw new Error('integration register cannot prove the invoking package runtime identity');
+    }
+    argv.push(path.resolve(options.owner), '--runtime-executable', runtimeExecutable,
+      '--runtime-version', packageJson.version);
     if (options.replace) argv.push('--replace');
   }
   if (operation === 'repair' || operation === 'push') {
