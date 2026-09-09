@@ -1430,7 +1430,7 @@ function generateAgentDocContent(
 
 ## Kanban Task Management
 
-For comprehensive kanban usage (all commands, dependency management, best practices), use the \`kanban-workflow\` skill.
+For comprehensive kanban usage (all commands, dependency management, best practices), use the \`ledger-tasks-yylo\` skill.
 
 \`\`\`bash
 # List tasks
