@@ -124,6 +124,15 @@ else:
 
     def tearDown(self): shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def test_process_instance_binds_pid_to_start_time(self):
+        identity = runner.process_instance(os.getpid())
+        self.assertEqual(identity["pid"], os.getpid())
+        self.assertTrue(identity["observable"])
+        self.assertIsInstance(identity["start_ticks"], int)
+        unknown = runner.process_instance(999999999)
+        self.assertEqual(unknown, {"pid": 999999999, "start_ticks": None,
+                                  "observable": False})
+
     def install_metadata_controller_contract(self):
         config_path = self.controller / ".juno_task/config.json"
         config = json.loads(config_path.read_text())

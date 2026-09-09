@@ -2231,6 +2231,10 @@ class MergeQueueTests(unittest.TestCase):
     def test_target_arbiter_stays_absent_for_idle_queue_and_status_is_read_only(self) -> None:
         observed = merge_runtime.target_arbiter_status(self.controller.resolve())
         self.assertEqual(observed["reason_code"], "queue_idle")
+        self.assertEqual(observed["resume_decision"]["classification"],
+                         task_runtime.decisions.RESUME_LAUNCH_NOT_STARTED)
+        self.assertEqual(observed["resume_decision"]["owner_command"],
+                         "yy merge arbiter run")
         self.assertEqual(observed["eligible_task_ids"], [])
         projection = merge_runtime.merge_drive(self.controller.resolve())
         self.assertEqual(projection["outcome"], "IDLE")
@@ -2242,6 +2246,8 @@ class MergeQueueTests(unittest.TestCase):
     def test_target_arbiter_cli_uses_status_and_drive_control_audits(self) -> None:
         observed = json.loads(self.command(QUEUE, ["arbiter", "status"]).stdout)
         driven = json.loads(self.command(QUEUE, ["arbiter", "run"]).stdout)
+        parsed = merge_runtime.parser().parse_args(["resume", "--through", "X"])
+        self.assertEqual((parsed.operation, parsed.through), ("resume", "X"))
 
         self.assertEqual(observed["reason_code"], "queue_idle")
         self.assertEqual(driven["outcome"], "IDLE")

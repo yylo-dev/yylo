@@ -625,6 +625,48 @@ class LeaseAuthorityTables(unittest.TestCase):
             "evidence-run", "finish", "sync"}))
 
 
+class ResumeDecisionTables(unittest.TestCase):
+    def decide(self, **values):
+        with poisoned_surface():
+            return decisions.plan_resume(decisions.ResumeFacts(owner="task", **values))
+
+    def test_launch_terminal_and_deterministic_phase_choose_smallest_verified_stage(self) -> None:
+        launch = self.decide(launch_observed=False, resumable_stage="IMPLEMENTING")
+        self.assertTrue(launch.admitted)
+        self.assertEqual(launch.classification, decisions.RESUME_LAUNCH_NOT_STARTED)
+        self.assertEqual(launch.restart_stage, "IMPLEMENTING")
+        terminal = self.decide(exact_terminal=True, launch_observed=True,
+                               resumable_stage="CAPTURE")
+        self.assertTrue(terminal.admitted)
+        self.assertEqual(terminal.classification, decisions.RESUME_EXACT_TERMINAL_CAPTURE)
+        deterministic = self.decide(producer_status="dead", launch_observed=True,
+                                    resumable_stage="VALIDATING")
+        self.assertTrue(deterministic.admitted)
+        self.assertEqual(deterministic.classification,
+                         decisions.RESUME_DETERMINISTIC_PHASE)
+
+    def test_live_unknown_conflict_stale_and_budget_exhaustion_stop(self) -> None:
+        cases = [
+            ({"producer_status": "alive"}, decisions.RESUME_LIVE_AUTHORITY),
+            ({"producer_status": "unknown"}, decisions.RESUME_UNKNOWN_OUTCOME),
+            ({"conflict": True}, decisions.RESUME_REAL_CONFLICT),
+            ({"stale_authority": True}, decisions.RESUME_STALE_AUTHORITY),
+            ({"budget_remaining": False}, decisions.RESUME_BUDGET_EXHAUSTED),
+        ]
+        for values, classification in cases:
+            with self.subTest(classification=classification):
+                decision = self.decide(**values)
+                self.assertFalse(decision.admitted)
+                self.assertEqual(decision.classification, classification)
+
+    def test_target_resume_routes_only_to_existing_arbiter(self) -> None:
+        decision = decisions.plan_resume(decisions.ResumeFacts(
+            owner="target", producer_status="dead", launch_observed=True,
+            explicit_handoff=True, resumable_stage="FINALIZING"))
+        self.assertEqual(decision.owner_command, "yy merge arbiter run")
+        self.assertEqual(decision.restart_stage, "FINALIZING")
+
+
 class LeaseSuccessorTables(unittest.TestCase):
     @staticmethod
     def lease(state: str = "ACTIVE", kind: str = "process") -> dict:
