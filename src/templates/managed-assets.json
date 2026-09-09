@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "instructionBundle": {
     "schemaVersion": "juno_instruction_bundle_declaration.v1",
-    "semanticVersion": "2.0.0"
+    "semanticVersion": "1.0.0"
   },
   "controllerOutputs": [
     {
