@@ -243,6 +243,19 @@ class StatusProjectionTables(unittest.TestCase):
         self.assertIsNone(projection.umbrella_owner_task_id)
         self.assertIsNone(projection.next_action)
 
+    def test_mutation_eligibility_exposes_one_action_or_operator_stop(self) -> None:
+        with poisoned_surface():
+            working = decisions.task_mutation_eligibility("X", "WORKING")
+            queued = decisions.task_mutation_eligibility("X", "QUEUED")
+            child = decisions.task_mutation_eligibility(
+                "X", None, tracking_owner="UMB")
+        self.assertEqual((working.operation, working.eligible, working.safe_next_action),
+                         ("finish", True, "yy task preflight X"))
+        self.assertEqual((queued.operation, queued.eligible, queued.reason_code),
+                         (None, False, "task_already_queued"))
+        self.assertEqual(child.safe_next_action, "yy task status UMB")
+        self.assertTrue(all(item.invalidating_change for item in (working, queued, child)))
+
 
 class HandoffPhaseTables(unittest.TestCase):
     def test_every_durable_state_has_a_phase(self) -> None:

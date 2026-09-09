@@ -33,7 +33,7 @@ metadata controller
 ```text
 yy task start TASK_ID                    # omit --path only for legacy baseline admission
 yy task start TASK_ID --path exact/file   # repeat exact files; policy trees also supported
-yy task status TASK_ID
+yy task status TASK_ID                   # state, producer fence, one eligible action/reason
 yy task admission TASK_ID                # read-only dirty/committed scope gate
 yy task preflight TASK_ID
 yy task checkpoint TASK_ID
@@ -151,7 +151,13 @@ policy/runtime/closure identities remain exact. A repeated deterministic
 journal/revision, failed suite and finding, candidate/tree, target, producer, and
 predecessor arbiter. Bare status is the `merge-status.summary.v1` projection and
 never constructs exhaustive attempt payloads; detail is `merge-status.detail.v1`,
-and only `--full` returns `merge-status.full.v1` legacy fields. JSON projections
+and only `--full` returns `merge-status.full.v1` legacy fields. Task and merge
+status are observational: they expose lifecycle state, producer/fence observation,
+one mutation eligibility decision, typed reason, exact invalidating change, prior
+terminal evidence, and either one supported next action or an operator stop.
+Malformed or unknown evidence is never success. Machine-owned transitions do not
+require a redundant status call because the executor rechecks live authority and
+state before expensive work and mutation. JSON projections
 always declare their level, byte/row limits, truncation, and cursor. Interactive
 output prints the same projection identifier and truncation/cursor truth; use
 `--json` to force structured output in a terminal. That transition authorizes the existing queue-owned single
