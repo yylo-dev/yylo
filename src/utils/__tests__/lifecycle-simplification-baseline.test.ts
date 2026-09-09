@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -88,6 +89,111 @@ describe('frozen lifecycle simplification baseline', () => {
       corpus.scenarios.every((scenario: any) => scenario.fixture.review_quality_evidence === false),
     ).toBe(true);
     expect(corpus.k6ozfw_removal_candidates.supported_public_producers).toEqual([]);
+  });
+
+  it('keeps a safe but uninstrumented candidate in NEEDS_DECISION', async () => {
+    const api = await driver();
+    const corpus = JSON.parse(fs.readFileSync(corpusPath, 'utf8')) as Record<string, any>;
+    const observation = {
+      schema_version: api.ACCEPTANCE_SCHEMA,
+      baseline_corpus_sha256: corpus.manifest_sha256,
+      candidate_commit: 'b'.repeat(40),
+      candidate_tree: 'c'.repeat(40),
+      identities: [{ name: 'runtime', sha256: 'a'.repeat(64) }],
+      environment: { fixture_kind: 'seeded-disposable' },
+      scenarios: corpus.scenarios.map((scenario: any) => ({
+        id: scenario.id,
+        selector: scenario.fixture.selector,
+        repeats: [1, 2, 3].map((fixture_wall_ms) => ({
+          outcome: 'passed',
+          fixture_wall_ms,
+          coordination_interventions: null,
+        })),
+      })),
+      unavailable_measurements: [{ metric: 'coordination_interventions', reason: 'not emitted' }],
+    };
+    const result = api.aggregateAcceptance(corpus, observation);
+
+    expect(result.safety).toEqual({ passed: true, scenario_count: 16 });
+    expect(result.primary_target.candidate_weighted_median).toBeNull();
+    expect(result.primary_target.reduction).toBeNull();
+    expect(result.primary_target.complete).toBe(false);
+    expect(result.readiness).toBe('NEEDS_DECISION');
+    expect(result.reason).toBe('target_metric_unknown');
+    expect(result.analysis_complete).toBe(true);
+    expect(result.next_version_accepted).toBe(false);
+    expect(result.percentile_policy).toMatch(/no p99/);
+    const report = fs.readFileSync(
+      path.join(repository, 'juno-code/docs/lifecycle-simplification-acceptance.md'),
+      'utf8',
+    );
+    expect(report).toContain('"reason": "target_metric_unknown"');
+    expect(report).toContain('"next_version_accepted": false');
+    expect(report).toContain(corpus.manifest_sha256);
+  });
+
+  it('uses the frozen weights when complete candidate intervention counts are supplied', async () => {
+    const api = await driver();
+    const corpus = JSON.parse(fs.readFileSync(corpusPath, 'utf8')) as Record<string, any>;
+    const observation = {
+      schema_version: api.ACCEPTANCE_SCHEMA,
+      baseline_corpus_sha256: corpus.manifest_sha256,
+      candidate_commit: 'b'.repeat(40),
+      candidate_tree: 'c'.repeat(40),
+      identities: [{ name: 'runtime', sha256: 'a'.repeat(64) }],
+      scenarios: corpus.scenarios.map((scenario: any) => ({
+        id: scenario.id,
+        selector: scenario.fixture.selector,
+        repeats: [1, 2, 3].map((fixture_wall_ms) => ({
+          outcome: 'passed',
+          fixture_wall_ms,
+          coordination_interventions: scenario.cohort === 'routine' ? 3 : 0,
+        })),
+      })),
+    };
+    const result = api.aggregateAcceptance(corpus, observation);
+
+    expect(result.primary_target.candidate_weighted_median).toBe(3);
+    expect(result.primary_target.reduction).toBeCloseTo(1 - 3 / 10.95);
+    expect(result.primary_target.passed).toBe(true);
+    expect(result.readiness).toBe('ACCEPTED');
+  });
+
+  it('binds report digests to the exact integrated candidate', () => {
+    const commit = '949f7271bb28d168cf73859c56073a6cb8140968';
+    const report = fs.readFileSync(
+      path.join(repository, 'juno-code/docs/lifecycle-simplification-acceptance.md'),
+      'utf8',
+    );
+    const tree = spawnSync('git', ['show', '-s', '--format=%T', commit], {
+      cwd: repository,
+      encoding: 'utf8',
+    });
+    expect(tree.status, tree.stderr).toBe(0);
+    expect(report).toContain(tree.stdout.trim());
+    for (const relative of [
+      'juno-code/package.json',
+      'juno-code/package-lock.json',
+      'juno-code/scripts/test-support/task_workspace_fixture.py',
+      'juno-code/scripts/test-support/task_workspace_test_runner.py',
+      'juno-code/scripts/test-task-workspace.mjs',
+      'juno-code/scripts/test-performance/task-workspace-duration-weights.v1.json',
+      '.juno_task/scripts/tests/fixtures/lifecycle-evidence-reuse-matrix.v1.json',
+      '.juno_task/scripts/task_workspace.py',
+      '.juno_task/scripts/merge_queue.py',
+      '.juno_task/scripts/risk_policy.py',
+      '.juno_task/scripts/operation_snapshot.py',
+      '.juno_task/managed-assets.json',
+      'juno-code/src/templates/managed-assets.json',
+    ]) {
+      const source = spawnSync('git', ['show', `${commit}:${relative}`], {
+        cwd: repository,
+        encoding: null,
+        maxBuffer: 16 * 1024 * 1024,
+      });
+      expect(source.status, String(source.stderr)).toBe(0);
+      expect(report).toContain(crypto.createHash('sha256').update(source.stdout).digest('hex'));
+    }
   });
 
   it('treats incomplete output as failure and zero baselines as absolute counts', async () => {
