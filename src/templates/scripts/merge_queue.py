@@ -130,8 +130,19 @@ def verify_task_submission(controller: Path, repository: Path, task_id: str,
     }
     try:
         requirements = task_runtime.canonical_requirement_identity(controller, task_id)
+        delivery_acceptance = task_runtime.delivery_checkpoint_projection(
+            controller, task_id, record)
     except task_runtime.TaskWorkspaceError as exc:
         return {"kind": "submission", "valid": False, "reason": str(exc)}
+    if delivery_acceptance is not None:
+        if (not delivery_acceptance.get("final_accepted")
+                or closure.get("delivery_acceptance") != delivery_acceptance
+                or delivery_acceptance.get("evidence", [{}])[-1].get("tip_sha") != source_tip):
+            return {"kind": "submission", "valid": False,
+                    "reason": "delivery_acceptance_identity_mismatch"}
+    elif "delivery_acceptance" in closure:
+        return {"kind": "submission", "valid": False,
+                "reason": "unexpected_delivery_acceptance"}
     if (not isinstance(submission, dict)
             or set(submission_body) != operation_runtime.SUBMISSION_FIELDS
             or submission.get("submission_sha256") != task_runtime.stable_sha256(submission_body)
