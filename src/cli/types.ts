@@ -130,6 +130,8 @@ export interface InitCommandOptions extends GlobalCLIOptions {
   subagent?: SubagentType;
   /** Repository URL */
   gitUrl?: string;
+  /** Product branch used by the generated task workspace */
+  targetBranch?: string;
   /** Force interactive mode for guided setup */
   interactive?: boolean;
   /** Template variant to use */

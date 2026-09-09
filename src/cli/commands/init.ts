@@ -30,6 +30,7 @@ interface InitializationContext {
   task: string;
   subagent: string;
   gitUrl?: string;
+  targetBranch?: string;
   variables: InitVariables;
   force: boolean;
   interactive: boolean;
@@ -234,6 +235,11 @@ class SimpleProjectGenerator {
     // Create config.json with user's subagent choice and other settings
     console.log(chalk.blue('⚙️ Creating project configuration...'));
     await this.createConfigFile(junoTaskDir, targetDirectory);
+    await fs.writeFile(path.join(targetDirectory, '.gitignore'), [
+      '.agents/', '.claude/', '.env.yylo', '.juno_task/cache/', '.juno_task/locks/',
+      '.juno_task/runtime/', '.juno_task/scripts/', '.pi/', '.venv_juno/',
+      'AGENTS.md', 'CLAUDE.md', '',
+    ].join('\n'));
 
     console.log(chalk.blue('📄 Creating production-ready project files...'));
 
@@ -563,7 +569,13 @@ ${variables.EDITOR ? `using ${variables.EDITOR} as primary AI subagent` : ''}
     // This is a required fresh-install contract: initialization must not succeed with missing macros.
     console.log(chalk.blue('🧭 Installing managed prompts and lifecycle guidance...'));
     const { ManagedProjectAssets } = await import('../../utils/managed-project-assets.js');
-    await ManagedProjectAssets.update(targetDirectory, { silent: false });
+    await ManagedProjectAssets.update(targetDirectory, {
+      silent: false,
+      localization: {
+        ...(this.context.targetBranch ? { targetBranch: this.context.targetBranch } : {}),
+        ...(this.context.gitUrl ? { gitRemoteUrl: this.context.gitUrl } : {}),
+      },
+    });
 
     // Execute install_requirements.sh to install Python dependencies
     console.log(chalk.blue('🐍 Installing Python requirements...'));
@@ -835,7 +847,11 @@ ${variables.EDITOR ? `using ${variables.EDITOR} as primary AI subagent` : ''}
 
       // Initialize git repository
       try {
-        execSync('git init', { cwd: targetDirectory, stdio: 'ignore' });
+        const requestedBranch = (this.context.targetBranch || process.env.YYLO_TARGET_BRANCH || 'main')
+          .replace(/^refs\/heads\//, '');
+        const branch = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(requestedBranch) &&
+          !requestedBranch.includes('..') ? requestedBranch : 'main';
+        execSync(`git init -b "${branch}"`, { cwd: targetDirectory, stdio: 'ignore' });
         console.log(chalk.green('   ✓ Initialized Git repository'));
       } catch (error) {
         // Git repository might already exist, that's okay
@@ -928,6 +944,7 @@ class SimpleHeadlessInit {
       task,
       subagent: selectedSubagent,
       ...(gitUrl ? { gitUrl } : {}),
+      ...(this.options.targetBranch ? { targetBranch: this.options.targetBranch } : {}),
       variables,
       force: this.options.force || false,
       interactive: false,
@@ -1070,6 +1087,7 @@ export function configureInitCommand(program: Command): void {
     .option('-f, --force', 'Force overwrite existing files')
     .option('-i, --interactive', 'Force interactive mode (even if description is provided)')
     .option('--git-url <url>', 'Git repository URL (alias for --git-repo)')
+    .option('--target-branch <name>', 'Product default branch (env: YYLO_TARGET_BRANCH; default: main)')
     .option('-t, --task <description>', 'Task description (alias for positional description)')
     .action(async (description, options, command) => {
       // Determine task description from multiple possible sources
@@ -1081,6 +1099,7 @@ export function configureInitCommand(program: Command): void {
         force: options.force,
         task: taskDescription,
         gitUrl: options.gitRepo || options.gitUrl,
+        targetBranch: options.targetBranch,
         subagent: options.subagent,
         interactive: options.interactive,
         // Global options
