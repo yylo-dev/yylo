@@ -238,11 +238,15 @@ export function configureTaskWorkspaceCommand(
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
     .action((taskId: string) => invoke('preflight', taskId, []));
   task.command('checkpoint')
-    .description('Plan affected validation for one clean coherent committed tip')
+    .description('Plan validation or accept one ordered checkpoint on the ordinary delivery')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
+    .option('--accept <checkpoint-id>', 'Run/reuse exact evidence and accept this frozen checkpoint')
     .option('--lease-token <token>', 'Current fencing lease token for this gated mutation')
-    .action((taskId: string, options: { leaseToken?: string }) => invoke(
-      'checkpoint', taskId, [], options.leaseToken ? ['--lease-token', options.leaseToken] : [],
+    .action((taskId: string, options: { accept?: string; leaseToken?: string }) => invoke(
+      'checkpoint', taskId, [], [
+        ...(options.accept ? ['--accept-checkpoint', options.accept] : []),
+        ...(options.leaseToken ? ['--lease-token', options.leaseToken] : []),
+      ],
     ));
   task.command('child-checkpoint')
     .description('Record one admitted umbrella child sequential committed increment')

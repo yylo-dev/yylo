@@ -1,6 +1,6 @@
 ---
 wiki_contract:
-  line_limit: 320
+  line_limit: 340
   purpose: "Run exact-base task worktrees and one fenced per-target delivery owner."
   failure_mode_prevented: "Controller edits, stale-worker takeover, model polling, and unsafe target movement."
   runtime_contract_enforced: "yy task owns feature worktrees; one yy merge arbiter owns composition and expected-old-SHA CAS."
@@ -37,11 +37,10 @@ yy task status TASK_ID                   # state, producer fence, one eligible a
 yy task admission TASK_ID                # read-only dirty/committed scope gate
 yy task preflight TASK_ID
 yy task checkpoint TASK_ID
+yy task checkpoint TASK_ID --accept CHECKPOINT_ID # exact evidence + ordered progress
 yy task finish TASK_ID
 
-yy task start UMBRELLA_ID --umbrella-admission umbrella.json
-yy task child-checkpoint UMBRELLA_ID CHILD_ID
-yy task status CHILD_ID   # -> TRACKING_ONLY with owner and current-child truth
+yy task status RELATED_ID # reporting-only IDs show their ordinary delivery owner
 
 yy task runtime-bootstrap --dry-run
 # review the printed immutable receipt
@@ -175,29 +174,37 @@ restart, and post-deploy E2E are never implied by merge completion.
 
 Historical local-integration receipts remain readable by Workflow Runner doctor.
 Their executors are retired and must not be adapted into the Bolt path.
-## Umbrella-owned sequential children
+## Ordinary delivery checkpoints
 
-Approved consolidated delivery may admit one umbrella worktree that executes
-ordered tracking-only children sequentially. `yy task start UMBRELLA_ID
---umbrella-admission umbrella.json` freezes the immutable ordered child set,
-each child's exact scope, the union admission, and the exact base before any
-Git mutation. Children never receive their own worktree, branch, start,
-preflight, finish, or checkpoint: reservations refuse those calls with the
-owning umbrella and the exact recovery command, and child status reports
-`TRACKING_ONLY` with owner, completed, current, and remaining children.
+One cohesive delivery is one ordinary task, admitted scope, worktree,
+submission, review policy and merge boundary. Checkpoint deliveries must start
+with repeated exact `--path` arguments; implicit baseline scope is refused.
+Its authored task body may contain
+one bounded `[delivery_checkpoints]` JSON contract using
+`juno_task_delivery_checkpoints.v1`. The contract orders 1–32 requirement
+objects (`id`, `requirement`, `final`), requires exactly one final item ordered
+last, and may name reporting-only `tracking_task_ids`. Those IDs have no start,
+checkpoint, finish, review or integration authority while owned; status points
+to the ordinary delivery and never claims a separate integration.
 
-After each child's coherent committed increment on the umbrella worktree,
-record it with `yy task child-checkpoint UMBRELLA_ID CHILD_ID`. The checkpoint
-requires a clean worktree, a new commit chained from the previous child's tip,
-and changed paths inside that child's frozen scope; it appends an immutable
-`juno_task_umbrella_child_checkpoint.v1` entry naming base, tip, changed paths,
-and the frozen child binding. Only the current child may be checkpointed, so
-interruption or crash resumes at exactly the first incomplete child while
-completed child evidence stays durable. Preflight, finish, and merge continue
-to validate the whole union; scope or order drift fails closed. Legacy
-umbrellas admitted before start-time child-union admission recover only
-through the reviewed `recovery-plan`/`recovery-authorize`/`recovery-apply`
-supersession path.
+After a coherent commit, run `yy task checkpoint TASK_ID --accept ID`. The
+executor runs or reuses the normal exact standing-evidence producer and records
+an immutable requirement/base/tip/tree/submission/validation binding. Evidence
+must chain in requirement order. The final checkpoint validates the cumulative
+candidate, and preflight/finish refuse unless it binds the exact submitted tip.
+Checkpoint completion means `IMPLEMENTED`; only the owner's landed target result
+means `INTEGRATED`.
+
+New umbrella execution is disabled by default. The old `--umbrella-admission`,
+`child-checkpoint`, and recovery schemas are finite legacy inputs only when an
+explicit compatibility policy admits fixture/drain handling. Historical
+receipts are immutable. Recovery plan/apply remains bounded and identity-bound,
+preserves dirty bytes and predecessor evidence, and refuses unsupported state
+without creating child worktrees or widening scope. No legacy child is broadly
+marked done, and no old checkpoint is represented as separate integration.
+Removal is permitted only after the conversion inventory proves there are no
+active legacy umbrella records; release activation and live conversion remain
+separately authorized maintenance.
 
 ## Checkout-aware entry points
 

@@ -177,6 +177,11 @@ describe('task workspace CLI', () => {
     await program.parseAsync(['node', 'yy', 'task', 'checkpoint', 'T1',
       '--lease-token', 'tok-1']);
     expect(invoke).toHaveBeenLastCalledWith('checkpoint', 'T1', [], ['--lease-token', 'tok-1']);
+    await program.parseAsync(['node', 'yy', 'task', 'checkpoint', 'T1',
+      '--accept', 'final', '--lease-token', 'tok-1']);
+    expect(invoke).toHaveBeenLastCalledWith('checkpoint', 'T1', [], [
+      '--accept-checkpoint', 'final', '--lease-token', 'tok-1',
+    ]);
     await program.parseAsync(['node', 'yy', 'task', 'finish', 'T1']);
     expect(invoke).toHaveBeenLastCalledWith('finish', 'T1', [], []);
     await program.parseAsync(['node', 'yy', 'task', 'lease-heartbeat', 'T1',

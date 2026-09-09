@@ -82,8 +82,8 @@ class TaskSnapshot:
     """Immutable lifecycle facts the shell observed before requesting a plan.
 
     ``state`` is ``None`` when no task record exists. ``tracking_owner`` is
-    the umbrella owner recorded in child reservations (``None`` when the task
-    is not a tracking-only umbrella child).
+    the ordinary delivery owner (or a finite legacy umbrella owner) recorded
+    for a reporting-only related task.
     """
 
     task_id: str
@@ -356,7 +356,7 @@ def plan_command_transition(request: CommandRequest,
     if command == "start":
         if owner is not None and owner != task_id:
             return _refuse(command, task_id, state, "tracking_only_child",
-                           f"task {task_id} is tracking-only under umbrella {owner}")
+                           f"task {task_id} is reporting-only under delivery owner {owner}")
         return TransitionDecision(command, task_id, True, state or NOT_STARTED,
                                   handoff_phase(state or NOT_STARTED),
                                   idempotent=state is not None)
@@ -375,9 +375,8 @@ def plan_command_transition(request: CommandRequest,
         if state != WORKING:
             if owner is not None:
                 return _refuse(command, task_id, state, "tracking_only_child",
-                               f"task {task_id} is tracking-only under umbrella {owner}; "
-                               f"checkpoint the umbrella child instead: "
-                               f"yy task child-checkpoint {owner} {task_id}")
+                               f"task {task_id} is reporting-only under delivery owner {owner}; "
+                               f"checkpoint the ordinary delivery instead: yy task checkpoint {owner}")
             return _refuse(command, task_id, state, "requires_working_task",
                            "standing checkpoint requires a WORKING task")
         return TransitionDecision(command, task_id, True, WORKING, handoff_phase(WORKING))
@@ -396,8 +395,8 @@ def plan_command_transition(request: CommandRequest,
         if state is None:
             if owner is not None:
                 return _refuse(command, task_id, state, "tracking_only_child",
-                               f"task {task_id} is tracking-only under umbrella {owner}; "
-                               f"preflight the umbrella instead: yy task preflight {owner}")
+                               f"task {task_id} is reporting-only under delivery owner {owner}; "
+                               f"preflight the delivery instead: yy task preflight {owner}")
             return _refuse(command, task_id, state, "not_started",
                            "task has not been started")
         if state != WORKING:
@@ -409,8 +408,8 @@ def plan_command_transition(request: CommandRequest,
         if state is None:
             if owner is not None:
                 return _refuse(command, task_id, state, "tracking_only_child",
-                               f"task {task_id} is tracking-only under umbrella {owner}; "
-                               f"finish the umbrella instead: yy task finish {owner}")
+                               f"task {task_id} is reporting-only under delivery owner {owner}; "
+                               f"finish the delivery instead: yy task finish {owner}")
             return _refuse(command, task_id, state, "not_started",
                            "task has not been started")
         if state == QUEUED:
@@ -437,8 +436,8 @@ def status_projection(snapshot: TaskSnapshot) -> StatusProjection:
         return StatusProjection(
             state=TRACKING_ONLY,
             umbrella_owner_task_id=owner,
-            next_action=("implement inside the umbrella worktree; "
-                         f"record progress with: yy task child-checkpoint {owner} {snapshot.task_id}"))
+            next_action=("report through the ordinary delivery owner; "
+                         f"inspect progress with: yy task status {owner}"))
     return StatusProjection(state=NOT_STARTED)
 
 
@@ -448,7 +447,7 @@ def task_mutation_eligibility(task_id: str, state: Optional[str], *,
     if tracking_owner is not None and tracking_owner != task_id:
         return MutationEligibility(
             None, False, "tracking_only_child",
-            "the umbrella owner must advance to this child",
+            "the ordinary delivery owner must advance its checkpoint",
             f"yy task status {tracking_owner}")
     if state is None:
         return MutationEligibility(

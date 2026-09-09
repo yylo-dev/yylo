@@ -1094,6 +1094,7 @@ class TaskWorkspaceFixture(unittest.TestCase):
             "branch_prefix": "refs/heads/task-",
             "allowed_paths": ["src"],
             "selectable_paths": ["optional"],
+            "legacy_umbrella_creation": True,
             "controller_private_paths": [".juno_task/tasks", ".juno_task/state", ".juno_task/specs", ".juno_task/ledger"],
             "focused_validation": [{"id": "focused", "cwd": "src",
                                     "timeout_seconds": timeout_seconds, "max_output_bytes": max_output_bytes,
@@ -1303,7 +1304,90 @@ class TaskWorkspaceFixture(unittest.TestCase):
 class TaskWorkspaceTests(TaskWorkspaceFixture):
     """Real-Git scenario suite for the canonical task-workspace lifecycle."""
 
-    def test_umbrella_start_freezes_exact_ordered_child_union_before_git_mutation(self) -> None:
+    def write_delivery_contract(self) -> None:
+        contract = {
+            "schema_version": task_runtime.DELIVERY_CHECKPOINT_CONTRACT_SCHEMA,
+            "tracking_task_ids": ["Y"],
+            "checkpoints": [
+                {"id": "implementation", "requirement": "Implement the bounded behavior", "final": False},
+                {"id": "acceptance", "requirement": "Validate the cumulative delivery", "final": True},
+            ],
+        }
+        task_runtime.task_file(self.controller, "X").write_text(
+            "---\nid: X\nstatus: todo\n---\nOrdinary delivery\n"
+            "[delivery_checkpoints]\n" + json.dumps(contract) +
+            "\n[/delivery_checkpoints]\n")
+
+    def test_ordinary_delivery_freezes_ordered_checkpoints_and_blocks_tracking_start(self) -> None:
+        self.write_delivery_contract()
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
+                                    "require explicit exact --path scope"):
+            task_runtime.start(self.controller, "X")
+        started = task_runtime.start(self.controller, "X", ["src/base.txt"])
+        frozen = started["creation_receipt"]["delivery_checkpoint_contract"]
+        self.assertEqual([row["id"] for row in frozen["checkpoints"]],
+                         ["implementation", "acceptance"])
+        child = task_runtime.status(self.controller, "Y")
+        self.assertEqual(child["state"], "TRACKING_ONLY")
+        self.assertEqual(child["umbrella_owner_task_id"], "X")
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
+                                    "reporting-only under delivery owner X"):
+            task_runtime.start(self.controller, "Y")
+        self.assertFalse((self.workspaces / "Y").exists())
+
+    def test_ordinary_delivery_records_exact_checkpoint_evidence_and_requires_final_tip(self) -> None:
+        self.write_delivery_contract()
+        started = task_runtime.start(self.controller, "X", ["src/base.txt"])
+        worktree = Path(started["worktree"])
+        plans: list[str] = []
+
+        def fake_plan(*_args: object, **_kwargs: object) -> dict[str, str]:
+            identity = "plan-" + git(worktree, "rev-parse", "HEAD")
+            plans.append(identity)
+            return {"plan_sha256": identity}
+
+        def fake_evidence(*_args: object, **_kwargs: object) -> dict[str, object]:
+            return {"outcome": "PASSED", "plan_sha256": plans[-1], "receipts": []}
+
+        with mock.patch.object(task_runtime, "standing_checkpoint", side_effect=fake_plan), \
+             mock.patch.object(task_runtime, "standing_evidence_run", side_effect=fake_evidence):
+            (worktree / "src/base.txt").write_text("first\n")
+            git(worktree, "add", "src/base.txt"); git(worktree, "commit", "-m", "first checkpoint")
+            first = task_runtime.accept_delivery_checkpoint(self.controller, "X", "implementation")
+            self.assertEqual(first["projection"]["implementation_state"], "IN_PROGRESS")
+            repeated = task_runtime.accept_delivery_checkpoint(self.controller, "X", "implementation")
+            self.assertEqual(repeated["outcome"], "delivery_checkpoint_already_accepted")
+            self.assertEqual(repeated["checkpoint"]["evidence_sha256"],
+                             first["checkpoint"]["evidence_sha256"])
+            with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
+                                        "delivery checkpoints are incomplete"):
+                task_runtime.preflight(self.controller, "X")
+            (worktree / "src/base.txt").write_text("final\n")
+            git(worktree, "add", "src/base.txt"); git(worktree, "commit", "-m", "final checkpoint")
+            final = task_runtime.accept_delivery_checkpoint(self.controller, "X", "acceptance")
+            self.assertTrue(final["projection"]["final_accepted"])
+            self.assertEqual(final["projection"]["integration_state"], "NOT_INTEGRATED")
+            preflight = task_runtime.preflight(self.controller, "X")
+            self.assertEqual(preflight["tip_sha"], final["checkpoint"]["tip_sha"])
+            (worktree / "src/base.txt").write_text("post acceptance\n")
+            git(worktree, "add", "src/base.txt"); git(worktree, "commit", "-m", "invalidate final")
+            with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
+                                        "final cumulative delivery acceptance"):
+                task_runtime.preflight(self.controller, "X")
+
+    def test_new_umbrella_start_refuses_before_lifecycle_mutation(self) -> None:
+        declaration = self.umbrella_fixture()
+        config_path = self.controller / ".juno_task/config/task-workspace.json"
+        config = json.loads(config_path.read_text())
+        config["legacy_umbrella_creation"] = False
+        config_path.write_text(json.dumps(config) + "\n")
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
+                                    "new umbrella execution is retired"):
+            task_runtime.start(self.controller, "X", umbrella_input=declaration)
+        self.assertFalse((self.workspaces / "X").exists())
+        self.assertNotIn("X", task_runtime.read_state(self.controller)["tasks"])
+
+    def test_legacy_fixture_umbrella_start_freezes_exact_ordered_child_union_before_git_mutation(self) -> None:
         declaration = self.umbrella_fixture()
         started = task_runtime.start(self.controller, "X", umbrella_input=declaration)
         admission = started["creation_receipt"]["umbrella_admission"]
@@ -1453,7 +1537,7 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
     def test_umbrella_reservations_block_child_start_and_duplicate_owner(self) -> None:
         declaration = self.umbrella_fixture()
         task_runtime.start(self.controller, "X", umbrella_input=declaration)
-        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "tracking-only under umbrella X"):
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "reporting-only under delivery owner X"):
             task_runtime.start(self.controller, "Y")
         task_runtime.task_file(self.controller, "X2").parent.mkdir(parents=True, exist_ok=True)
         task_runtime.task_file(self.controller, "X2").write_text(
@@ -1642,12 +1726,12 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
         child_status = task_runtime.status(self.controller, "Y")
         self.assertEqual(child_status["state"], "TRACKING_ONLY")
         self.assertEqual(child_status["umbrella_owner_task_id"], "X")
-        self.assertIn("child-checkpoint X Y", child_status["next_action"])
-        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "tracking-only under umbrella X"):
+        self.assertIn("task status X", child_status["next_action"])
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "reporting-only under delivery owner X"):
             task_runtime.preflight(self.controller, "Y")
-        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "tracking-only under umbrella X"):
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "reporting-only under delivery owner X"):
             task_runtime.finish(self.controller, "Y")
-        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "tracking-only under umbrella X"):
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "reporting-only under delivery owner X"):
             task_runtime.standing_checkpoint(self.controller, "Y")
         # The umbrella itself stays fully usable.
         self.commit_task("X", "child/one.txt")
@@ -1821,8 +1905,31 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
         self.assertEqual(repeated["outcome"], "already_applied")
         status = task_runtime.status(self.controller, "X")
         self.assertEqual(status["umbrella_admission_status"]["authority"], "authorized_superseding")
+        self.assertEqual(status["delivery_checkpoint_status"]["current_checkpoint_id"], "Y")
+        self.assertEqual(status["delivery_checkpoint_status"]["integration_state"], "NOT_INTEGRATED")
+        child_status = task_runtime.status(self.controller, "Y")
+        self.assertTrue(child_status["reporting_only"])
+        self.assertFalse(child_status["separate_integration"])
         self.assertEqual(status["creation_receipt"], predecessor)
         self.assertEqual(status["admission_supersessions"][0]["predecessor_receipt_sha256"], predecessor_sha)
+
+    def test_start_time_umbrella_converts_to_one_ordinary_delivery_contract(self) -> None:
+        declaration = self.umbrella_fixture()
+        started = task_runtime.start(self.controller, "X", umbrella_input=declaration)
+        self.commit_task("X", "child/one.txt")
+        plan = task_runtime.build_umbrella_recovery_plan(self.controller, "X", declaration)
+        self.assertEqual(plan["newly_admitted_paths"], [])
+        plan_path = self.root / "admitted-conversion-plan.json"
+        plan_path.write_text(json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n")
+        authorization = self.recovery_authorization(plan_path, declaration)
+        applied = task_runtime.apply_umbrella_recovery(
+            self.controller, "X", plan_path, declaration, authorization)
+        self.assertEqual(applied["creation_receipt"], started["creation_receipt"])
+        self.assertEqual(applied["delivery_conversion"]["contract"]["source"],
+                         "verified_legacy_conversion")
+        status = task_runtime.status(self.controller, "X")
+        self.assertEqual(status["delivery_checkpoint_status"]["current_checkpoint_id"], "Y")
+        self.assertEqual(status["delivery_checkpoint_status"]["tracking_task_ids"], ["Y", "Z"])
 
     def test_umbrella_recovery_refuses_dirty_stale_revision_and_unauthorized_apply(self) -> None:
         declaration = self.umbrella_fixture()

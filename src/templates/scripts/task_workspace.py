@@ -85,6 +85,10 @@ UMBRELLA_AUTHORIZATION_SCHEMA = "juno_task_umbrella_recovery_authorization.v1"
 UMBRELLA_EXECUTION_MODE = "umbrella_owned_sequential"
 UMBRELLA_RESERVATIONS_SCHEMA = "juno_task_umbrella_child_reservations.v1"
 UMBRELLA_CHILD_CHECKPOINT_SCHEMA = "juno_task_umbrella_child_checkpoint.v1"
+DELIVERY_CHECKPOINT_CONTRACT_SCHEMA = "juno_task_delivery_checkpoints.v1"
+DELIVERY_CHECKPOINT_EVIDENCE_SCHEMA = "juno_task_delivery_checkpoint_evidence.v1"
+DELIVERY_TRACKING_OWNERS_SCHEMA = "juno_task_delivery_tracking_owners.v1"
+DELIVERY_CHECKPOINT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 TASK_SCOPE_SCHEMA = "juno_task_canonical_scope.v1"
 AUTHORIZATION_LEDGER_SCHEMA = "juno_task_umbrella_authorization_ledger.v1"
 TERMINAL_TASK_STATUSES = {"done", "archived", "cancelled", "canceled", "closed"}
@@ -419,12 +423,16 @@ def load_config(controller: Path) -> dict[str, Any]:
     required = {"schema_version", "repository", "target_ref", "workspace_root", "branch_prefix",
                 "allowed_paths", "controller_private_paths", "focused_validation",
                 "full_suite_validation"}
-    optional = {"selectable_paths", "hydration_workflow", "validation_profiles", "documentation_validation"}
+    optional = {"selectable_paths", "hydration_workflow", "validation_profiles", "documentation_validation",
+                "legacy_umbrella_creation"}
     if (not isinstance(value, dict) or not required.issubset(value) or set(value) - required - optional
             or value.get("schema_version") != CONFIG_SCHEMA):
         raise TaskWorkspaceError(f"task workspace policy must contain exactly the {CONFIG_SCHEMA} fields")
     value.setdefault("selectable_paths", [])
     value.setdefault("hydration_workflow", ".juno_task/config/worktree-hydration.yaml")
+    value.setdefault("legacy_umbrella_creation", False)
+    if not isinstance(value["legacy_umbrella_creation"], bool):
+        raise TaskWorkspaceError("legacy_umbrella_creation policy must be boolean")
     documentation = value.setdefault(
         "documentation_validation", lifecycle_runtime.default_documentation_policy())
     expected_documentation_keys = set(lifecycle_runtime.default_documentation_policy())
@@ -779,6 +787,62 @@ def canonical_requirement_identity(controller: Path, task_id: str) -> dict[str, 
     return {**material, "requirements_sha256": stable_sha256(material)}
 
 
+def delivery_checkpoint_contract(controller: Path, task_id: str) -> Optional[dict[str, Any]]:
+    """Parse one bounded ordered checkpoint contract from the authored task body."""
+    _path, body = task_manifest(controller, task_id)
+    immutable = immutable_task_body(body).decode("utf-8", errors="strict")
+    matches = re.findall(
+        r"\[delivery_checkpoints\]\s*(.*?)\s*\[/delivery_checkpoints\]",
+        immutable, flags=re.DOTALL)
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise TaskWorkspaceError("task has multiple delivery checkpoint contracts")
+    try:
+        value = json.loads(matches[0])
+    except json.JSONDecodeError as exc:
+        raise TaskWorkspaceError(f"delivery checkpoint contract is invalid JSON: {exc}") from exc
+    if (not isinstance(value, dict)
+            or set(value) != {"schema_version", "tracking_task_ids", "checkpoints"}
+            or value.get("schema_version") != DELIVERY_CHECKPOINT_CONTRACT_SCHEMA
+            or not isinstance(value.get("tracking_task_ids"), list)
+            or not isinstance(value.get("checkpoints"), list)
+            or not value["checkpoints"] or len(value["checkpoints"]) > 32):
+        raise TaskWorkspaceError(
+            f"delivery checkpoint contract must use {DELIVERY_CHECKPOINT_CONTRACT_SCHEMA} with 1..32 checkpoints")
+    tracking = value["tracking_task_ids"]
+    if (len(set(tracking)) != len(tracking)
+            or any(not isinstance(item, str) or not TASK_RE.fullmatch(item)
+                   or item == task_id for item in tracking)):
+        raise TaskWorkspaceError("delivery checkpoint tracking task IDs are invalid or duplicated")
+    normalized: list[dict[str, Any]] = []
+    ids: set[str] = set()
+    for index, row in enumerate(value["checkpoints"]):
+        if (not isinstance(row, dict) or set(row) != {"id", "requirement", "final"}
+                or not isinstance(row.get("id"), str)
+                or not DELIVERY_CHECKPOINT_ID_RE.fullmatch(row["id"])
+                or row["id"] in ids
+                or not isinstance(row.get("requirement"), str)
+                or not row["requirement"].strip()
+                or len(row["requirement"].encode()) > 4096
+                or not isinstance(row.get("final"), bool)):
+            raise TaskWorkspaceError(f"delivery checkpoint {index + 1} is malformed")
+        ids.add(row["id"])
+        requirement = row["requirement"].strip()
+        normalized.append({"id": row["id"], "requirement": requirement,
+                           "final": row["final"],
+                           "requirement_sha256": stable_sha256({
+                               "id": row["id"], "requirement": requirement,
+                               "final": row["final"]})})
+    finals = [index for index, row in enumerate(normalized) if row["final"]]
+    if finals != [len(normalized) - 1]:
+        raise TaskWorkspaceError("delivery checkpoint contract requires exactly one final checkpoint, ordered last")
+    body_value = {"schema_version": DELIVERY_CHECKPOINT_CONTRACT_SCHEMA,
+                  "task_id": task_id, "tracking_task_ids": tracking,
+                  "checkpoints": normalized, "source": "ordinary_task_requirements"}
+    return {**body_value, "contract_sha256": stable_sha256(body_value)}
+
+
 def load_task_scope(controller: Path, task_id: str, body: bytes) -> tuple[dict[str, Any], str]:
     value, file_sha = read_json_object(task_scope_path(controller, task_id), f"canonical child scope {task_id}")
     keys = {"schema_version", "task_id", "task_revision_sha256", "lifecycle_status",
@@ -831,6 +895,27 @@ def validate_umbrella_graph(controller: Path, umbrella_id: str, child_ids: list[
         active.remove(task_id); visited.add(task_id)
     walk(umbrella_id)
     return umbrella_scope, umbrella_scope_sha
+
+
+def delivery_tracking_owners(state: dict[str, Any]) -> dict[str, str]:
+    value = state["queues"].setdefault("delivery_tracking_owners", {
+        "schema_version": DELIVERY_TRACKING_OWNERS_SCHEMA, "owners": {},
+    })
+    if (not isinstance(value, dict) or set(value) != {"schema_version", "owners"}
+            or value.get("schema_version") != DELIVERY_TRACKING_OWNERS_SCHEMA
+            or not isinstance(value.get("owners"), dict)
+            or not all(TASK_RE.fullmatch(str(child)) and TASK_RE.fullmatch(str(owner))
+                       for child, owner in value["owners"].items())):
+        raise TaskWorkspaceError("delivery tracking owner state is invalid")
+    return value["owners"]
+
+
+def tracking_owner(state: dict[str, Any], task_id: str) -> Optional[str]:
+    legacy = child_reservations(state).get(task_id)
+    delivery = delivery_tracking_owners(state).get(task_id)
+    if legacy is not None and delivery is not None and legacy != delivery:
+        raise TaskWorkspaceError(f"tracking task {task_id} has conflicting lifecycle owners")
+    return delivery or legacy
 
 
 def child_reservations(state: dict[str, Any]) -> dict[str, str]:
@@ -2079,6 +2164,11 @@ def umbrella_child_checkpoint(controller: Path, task_id: str, child_id: str,
         raise TaskWorkspaceError("unsafe task id")
     if task_id == child_id:
         raise TaskWorkspaceError("umbrella child checkpoint requires a distinct child task id")
+    current_record = read_state(controller)["tasks"].get(task_id)
+    if isinstance(current_record, dict) and _frozen_delivery_contract(current_record) is not None:
+        # Finite command alias: converted records use the ordinary checkpoint
+        # implementation and never regain per-child lifecycle authority.
+        return accept_delivery_checkpoint(controller, task_id, child_id, lease_token)
     config = load_config(controller)
     require_task(controller, task_id)
     require_task(controller, child_id)
@@ -3096,8 +3186,15 @@ def start(controller: Path, task_id: str, requested_paths: Optional[list[str]] =
     target_sha = ref_sha(repository, config["target_ref"])
     requested_paths = requested_paths or []
     allowed_paths, selected_entries = selected_task_paths(config, repository, target_sha, requested_paths)
+    checkpoint_contract = delivery_checkpoint_contract(controller, task_id)
+    if checkpoint_contract is not None and not requested_paths:
+        raise TaskWorkspaceError(
+            "ordinary delivery checkpoints require explicit exact --path scope at task start")
     umbrella_admission = None
     provisional_state = read_state(controller)
+    if umbrella_input is not None and not config["legacy_umbrella_creation"]:
+        raise TaskWorkspaceError(
+            "new umbrella execution is retired; declare ordered [delivery_checkpoints] on one ordinary task")
     if umbrella_input is not None:
         allowed_paths, umbrella_admission = derive_umbrella_admission(
             controller, task_id, repository, config["target_ref"], target_sha,
@@ -3115,12 +3212,32 @@ def start(controller: Path, task_id: str, requested_paths: Optional[list[str]] =
     with state_lock(controller) as control_state_lock:
         state = read_state(controller)
         reservations = child_reservations(state)
-        reserved_owner = reservations.get(task_id)
+        delivery_owners = delivery_tracking_owners(state)
+        reserved_owner = tracking_owner(state, task_id)
         start_admission = decisions.plan_command_transition(
             decisions.CommandRequest("start", task_id),
             decisions.TaskSnapshot(task_id, None, reserved_owner))
         if not start_admission.admitted:
             raise TaskWorkspaceError(start_admission.finding.message)
+        if delivery_checkpoint_contract(controller, task_id) != checkpoint_contract:
+            raise TaskWorkspaceError("delivery checkpoint requirements changed before task start mutation")
+        if checkpoint_contract is not None:
+            conflicts = {child: tracking_owner(state, child)
+                         for child in checkpoint_contract["tracking_task_ids"]
+                         if tracking_owner(state, child) not in (None, task_id)}
+            if conflicts:
+                raise TaskWorkspaceError(
+                    "delivery tracking task already has a lifecycle owner: "
+                    + ", ".join(f"{child}={owner}" for child, owner in sorted(conflicts.items())))
+            for child in checkpoint_contract["tracking_task_ids"]:
+                _child_path, child_body = task_manifest(controller, child)
+                if task_status(child_body, child) not in PRESTART_TRACKING_STATUSES:
+                    raise TaskWorkspaceError(
+                        f"delivery tracking task {child} is not in a pre-start reporting state")
+                child_record = state["tasks"].get(child)
+                if isinstance(child_record, dict):
+                    raise TaskWorkspaceError(
+                        f"delivery tracking task {child} already has independent lifecycle state")
         if umbrella_input is not None:
             locked_baseline, locked_entries = selected_task_paths(
                 config, repository, target_sha, requested_paths)
@@ -3139,6 +3256,8 @@ def start(controller: Path, task_id: str, requested_paths: Optional[list[str]] =
             receipt = existing.get("creation_receipt", {})
             if receipt.get("requested_paths", []) != requested_paths:
                 raise TaskWorkspaceError("task start required paths differ from the frozen creation receipt")
+            if receipt.get("delivery_checkpoint_contract") != checkpoint_contract:
+                raise TaskWorkspaceError("task delivery checkpoint requirements differ from the frozen creation receipt")
             frozen_umbrella = receipt.get("umbrella_admission")
             if ((umbrella_admission is None) != (frozen_umbrella is None)
                     or (umbrella_admission is not None and umbrella_admission != frozen_umbrella)):
@@ -3272,6 +3391,8 @@ def start(controller: Path, task_id: str, requested_paths: Optional[list[str]] =
                                 "runtime_generation": generation,
                                 "hydration_workflow": frozen_hydration,
                                 "generated_output_admission": generated_output_admission}
+            if checkpoint_contract is not None:
+                creation_receipt["delivery_checkpoint_contract"] = checkpoint_contract
             if umbrella_admission is not None:
                 creation_receipt["umbrella_admission"] = umbrella_admission
             create_receipt_sha256 = stable_sha256(creation_receipt)
@@ -3301,6 +3422,9 @@ def start(controller: Path, task_id: str, requested_paths: Optional[list[str]] =
             if umbrella_admission is not None:
                 for child_id in umbrella_admission["ordered_child_ids"]:
                     reservations[child_id] = task_id
+            if checkpoint_contract is not None:
+                for child_id in checkpoint_contract["tracking_task_ids"]:
+                    delivery_owners[child_id] = task_id
             for key, value in (("role", "task"), ("roleBase", target_sha), ("taskId", task_id),
                                ("manifestIdentity", manifest_identity),
                                ("createReceiptSha256", create_receipt_sha256),
@@ -3536,8 +3660,7 @@ def _recovery_plan_locked(controller: Path, task_id: str, input_path: Path,
     receipt = record.get("creation_receipt", {}); predecessor_sha = stable_sha256(receipt)
     if predecessor_sha != record.get("workspace_identity", {}).get("create_receipt_sha256"):
         raise TaskWorkspaceError("historical creation receipt identity drifted; preserve this umbrella and create a replacement")
-    if receipt.get("umbrella_admission") is not None:
-        raise TaskWorkspaceError("umbrella already has start-time child-union admission")
+    historical_admission = receipt.get("umbrella_admission")
     if (Path(record.get("repository", "")).resolve() != repository
             or record.get("target_ref") != config["target_ref"]
             or record.get("base_sha") != receipt.get("base_sha")
@@ -3562,6 +3685,17 @@ def _recovery_plan_locked(controller: Path, task_id: str, input_path: Path,
         controller, task_id, repository, record["target_ref"], record["base_sha"],
         input_path.resolve(), baseline, state, config)
     union, admission, generated = finalize_umbrella_admission(repository, record["base_sha"], union, admission)
+    if historical_admission is not None:
+        if (historical_admission != admission
+                or receipt.get("generated_output_admission") != generated):
+            raise TaskWorkspaceError(
+                "historical umbrella admission differs from verified conversion input")
+        drift = umbrella_drift(controller, repository, historical_admission,
+                               generated, state, task_id)
+        if drift:
+            raise TaskWorkspaceError(
+                "historical umbrella admission drifted before conversion: "
+                + json.dumps(drift, sort_keys=True))
     original_allowed = receipt.get("allowed_paths", [])
     commits = git(worktree, "rev-list", "--reverse", "--parents", f"{record['base_sha']}..{head}").splitlines()
     history: list[dict[str, Any]] = []; escaped: list[str] = []
@@ -3647,6 +3781,27 @@ def issue_umbrella_recovery_authorization(controller: Path, task_id: str,
     return {**row, "authorization_id": authorization_id, "outcome": "issued"}
 
 
+def _legacy_delivery_conversion(task_id: str,
+                                admission: dict[str, Any]) -> dict[str, Any]:
+    bindings = admission.get("child_bindings", [])
+    checkpoints: list[dict[str, Any]] = []
+    for index, binding in enumerate(bindings):
+        child_id = binding["task_id"]
+        requirement = f"Preserved canonical requirements for reporting task {child_id}"
+        final = index == len(bindings) - 1
+        checkpoints.append({
+            "id": child_id, "requirement": requirement, "final": final,
+            "requirement_sha256": stable_sha256({
+                "id": child_id, "requirement": requirement, "final": final}),
+        })
+    body = {"schema_version": DELIVERY_CHECKPOINT_CONTRACT_SCHEMA,
+            "task_id": task_id,
+            "tracking_task_ids": admission["ordered_child_ids"],
+            "checkpoints": checkpoints, "source": "verified_legacy_conversion",
+            "legacy_admission_sha256": stable_sha256(admission)}
+    return {**body, "contract_sha256": stable_sha256(body)}
+
+
 def apply_umbrella_recovery(controller: Path, task_id: str, plan_path: Path,
                             input_path: Path, authorization_path: Path) -> dict[str, Any]:
     authorization_path = authorization_path.expanduser().resolve()
@@ -3704,12 +3859,30 @@ def apply_umbrella_recovery(controller: Path, task_id: str, plan_path: Path,
             "rollback_semantics": "preserve predecessor and supersession; never narrow or rewrite either receipt",
             "refusal_semantics": "preserve umbrella and create a newly admitted replacement; never start a child worktree"}
         reservations = child_reservations(state)
+        delivery_owners = delivery_tracking_owners(state)
+        conversion_contract = _legacy_delivery_conversion(
+            task_id, plan["umbrella_admission"])
         for child_id in plan["umbrella_admission"]["ordered_child_ids"]:
             if reservations.get(child_id) not in {None, task_id}:
                 raise TaskWorkspaceError(f"child ownership changed before recovery apply: {child_id}")
+            if delivery_owners.get(child_id) not in {None, task_id}:
+                raise TaskWorkspaceError(f"delivery tracking ownership changed before recovery apply: {child_id}")
             reservations[child_id] = task_id
+            delivery_owners[child_id] = task_id
+        conversion = {
+            "schema_version": "juno_task_umbrella_to_delivery_conversion.v1",
+            "contract": conversion_contract,
+            "reviewed_plan_sha256": plan_sha,
+            "authorization_receipt_sha256": authorization_file_sha,
+            "predecessor_receipt_sha256": plan["predecessor_receipt_sha256"],
+            "preserved_prior_changed_paths": plan["prior_changed_paths"],
+            "preserved_prior_commit_history": plan["prior_commit_history"],
+            "activation": "fixture_or_drain_only; live activation requires release coordination",
+        }
         updated = {**record, "admission_supersessions": [supersession],
-                   "admission_supersession_sha256": stable_sha256(supersession)}
+                   "admission_supersession_sha256": stable_sha256(supersession),
+                   "delivery_conversion": conversion,
+                   "delivery_checkpoint_progress": []}
         state["tasks"][task_id] = updated; write_state(controller, state)
     return {**updated, "outcome": "applied", "admission_status": "authorized_superseding"}
 
@@ -4076,7 +4249,7 @@ def standing_checkpoint(controller: Path, task_id: str,
             decisions.TaskSnapshot(
                 task_id,
                 None if not isinstance(record, dict) else record.get("state"),
-                child_reservations(state).get(task_id)))
+                tracking_owner(state, task_id)))
         if not checkpoint_admission.admitted:
             raise TaskWorkspaceError(checkpoint_admission.finding.message)
         frozen = json.loads(json.dumps(record))
@@ -4410,6 +4583,157 @@ def standing_evidence_status(controller: Path, task_id: str) -> dict[str, Any]:
             "summary": summary}
 
 
+def _frozen_delivery_contract(record: dict[str, Any]) -> Optional[dict[str, Any]]:
+    value = record.get("creation_receipt", {}).get("delivery_checkpoint_contract")
+    if value is None and isinstance(record.get("delivery_conversion"), dict):
+        value = record["delivery_conversion"].get("contract")
+    if value is None:
+        return None
+    body = {key: item for key, item in value.items() if key != "contract_sha256"}
+    if (not isinstance(value, dict)
+            or value.get("schema_version") != DELIVERY_CHECKPOINT_CONTRACT_SCHEMA
+            or value.get("contract_sha256") != stable_sha256(body)):
+        raise TaskWorkspaceError("frozen delivery checkpoint contract is malformed")
+    return value
+
+
+def delivery_checkpoint_projection(controller: Path, task_id: str,
+                                   record: dict[str, Any]) -> Optional[dict[str, Any]]:
+    contract = _frozen_delivery_contract(record)
+    if contract is None:
+        return None
+    if (contract.get("source") == "ordinary_task_requirements"
+            and delivery_checkpoint_contract(controller, task_id) != contract):
+        raise TaskWorkspaceError("authored delivery checkpoint requirements drifted")
+    progress = record.get("delivery_checkpoint_progress", [])
+    if not isinstance(progress, list):
+        raise TaskWorkspaceError("delivery checkpoint evidence is malformed")
+    expected = contract["checkpoints"]
+    if len(progress) > len(expected):
+        raise TaskWorkspaceError("delivery checkpoint evidence exceeds the frozen requirement order")
+    previous_tip = record.get("base_sha")
+    for index, evidence in enumerate(progress):
+        requirement = expected[index]
+        body = {key: value for key, value in evidence.items() if key != "evidence_sha256"}
+        if (not isinstance(evidence, dict)
+                or evidence.get("schema_version") != DELIVERY_CHECKPOINT_EVIDENCE_SCHEMA
+                or evidence.get("task_id") != task_id
+                or evidence.get("checkpoint_id") != requirement["id"]
+                or evidence.get("requirement_sha256") != requirement["requirement_sha256"]
+                or evidence.get("base_sha") != previous_tip
+                or evidence.get("evidence_sha256") != stable_sha256(body)):
+            raise TaskWorkspaceError("delivery checkpoint evidence is malformed or out of order")
+        previous_tip = evidence.get("tip_sha")
+    completed = [row["checkpoint_id"] for row in progress]
+    remaining = [row["id"] for row in expected[len(progress):]]
+    return {"schema_version": DELIVERY_CHECKPOINT_CONTRACT_SCHEMA,
+            "contract_sha256": contract["contract_sha256"],
+            "completed_checkpoint_ids": completed,
+            "current_checkpoint_id": remaining[0] if remaining else None,
+            "remaining_checkpoint_ids": remaining,
+            "final_accepted": len(progress) == len(expected),
+            "implementation_state": "IMPLEMENTED" if len(progress) == len(expected) else "IN_PROGRESS",
+            "integration_state": "INTEGRATED" if record.get("state") == "MERGED" else "NOT_INTEGRATED",
+            "tracking_task_ids": contract["tracking_task_ids"],
+            "evidence": progress}
+
+
+def require_complete_delivery_acceptance(controller: Path, task_id: str,
+                                         record: dict[str, Any], tip_sha: str) -> Optional[dict[str, Any]]:
+    projection = delivery_checkpoint_projection(controller, task_id, record)
+    if projection is None:
+        return None
+    if not projection["final_accepted"]:
+        missing = ", ".join(projection["remaining_checkpoint_ids"])
+        raise TaskWorkspaceError(f"delivery checkpoints are incomplete: {missing}")
+    final = projection["evidence"][-1]
+    if final.get("tip_sha") != tip_sha or not final.get("final"):
+        raise TaskWorkspaceError("final cumulative delivery acceptance does not bind the submitted tip")
+    return projection
+
+
+def bind_delivery_acceptance(closure: dict[str, Any],
+                             projection: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if projection is None:
+        return closure
+    body = {key: value for key, value in closure.items() if key != "closure_sha256"}
+    body["delivery_acceptance"] = projection
+    return {**body, "closure_sha256": stable_sha256(body)}
+
+
+def accept_delivery_checkpoint(controller: Path, task_id: str, checkpoint_id: str,
+                               lease_token: Optional[str] = None) -> dict[str, Any]:
+    """Validate and record one ordered checkpoint on the ordinary task."""
+    if not DELIVERY_CHECKPOINT_ID_RE.fullmatch(checkpoint_id):
+        raise TaskWorkspaceError("unsafe delivery checkpoint id")
+    config = load_config(controller)
+    repository = product_repository(controller, config)
+    with state_lock(controller):
+        state = read_state(controller)
+        record = state["tasks"].get(task_id)
+        _require_lease_fence(controller, "checkpoint", task_id, lease_token, record=record)
+        if not isinstance(record, dict) or record.get("state") != "WORKING":
+            raise TaskWorkspaceError("delivery checkpoint requires a WORKING task")
+        projection = delivery_checkpoint_projection(controller, task_id, record)
+        if projection is None:
+            raise TaskWorkspaceError("task has no frozen delivery checkpoint requirements")
+        progress = projection["evidence"]
+        if checkpoint_id in projection["completed_checkpoint_ids"]:
+            existing = progress[projection["completed_checkpoint_ids"].index(checkpoint_id)]
+            live_tip = git(Path(record["worktree"]), "rev-parse", "HEAD")
+            if existing["tip_sha"] == live_tip:
+                return {"outcome": "delivery_checkpoint_already_accepted",
+                        "checkpoint": existing, "projection": projection}
+            raise TaskWorkspaceError("accepted delivery checkpoint cannot be rewritten")
+        if projection["current_checkpoint_id"] != checkpoint_id:
+            raise TaskWorkspaceError(
+                f"delivery checkpoint is out of order; expected {projection['current_checkpoint_id']}")
+        frozen = json.loads(json.dumps(record))
+    runtime = require_current_runtime(repository, ref_sha(repository, config["target_ref"]), controller)
+    _repo, worktree, head, changed, closure = review_ready_closure(
+        controller, config, frozen, repository, task_id, runtime)
+    plan = standing_checkpoint(controller, task_id, lease_token, submission_closure=closure)
+    evidence = standing_evidence_run(controller, task_id, raise_on_failure=False,
+                                     lease_token=lease_token)
+    if evidence.get("outcome") != "PASSED" or evidence.get("plan_sha256") != plan.get("plan_sha256"):
+        raise TaskWorkspaceError("delivery checkpoint evidence is not a complete passing result")
+    contract = _frozen_delivery_contract(frozen)
+    requirement = contract["checkpoints"][len(frozen.get("delivery_checkpoint_progress", []))]
+    previous_tip = (frozen.get("delivery_checkpoint_progress") or [{}])[-1].get(
+        "tip_sha", frozen["base_sha"])
+    if run(["git", "-C", str(repository), "merge-base", "--is-ancestor",
+            previous_tip, head], repository, check=False).returncode != 0:
+        raise TaskWorkspaceError("delivery checkpoint tip does not descend from prior checkpoint evidence")
+    entry_body = {
+        "schema_version": DELIVERY_CHECKPOINT_EVIDENCE_SCHEMA,
+        "task_id": task_id, "checkpoint_id": checkpoint_id,
+        "requirement_sha256": requirement["requirement_sha256"],
+        "base_sha": previous_tip, "tip_sha": head,
+        "tree_sha": git(repository, "rev-parse", f"{head}^{{tree}}"),
+        "final": requirement["final"],
+        "cumulative_changed_paths": changed,
+        "submission_sha256": closure["submission"]["submission_sha256"],
+        "validation_plan_sha256": evidence["plan_sha256"],
+        "validation_summary_sha256": stable_sha256(evidence),
+        "validation_receipts": evidence["receipts"],
+        "recorded_at_unix_ns": time.time_ns(),
+    }
+    entry = {**entry_body, "evidence_sha256": stable_sha256(entry_body)}
+    with state_lock(controller):
+        state = read_state(controller)
+        current = state["tasks"].get(task_id)
+        if current != frozen:
+            raise TaskWorkspaceError("task state changed while checkpoint evidence was produced")
+        if (git(worktree, "rev-parse", "HEAD") != head
+                or git(worktree, "status", "--porcelain=v1", "--untracked-files=all")):
+            raise TaskWorkspaceError("task tip or worktree changed before checkpoint mutation")
+        current.setdefault("delivery_checkpoint_progress", []).append(entry)
+        state["tasks"][task_id] = current
+        write_state(controller, state)
+    return {"outcome": "delivery_checkpoint_accepted", "checkpoint": entry,
+            "projection": delivery_checkpoint_projection(controller, task_id, current)}
+
+
 def _submission_receipt(controller: Path, task_id: str,
                         closure: dict[str, Any]) -> dict[str, str]:
     submission = closure.get("submission")
@@ -4461,7 +4785,7 @@ def preflight(controller: Path, task_id: str) -> dict[str, Any]:
             decisions.TaskSnapshot(
                 task_id,
                 None if not isinstance(record, dict) else record.get("state"),
-                child_reservations(state).get(task_id)))
+                tracking_owner(state, task_id)))
         if not preflight_admission.admitted:
             raise TaskWorkspaceError(preflight_admission.finding.message)
         frozen_record = json.loads(json.dumps(record))
@@ -4474,6 +4798,9 @@ def preflight(controller: Path, task_id: str) -> dict[str, Any]:
     )
     if load_config(controller) != config:
         raise TaskWorkspaceError("task workspace policy changed during preflight")
+    delivery_acceptance = require_complete_delivery_acceptance(
+        controller, task_id, frozen_record, head)
+    closure = bind_delivery_acceptance(closure, delivery_acceptance)
     receipt = _submission_receipt(controller, task_id, closure)
     return {"schema_version": RECORD_SCHEMA, "task_id": task_id, "state": "WORKING",
             "outcome": "preflight_passed", "worktree": str(worktree), "tip_sha": head,
@@ -4496,7 +4823,7 @@ def _finish_once(controller: Path, task_id: str,
             decisions.TaskSnapshot(
                 task_id,
                 None if not isinstance(record, dict) else record.get("state"),
-                child_reservations(state).get(task_id)))
+                tracking_owner(state, task_id)))
         if not finish_admission.admitted:
             raise TaskWorkspaceError(finish_admission.finding.message)
         if finish_admission.idempotent:
@@ -4551,6 +4878,9 @@ def _finish_once(controller: Path, task_id: str,
     repository, worktree, head, changed, closure = review_ready_closure(
         controller, config, frozen_record, configured_repository, task_id, runtime
     )
+    delivery_acceptance = require_complete_delivery_acceptance(
+        controller, task_id, frozen_record, head)
+    closure = bind_delivery_acceptance(closure, delivery_acceptance)
     submission_receipt = _submission_receipt(controller, task_id, closure)
     _frozen_allowed, frozen_generated_admission, _admission_source = effective_admission(
         frozen_record)
@@ -4715,10 +5045,11 @@ def status(controller: Path, task_id: str) -> dict[str, Any]:
     state = read_state(controller)
     record = state["tasks"].get(task_id)
     if not record:
+        owner = tracking_owner(state, task_id)
         projection = decisions.status_projection(
-            decisions.TaskSnapshot(task_id, None, child_reservations(state).get(task_id)))
+            decisions.TaskSnapshot(task_id, None, owner))
         eligibility = decisions.task_mutation_eligibility(
-            task_id, None, tracking_owner=child_reservations(state).get(task_id))
+            task_id, None, tracking_owner=owner)
         projected: dict[str, Any] = {
             "schema_version": RECORD_SCHEMA, "task_id": task_id,
             "state": projection.state, "outcome": "status",
@@ -4736,8 +5067,19 @@ def status(controller: Path, task_id: str) -> dict[str, Any]:
         if projection.umbrella_owner_task_id is not None:
             projected["umbrella_owner_task_id"] = projection.umbrella_owner_task_id
             projected["next_action"] = projection.next_action
+            if delivery_tracking_owners(state).get(task_id) == projection.umbrella_owner_task_id:
+                owner_record = state["tasks"].get(projection.umbrella_owner_task_id, {})
+                projected.update({
+                    "reporting_only": True,
+                    "delivery_owner_task_id": projection.umbrella_owner_task_id,
+                    "owner_delivery_state": owner_record.get("state"),
+                    "separate_integration": False,
+                })
         return projected
     result = {**record, "outcome": "status", "runtime_generation": generation}
+    delivery_projection = delivery_checkpoint_projection(controller, task_id, record)
+    if delivery_projection is not None:
+        result["delivery_checkpoint_status"] = delivery_projection
     if isinstance(record.get("kanban_sync"), dict):
         kanban_sync = record["kanban_sync"]
         result["kanban_sync"] = kanban_sync
@@ -4800,7 +5142,7 @@ def status(controller: Path, task_id: str) -> dict[str, Any]:
                    if isinstance(lease, dict) and lease.get("state") == decisions.LEASE_ACTIVE
                    else decisions.LeaseObservation("inactive", "no active task producer"))
     eligibility = decisions.task_mutation_eligibility(
-        task_id, record.get("state"), tracking_owner=child_reservations(state).get(task_id))
+        task_id, record.get("state"), tracking_owner=tracking_owner(state, task_id))
     result["producer_fence"] = {
         "state": lease.get("state") if isinstance(lease, dict) else "NONE",
         "attempt": lease.get("attempt") if isinstance(lease, dict) else None,
@@ -7664,6 +8006,8 @@ def parser() -> argparse.ArgumentParser:
                        help="immutable original cumulative task-run deadline")
     value.add_argument("--child",
                        help="admitted ordered umbrella child task id for child-checkpoint")
+    value.add_argument("--accept-checkpoint",
+                       help="accept one ordered ordinary-delivery checkpoint with exact evidence")
     value.add_argument("--path", action="append", default=[], help="required policy-admitted product root")
     value.add_argument("--umbrella-admission", type=Path,
                        help="versioned ordered-child exact-scope input")
@@ -7716,6 +8060,8 @@ def main(argv: list[str] | None = None) -> int:
                     "wall-budget identity options are supported only for task recover-wall-budget")
             if args.operation != "child-checkpoint" and args.child:
                 raise TaskWorkspaceError("--child is supported only for task child-checkpoint")
+            if args.operation != "checkpoint" and args.accept_checkpoint:
+                raise TaskWorkspaceError("--accept-checkpoint is supported only for task checkpoint")
             if args.dry_run or args.apply or args.package_version or args.package_runtime_sha256:
                 raise TaskWorkspaceError("runtime-bootstrap options are not supported for task lifecycle operations")
             if args.lease_token and args.operation not in (
@@ -7797,7 +8143,10 @@ def main(argv: list[str] | None = None) -> int:
                         controller, args.task, args.run_id, args.attempt,
                         args.predispatch_receipt_sha256, args.original_deadline_unix_ns)
                 elif args.operation == "checkpoint":
-                    result = standing_checkpoint(controller, args.task, args.lease_token)
+                    result = (accept_delivery_checkpoint(
+                        controller, args.task, args.accept_checkpoint, args.lease_token)
+                        if args.accept_checkpoint else
+                        standing_checkpoint(controller, args.task, args.lease_token))
                 elif args.operation == "child-checkpoint":
                     if not args.child:
                         raise TaskWorkspaceError("child-checkpoint requires --child")

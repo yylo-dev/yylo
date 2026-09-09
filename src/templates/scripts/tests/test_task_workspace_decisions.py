@@ -156,23 +156,23 @@ class TransitionMatrixTables(unittest.TestCase):
                 self.plan("evidence-run", state).finding.message,
                 "standing evidence run requires a WORKING task")
 
-    def test_tracking_only_children_are_redirected_to_their_umbrella(self) -> None:
+    def test_reporting_only_tasks_redirect_to_their_ordinary_delivery(self) -> None:
         owner = "UMB"
         self.assertEqual(
             self.plan("checkpoint", None, owner).finding.message,
-            f"task X is tracking-only under umbrella {owner}; "
-            f"checkpoint the umbrella child instead: yy task child-checkpoint {owner} X")
+            f"task X is reporting-only under delivery owner {owner}; "
+            f"checkpoint the ordinary delivery instead: yy task checkpoint {owner}")
         self.assertEqual(
             self.plan("preflight", None, owner).finding.message,
-            f"task X is tracking-only under umbrella {owner}; "
-            f"preflight the umbrella instead: yy task preflight {owner}")
+            f"task X is reporting-only under delivery owner {owner}; "
+            f"preflight the delivery instead: yy task preflight {owner}")
         self.assertEqual(
             self.plan("finish", None, owner).finding.message,
-            f"task X is tracking-only under umbrella {owner}; "
-            f"finish the umbrella instead: yy task finish {owner}")
+            f"task X is reporting-only under delivery owner {owner}; "
+            f"finish the delivery instead: yy task finish {owner}")
         self.assertEqual(
             self.plan("start", None, owner).finding.message,
-            f"task X is tracking-only under umbrella {owner}")
+            f"task X is reporting-only under delivery owner {owner}")
 
     def test_hydrate_admits_exactly_the_frozen_hydration_states(self) -> None:
         for state in STATES:
@@ -225,7 +225,7 @@ class TransitionMatrixTables(unittest.TestCase):
 
 
 class StatusProjectionTables(unittest.TestCase):
-    def test_tracking_only_projection_redirects_progress_recording(self) -> None:
+    def test_reporting_only_projection_redirects_to_delivery_status(self) -> None:
         with poisoned_surface():
             projection = decisions.status_projection(
                 decisions.TaskSnapshot("X", None, "UMB"))
@@ -233,8 +233,8 @@ class StatusProjectionTables(unittest.TestCase):
         self.assertEqual(projection.umbrella_owner_task_id, "UMB")
         self.assertEqual(
             projection.next_action,
-            "implement inside the umbrella worktree; "
-            "record progress with: yy task child-checkpoint UMB X")
+            "report through the ordinary delivery owner; "
+            "inspect progress with: yy task status UMB")
 
     def test_absent_task_projects_not_started(self) -> None:
         with poisoned_surface():
