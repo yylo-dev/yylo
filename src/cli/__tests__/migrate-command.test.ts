@@ -3,6 +3,46 @@ import { describe, expect, it, vi } from 'vitest';
 import { configureMigrationCommand } from '../commands/migrate.js';
 
 describe('migration CLI', () => {
+  it('owns finite legacy lifecycle plan/apply/verify and drain outside ordinary task help', async () => {
+    const invoke = vi.fn(async () => undefined);
+    const legacy = vi.fn(async () => undefined);
+    const program = new Command().exitOverride().configureOutput({ writeOut: () => undefined });
+    configureMigrationCommand(program, invoke, legacy);
+    const migrate = program.commands.find((command) => command.name() === 'migrate');
+    const group = migrate?.commands.find((command) => command.name() === 'legacy-lifecycle');
+    expect(group?.commands.map((command) => command.name())).toEqual([
+      'inventory', 'plan', 'authorize', 'apply', 'verify', 'checkpoint',
+    ]);
+
+    await program.parseAsync(['node', 'yy', 'migrate', 'legacy-lifecycle', 'inventory']);
+    expect(legacy).toHaveBeenLastCalledWith('doctor', '', []);
+    await program.parseAsync(['node', 'yy', 'migrate', 'legacy-lifecycle', 'plan', 'U1',
+      '--umbrella-admission', '/r/umbrella.json', '--output', '/r/plan.json']);
+    expect(legacy).toHaveBeenLastCalledWith('recovery-plan', 'U1', [], [
+      '--umbrella-admission', '/r/umbrella.json', '--output', '/r/plan.json',
+    ]);
+    await program.parseAsync(['node', 'yy', 'migrate', 'legacy-lifecycle', 'authorize', 'U1',
+      '--umbrella-admission', '/r/umbrella.json', '--plan', '/r/plan.json']);
+    expect(legacy).toHaveBeenLastCalledWith('recovery-authorize', 'U1', [], [
+      '--umbrella-admission', '/r/umbrella.json', '--plan', '/r/plan.json',
+    ]);
+    for (const operation of ['apply', 'verify'] as const) {
+      await program.parseAsync(['node', 'yy', 'migrate', 'legacy-lifecycle', operation, 'U1',
+        '--umbrella-admission', '/r/umbrella.json', '--plan', '/r/plan.json',
+        '--authorization-receipt', '/r/authorization.json']);
+      expect(legacy).toHaveBeenLastCalledWith(`recovery-${operation}`, 'U1', [], [
+        '--umbrella-admission', '/r/umbrella.json', '--plan', '/r/plan.json',
+        '--authorization-receipt', '/r/authorization.json',
+      ]);
+    }
+    await program.parseAsync(['node', 'yy', 'migrate', 'legacy-lifecycle', 'checkpoint',
+      'U1', 'C1', '--lease-token', 'token']);
+    expect(legacy).toHaveBeenLastCalledWith('child-checkpoint', 'U1', [], [
+      '--child', 'C1', '--lease-token', 'token',
+    ]);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
   it('forwards a read-only inventory with an explicit external receipt', async () => {
     const invoke = vi.fn(async () => undefined);
     const program = new Command().exitOverride();
