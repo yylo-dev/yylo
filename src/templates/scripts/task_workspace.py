@@ -2322,7 +2322,7 @@ def record_control_audit(controller: Path, surface: str, operation: str,
     expected_policy = ("kanban" if operation in {"status", "admission", "preflight", "recovery-plan", "evidence-status", "doctor", "lease-status"}
                        else "orchestration")
     if surface == "task" and operation not in {
-            "start", "run", "recover-predispatch", "recover-wall-budget", "status", "admission", "hydrate", "preflight", "finish",
+            "start", "run", "resume", "recover-predispatch", "recover-wall-budget", "status", "admission", "hydrate", "preflight", "finish",
             "checkpoint", "child-checkpoint", "evidence-run", "evidence-status", "evidence-await",
             "recovery-plan", "recovery-authorize", "recovery-apply", "sync", "doctor",
             "lease-status", "lease-heartbeat", "lease-handoff", "lease-successor",
@@ -4660,6 +4660,42 @@ def finish(controller: Path, task_id: str, lease_token: Optional[str] = None) ->
 _handoff_phase = decisions.handoff_phase
 
 
+def _task_resume_projection(controller: Path, task_id: str,
+                            record: dict[str, Any]) -> dict[str, Any]:
+    """Observe only enough durable evidence to route resume to task-run."""
+    root = controller / ".juno_task/runtime/lifecycle-runs/task" / task_id
+    latest = root / "latest.json"
+    ambiguous = False
+    launch_observed = latest.is_file()
+    exact_terminal = record.get("state") == "QUEUED"
+    stage = "ADMIT" if not launch_observed else "IMPLEMENTING"
+    if launch_observed:
+        try:
+            pointer = json.loads(latest.read_text())
+            exact_terminal = exact_terminal or pointer.get("terminal") is True
+            run_id = pointer.get("run_id")
+            if not isinstance(run_id, str):
+                ambiguous = True
+            else:
+                journal = json.loads((root / run_id / "journal.json").read_text())
+                stage = str(journal.get("state") or stage)
+                ambiguous = journal.get("run_id") != run_id
+        except (OSError, json.JSONDecodeError):
+            ambiguous = True
+    lease = _lease_view(record)
+    observation = (_observe_producer(lease.get("producer"))
+                   if isinstance(lease, dict) and lease.get("state") == decisions.LEASE_ACTIVE
+                   else decisions.LeaseObservation("inactive", "no active task producer"))
+    resume = decisions.plan_resume(decisions.ResumeFacts(
+        owner="task", producer_status=observation.status,
+        launch_observed=launch_observed, exact_terminal=exact_terminal,
+        resumable_stage=stage, ambiguous=ambiguous))
+    return {"classification": resume.classification, "admitted": resume.admitted,
+            "owner_command": f"{resume.owner_command} {task_id}",
+            "restart_stage": resume.restart_stage,
+            "reason_code": resume.reason_code}
+
+
 def status(controller: Path, task_id: str) -> dict[str, Any]:
     config = load_config(controller)
     require_task(controller, task_id)
@@ -4736,6 +4772,7 @@ def status(controller: Path, task_id: str) -> dict[str, Any]:
     else:
         result.update({"current_target_sha": None, "target_available": False,
                        "target_moved": None, "target_error": "repository_unavailable"})
+    result["resume_decision"] = _task_resume_projection(controller, task_id, record)
     return result
 
 
@@ -7567,7 +7604,7 @@ def lease_release(controller: Path, task_id: str, lease_token: Optional[str]) ->
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(description=__doc__)
     value.add_argument("operation", choices=(
-        "start", "run", "recover-predispatch", "recover-wall-budget", "status", "admission", "hydrate", "preflight", "finish",
+        "start", "run", "resume", "recover-predispatch", "recover-wall-budget", "status", "admission", "hydrate", "preflight", "finish",
         "checkpoint", "child-checkpoint", "evidence-run", "evidence-status", "evidence-await",
         "recovery-plan", "recovery-authorize", "recovery-apply", "runtime-bootstrap",
         "sync", "doctor", "lease-status", "lease-heartbeat", "lease-handoff",
@@ -7644,7 +7681,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise TaskWorkspaceError("--reason is supported only for lease revoke or handoff")
             if args.handoff_receipt and args.operation != "lease-successor":
                 raise TaskWorkspaceError("--handoff-receipt is supported only for lease-successor")
-            audit = record_control_audit(controller, "task", args.operation, args.task)
+            # Public resume is a thin spelling for the existing fenced task-run
+            # owner; it does not create another lifecycle authority.
+            audit_operation = "run" if args.operation == "resume" else args.operation
+            audit = record_control_audit(controller, "task", audit_operation, args.task)
             if args.operation in {"lease-status", "lease-heartbeat", "lease-handoff",
                                   "lease-successor", "lease-revoke", "lease-release"}:
                 if args.umbrella_admission or args.plan or args.output or args.authorization_receipt:
@@ -7701,8 +7741,10 @@ def main(argv: list[str] | None = None) -> int:
                 if args.umbrella_admission or args.plan or args.output or args.authorization_receipt:
                     raise TaskWorkspaceError(
                         "admission/recovery options are unsupported for this operation")
-                if args.operation == "run":
+                if args.operation in {"run", "resume"}:
                     result = managed_task_run(controller, args.task)
+                    if args.operation == "resume":
+                        result = {**result, "resume_owner": "task-run"}
                 elif args.operation == "recover-predispatch":
                     result = recover_task_predispatch(controller, args.task, args.run_id)
                 elif args.operation == "recover-wall-budget":

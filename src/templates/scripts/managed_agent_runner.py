@@ -325,6 +325,18 @@ def now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def process_instance(pid: int) -> dict[str, Any]:
+    """Bind a PID to its kernel start ticks without launching another process."""
+    try:
+        # /proc/<pid>/stat field 22 is the start time after boot. Split after
+        # the final ')' because the comm field may itself contain spaces.
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        start_ticks = int(fields[19])
+    except (OSError, ValueError, IndexError):
+        return {"pid": pid, "start_ticks": None, "observable": False}
+    return {"pid": pid, "start_ticks": start_ticks, "observable": True}
+
+
 def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -1329,7 +1341,9 @@ def run(args: argparse.Namespace) -> int:
               "effective_hook_policy": effective_hook_policy,
               "argv_sha256": sha(shlex.join(argv).encode()), "environment_contract": env_contract}
     atomic_json(out / "launch.json", launch)
-    active = {"schema_version": SCHEMA, "state": "active", "mode": args.mode, "run_root": str(out), "started_at": launch["started_at"]}
+    active = {"schema_version": SCHEMA, "state": "active", "mode": args.mode,
+              "run_root": str(out), "started_at": launch["started_at"],
+              "owner_process": process_instance(os.getpid())}
     atomic_json(out / "active.json", active)
     live_log_path, live_log = allocate_live_log(
         f"managed-{args.mode}", args.task_id or args.tool_id)
@@ -1352,7 +1366,9 @@ def run(args: argparse.Namespace) -> int:
         proc = subprocess.Popen(argv, cwd=launcher, env=env, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         active["child_pid"] = proc.pid; active["process_group_id"] = proc.pid
-        active["owner_pid"] = os.getpid(); atomic_json(out / "active.json", active)
+        active["owner_pid"] = os.getpid()
+        active["child_process"] = process_instance(proc.pid)
+        atomic_json(out / "active.json", active)
         timed_out = pump(proc, stdout_path, stderr_path, combined_path,
                          live_log, args.timeout_seconds, lambda: interrupted,
                          termination_events, started)
@@ -1434,6 +1450,8 @@ def run(args: argparse.Namespace) -> int:
                     "producer_completed_at": producer_completed_at,
                     "producer_elapsed_seconds": producer_elapsed, "timed_out": False,
                     "child_pid": proc.pid, "process_group_id": proc.pid,
+                    "owner_process": active["owner_process"],
+                    "child_process": active.get("child_process"),
                     "exit_signal": signal.Signals(-code).name if code < 0 else None,
                     "termination_events": termination_events,
                     "live_log": {"path": str(live_log_path), "sha256": sha(live_log_path.read_bytes())},
@@ -1489,6 +1507,8 @@ def run(args: argparse.Namespace) -> int:
                     "exit_code": exit_code, "timed_out": timed_out,
                     "child_pid": proc.pid if proc else None,
                     "process_group_id": proc.pid if proc else None,
+                    "owner_process": active["owner_process"],
+                    "child_process": active.get("child_process"),
                     "exit_signal": signal.Signals(-exit_code).name if exit_code < 0 else None,
                     "interrupted_signal": signal.Signals(interrupted).name if interrupted else None,
                     "termination_events": termination_events,

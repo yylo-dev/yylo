@@ -64,6 +64,7 @@ describe('merge queue CLI', () => {
     { argv: ['status', '--detail', 'T123'], expected: ['status', undefined, ['--detail', 'T123']] },
     { argv: ['status', '--detail'], expected: ['status', undefined, ['--detail']] },
     { argv: ['status', '--full'], expected: ['status', undefined, ['--full']] },
+    { argv: ['resume'], expected: ['resume'] },
     { argv: ['next'], expected: ['next'] },
     { argv: ['next', 'T123'], expected: ['next', 'T123'] },
     { argv: ['resolve', 'T123'], expected: ['resolve', 'T123'] },
@@ -132,12 +133,15 @@ describe('merge queue CLI', () => {
     expect(invoke).toHaveBeenCalledWith('supersede-lifecycle-journal', undefined, options);
   });
 
-  it('forwards merge drive with an optional frozen FIFO stop boundary', async () => {
+  it('forwards merge drive and resume with an optional frozen FIFO stop boundary', async () => {
     const invoke = vi.fn(async () => undefined);
     const program = new Command().exitOverride();
     configureMergeQueueCommand(program, invoke);
     await program.parseAsync(['node', 'yy', 'merge', 'drive', '--through', 'T123']);
     expect(invoke).toHaveBeenCalledWith('drive', undefined, ['--through', 'T123']);
+    invoke.mockClear();
+    await program.parseAsync(['node', 'yy', 'merge', 'resume', '--through', 'T123']);
+    expect(invoke).toHaveBeenCalledWith('resume', undefined, ['--through', 'T123']);
   });
 
   it('forwards target arbiter observation and bounded on-demand runs', async () => {
@@ -192,18 +196,18 @@ describe('merge queue CLI', () => {
     const program = new Command();
     configureMergeQueueCommand(program, async () => undefined);
     const merge = program.commands.find((command) => command.name() === 'merge');
-    expect(merge?.commands.map((command) => command.name())).toEqual(['status', 'drive', 'arbiter', 'plan', 'next', 'resolve', 'review', 'reopen', 'recover-full-suite-failure', 'recover-repair-predispatch', 'recover-authority-drift', 'supersede-lifecycle-journal', 'withdraw', 'reconcile', 'refresh']);
-    expect(merge?.commands[0]?.registeredArguments).toHaveLength(0);
-    expect(merge?.commands[1]?.registeredArguments).toHaveLength(0);
-    expect(merge?.commands[3]?.registeredArguments[0]?.required).toBe(true);
-    expect(merge?.commands[4]?.registeredArguments[0]?.required).toBe(false);
-    expect(merge?.commands[5]?.registeredArguments[0]?.required).toBe(true);
-    expect(merge?.commands[6]?.registeredArguments[0]?.required).toBe(true);
-    expect(merge?.commands[7]?.registeredArguments[0]?.required).toBe(true);
-    expect(merge?.commands[8]?.registeredArguments[0]?.required).toBe(true);
-    expect(merge?.commands[9]?.registeredArguments[0]?.required).toBe(true);
-    expect(merge?.commands[10]?.registeredArguments[0]?.required).toBe(true);
-    expect(merge?.commands[11]?.registeredArguments).toHaveLength(0);
+    expect(merge?.commands.map((command) => command.name())).toEqual(['status', 'drive', 'resume', 'arbiter', 'plan', 'next', 'resolve', 'review', 'reopen', 'recover-full-suite-failure', 'recover-repair-predispatch', 'recover-authority-drift', 'supersede-lifecycle-journal', 'withdraw', 'reconcile', 'refresh']);
+    const command = (name: string) => merge?.commands.find((entry) => entry.name() === name);
+    expect(command('status')?.registeredArguments).toHaveLength(0);
+    expect(command('drive')?.registeredArguments).toHaveLength(0);
+    expect(command('resume')?.registeredArguments).toHaveLength(0);
+    expect(command('plan')?.registeredArguments[0]?.required).toBe(true);
+    expect(command('next')?.registeredArguments[0]?.required).toBe(false);
+    for (const name of ['resolve', 'review', 'reopen', 'recover-full-suite-failure',
+      'recover-repair-predispatch', 'recover-authority-drift']) {
+      expect(command(name)?.registeredArguments[0]?.required).toBe(true);
+    }
+    expect(command('supersede-lifecycle-journal')?.registeredArguments).toHaveLength(0);
   });
 
   it('forwards the bounded withdraw operator reason', async () => {
@@ -235,6 +239,7 @@ describe('merge queue CLI', () => {
     ]);
     expect(arbiterCommand('status')?.description()).toContain('Read-only');
     expect(arbiterCommand('run')?.description()).toContain('Explicit mutation');
+    expect(command('resume')?.description()).toContain('existing fenced target arbiter');
     expect(command('next')?.description()).toContain('Explicit recovery mutation');
     expect(command('next')?.description()).toContain('continue paused evidence');
     expect(command('next')?.registeredArguments[0]?.description).toContain('evidence/review');
@@ -250,7 +255,7 @@ describe('merge queue CLI', () => {
 
   it('checkpoints only after successful terminal merge and Kanban finalization truth', async () => {
     const checkpoint = vi.fn(async () => ({ attempted: true, ok: true }));
-    for (const operation of ['next', 'resolve'] as const) {
+    for (const operation of ['next', 'resolve', 'resume'] as const) {
       checkpoint.mockClear();
       await checkpointMergeQueueAfterFinalization(operation, '/controller', 0, mergedResult, checkpoint);
       expect(checkpoint).toHaveBeenCalledWith('/controller', 0);
