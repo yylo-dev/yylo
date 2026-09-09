@@ -4824,6 +4824,13 @@ finished = time.monotonic()
                          {"mode": "profile", "profile_ids": ["pkg-suite"],
                           "authored_path_count": 1})
 
+    def test_declared_migration_contract_path_is_exactly_admitted(self) -> None:
+        policy = json.loads((SCRIPT.parents[2] / ".juno_task/config/task-workspace.json").read_text())
+        migration_path = "juno-code/docs/lifecycle-simplification-migration.md"
+        self.assertIn(migration_path, policy["allowed_paths"])
+        self.assertNotIn("juno-code/docs/unrelated-future-contract.md",
+                         policy["allowed_paths"])
+
     def test_absent_allowed_root_is_creatable_and_selects_only_its_profile(self) -> None:
         config_path = self.controller / ".juno_task/config/task-workspace.json"
         config = json.loads(config_path.read_text())
