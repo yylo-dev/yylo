@@ -4824,12 +4824,30 @@ finished = time.monotonic()
                          {"mode": "profile", "profile_ids": ["pkg-suite"],
                           "authored_path_count": 1})
 
-    def test_declared_migration_contract_path_is_exactly_admitted(self) -> None:
-        policy = json.loads((SCRIPT.parents[2] / ".juno_task/config/task-workspace.json").read_text())
+    def test_declared_absent_file_is_created_without_sibling_authority(self) -> None:
+        config_path = self.controller / ".juno_task/config/task-workspace.json"
+        policy = json.loads(config_path.read_text())
         migration_path = "juno-code/docs/lifecycle-simplification-migration.md"
-        self.assertIn(migration_path, policy["allowed_paths"])
-        self.assertNotIn("juno-code/docs/unrelated-future-contract.md",
-                         policy["allowed_paths"])
+        sibling_path = "juno-code/docs/unrelated-future-contract.md"
+        policy["allowed_paths"].append(migration_path)
+        config_path.write_text(json.dumps(policy, indent=2) + "\n")
+
+        started = task_runtime.start(self.controller, "X", [migration_path])
+        self.assertEqual(started["creation_receipt"]["allowed_paths"], [migration_path])
+        self.assertEqual(started["creation_receipt"]["selected_entries"][migration_path], {
+            "mode": "000000", "type": "absent", "object": "0" * 40,
+        })
+        worktree = self.workspaces / "X"
+        destination = worktree / migration_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("# Migration contract\n")
+        git(worktree, "add", migration_path)
+        git(worktree, "commit", "-m", "add exact migration contract")
+        finished = self.payload("finish", "X")
+        self.assertEqual(finished["state"], "QUEUED")
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
+                                    "not admitted by policy"):
+            task_runtime.start(self.controller, "Y", [sibling_path])
 
     def test_absent_allowed_root_is_creatable_and_selects_only_its_profile(self) -> None:
         config_path = self.controller / ".juno_task/config/task-workspace.json"
