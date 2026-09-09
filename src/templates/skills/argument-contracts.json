@@ -1,23 +1,34 @@
 {
   "schemaVersion": 1,
-  "description": "Declared invocation argument contracts for every managed skill. Exact placeholder counts are enforced across Pi, Claude, and Codex.",
-  "surfaces": ["pi", "claude", "codex"],
+  "description": "Declared invocation argument contracts for every remotely installed YYLO skill. Canonical SKILL.md bytes are copied without reconstruction.",
   "skills": {
-    "kanban-workflow": {
+    "artifact-yylo": {
       "semantics": "complete-request",
       "placeholders": { "$ARGUMENTS": 1 }
     },
-    "plan-kanban-tasks": {
+    "ledger-tasks-yylo": {
       "semantics": "complete-request",
       "placeholders": { "$ARGUMENTS": 1 }
     },
-    "ralph-loop": {
+    "plan-ledger-tasks-yylo": {
+      "semantics": "complete-request",
+      "placeholders": { "$ARGUMENTS": 1 }
+    },
+    "ralph-loop-yylo": {
       "semantics": "complete-assigned-request",
       "placeholders": { "$ARGUMENTS": 1 }
     },
-    "understand-project": {
+    "understand-project-yylo": {
       "semantics": "structured-main-task-constraints-and-complete-request",
       "placeholders": { "$1": 1, "$2": 1, "$ARGUMENTS": 1 }
+    },
+    "wiki-yylo": {
+      "semantics": "complete-request",
+      "placeholders": { "$ARGUMENTS": 1 }
+    },
+    "workflow-yylo": {
+      "semantics": "complete-request",
+      "placeholders": { "$ARGUMENTS": 1 }
     }
   }
 }

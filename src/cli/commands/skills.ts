@@ -11,15 +11,15 @@ export function createSkillsCommand(): Command {
       `
 Examples:
   $ yylo skills install
-  $ yylo skills install --version 1.0.0
+  $ yylo skills install --version 2.0.0
   $ yylo skills update --force
   $ yylo skills list
   $ yylo skills status
 
 Install and update are the only skills commands that access the network. They
-retrieve a stable yylo-dev/yylo-skills release and install all four canonical
+retrieve a stable yylo-dev/yylo-skills release and install all seven canonical
 skills to .agents/skills, .claude/skills, and .pi/skills. Existing differing
-YYLO skill files require --force; unrelated skills are never removed.
+YYLO skill files require --force; unrelated and customized legacy skills are preserved.
 `,
     );
 
@@ -27,7 +27,7 @@ YYLO skill files require --force; unrelated skills are never removed.
     command
       .command(name)
       .description(`${name === 'install' ? 'Install' : 'Update'} canonical YYLO skills from GitHub`)
-      .option('-v, --version <semver>', 'Exact stable release (for example 1.0.0)')
+      .option('-v, --version <semver>', 'Exact stable release (for example 2.0.0)')
       .addOption(new Option('--skill-version <semver>').hideHelp())
       .option('-f, --force', 'Replace differing YYLO-owned skill directories')
       .action(async (options: { version?: string; skillVersion?: string; force?: boolean }) => {
@@ -43,6 +43,7 @@ YYLO skill files require --force; unrelated skills are never removed.
               ? chalk.green(`✓ Installed YYLO skills ${result.version} via ${result.acquisition}`)
               : chalk.green(`✓ YYLO skills ${result.version} are already installed`),
           );
+          for (const warning of result.warnings ?? []) console.warn(chalk.yellow(`⚠ ${warning}`));
         } catch (error) {
           console.error(chalk.red(`✗ Skill ${name} failed:`));
           console.error(chalk.red(error instanceof Error ? error.message : String(error)));

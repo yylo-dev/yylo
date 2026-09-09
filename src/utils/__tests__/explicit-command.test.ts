@@ -42,7 +42,7 @@ describe('explicit command preflight', () => {
     [['future-command', 'status'], 'prompt'],
     [['future-command', '--dry-run'], 'prompt'],
     [['@@close_loop'], 'prompt'],
-    [['/skill:ralph-loop', '##T1'], 'prompt'],
+    [['/skill:ralph-loop-yylo', '##T1'], 'prompt'],
     [['--', 'integration', 'sync'], 'prompt'],
     [['-p', 'integration sync'], 'prompt'],
     [['--prompt-file', 'prompt.md'], 'prompt'],
