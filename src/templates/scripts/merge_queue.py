@@ -2538,13 +2538,12 @@ def consolidate_review_findings(reviews: list[dict[str, Any]]) -> list[dict[str,
     for review in reviews:
         if not isinstance(review, dict) or not isinstance(review.get("findings"), list):
             raise MergeQueueError("verified review findings projection is malformed")
-        runner = review.get("managed_runner")
-        if not isinstance(runner, dict):
+        reference = review.get("review_reference")
+        if not isinstance(reference, dict):
             raise MergeQueueError("verified review provenance is missing")
         provenance = {"reviewer": review.get("reviewer"), "sequence": review.get("sequence"),
-                      "receipt_path": runner.get("receipt_path"),
-                      "receipt_sha256": runner.get("receipt_sha256"),
-                      "review_result_sha256": review.get("review_result_sha256")}
+                      "receipt_path": reference.get("receipt_path"),
+                      "receipt_sha256": reference.get("receipt_sha256")}
         for finding in review["findings"]:
             digest_value = finding.get("finding_digest") if isinstance(finding, dict) else None
             if not isinstance(digest_value, str) or not re.fullmatch(r"[0-9a-f]{64}", digest_value):
@@ -2561,97 +2560,15 @@ def consolidate_review_findings(reviews: list[dict[str, Any]]) -> list[dict[str,
     return [consolidated[key] for key in sorted(consolidated)]
 
 
-def persist_advisory_followups(controller: Path, task_id: str, candidate_sha: str,
-                               policy_identity: str,
-                               reviews: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Create or verify one ordinary Kanban task for each exact advisory identity."""
-    wrapper = controller / ".juno_task/scripts/kanban.sh"
-    if not wrapper.is_file():
-        raise MergeQueueError("canonical Kanban wrapper is missing for advisory persistence")
-    created: list[dict[str, Any]] = []
-    for finding in consolidate_review_findings(reviews):
-        if finding["blocking"]:
-            continue
-        advisory_identity = digest({"task_id": task_id, "candidate_sha": candidate_sha,
-                                    "policy_identity": policy_identity,
-                                    "finding_digest": finding["finding_digest"]})
-        search = subprocess.run([
-            str(wrapper), "search", "--field", f"advisory_identity={advisory_identity}",
-            "--limit", "2", "--projection", "full", "-f", "json",
-        ], cwd=controller, stdin=subprocess.DEVNULL, text=True, capture_output=True)
-        if search.returncode:
-            raise MergeQueueError(search.stderr.strip() or "advisory lookup failed")
-        try:
-            payload = json.loads(search.stdout)
-            matches = payload.get("tasks", []) if isinstance(payload, dict) else payload
-        except json.JSONDecodeError as exc:
-            raise MergeQueueError("advisory lookup is not valid JSON") from exc
-        if not isinstance(matches, list) or len(matches) > 1:
-            raise MergeQueueError("advisory identity is ambiguous")
-        if matches:
-            task = matches[0]
-            if (not isinstance(task, dict) or task.get("fields", {}).get("advisory_identity") != advisory_identity
-                    or task.get("fields", {}).get("source_candidate_sha") != candidate_sha
-                    or task.get("fields", {}).get("finding_digest") != finding["finding_digest"]):
-                raise MergeQueueError("existing advisory persistence evidence mismatched")
-            created.append({"task_id": task.get("id"), "advisory_identity": advisory_identity,
-                            "outcome": "reused"})
-            continue
-        body = (f"Source review advisory for [task_id]{task_id}[/task_id].\n\n"
-                f"Candidate: `{candidate_sha}`\nPolicy: `{policy_identity}`\n"
-                f"Finding policy: `{finding['finding_policy_revision']}`\n"
-                f"Finding digest: `{finding['finding_digest']}`\n"
-                f"Severity: `{finding['normalized_severity']}`\n"
-                f"Affected paths: {', '.join(finding['paths'])}\n"
-                f"Evidence: {finding['evidence']}\nImpact: {finding['impact']}\n"
-                f"Failure condition: {finding['failure_condition']}\n"
-                f"Acceptance condition: {finding['acceptance_condition']}\n"
-                f"Reviewer receipts: `{canonical(finding['provenance']).strip()}`\n")
-        receipt_path = (controller / ".juno_task/runtime/merge-queue/advisories" / task_id
-                        / candidate_sha / f"{advisory_identity}.json")
-        receipt_path.parent.mkdir(parents=True, exist_ok=True)
-        if receipt_path.exists():
-            raise MergeQueueError("advisory receipt exists without canonical task readback")
-        fd, body_path = tempfile.mkstemp(prefix=".advisory-", dir=receipt_path.parent)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                stream.write(body)
-            result = subprocess.run([
-                str(wrapper), "create", "--title", f"[REVIEW_ADVISORY] {finding['code']}",
-                "--body-file", body_path, "--status", "backlog",
-                "--tags", "REVIEW_ADVISORY", "YY_MERGE", finding["normalized_severity"].upper(),
-                "--related-tasks", task_id,
-                "--field", f"advisory_identity={json.dumps(advisory_identity)}",
-                "--field", f"source_candidate_sha={json.dumps(candidate_sha)}",
-                "--field", f"policy_identity={json.dumps(policy_identity)}",
-                "--field", f"finding_digest={json.dumps(finding['finding_digest'])}",
-                "--receipt-file", str(receipt_path),
-            ], cwd=controller, stdin=subprocess.DEVNULL, text=True, capture_output=True)
-        finally:
-            Path(body_path).unlink(missing_ok=True)
-        if result.returncode:
-            raise MergeQueueError(result.stderr.strip() or "advisory persistence failed")
-        try:
-            mutation = json.loads(result.stdout)
-            advisory_task_id = mutation.get("id") if isinstance(mutation, dict) else None
-        except json.JSONDecodeError:
-            advisory_task_id = None
-        # Mutation output differs across supported Kanban projections; the
-        # exact field lookup is the authoritative readback.
-        verify = subprocess.run([
-            str(wrapper), "search", "--field", f"advisory_identity={advisory_identity}",
-            "--limit", "2", "--projection", "full", "-f", "json",
-        ], cwd=controller, stdin=subprocess.DEVNULL, text=True, capture_output=True)
-        if verify.returncode:
-            raise MergeQueueError("created advisory readback failed")
-        verify_payload = json.loads(verify.stdout)
-        verify_matches = verify_payload.get("tasks", []) if isinstance(verify_payload, dict) else verify_payload
-        if not isinstance(verify_matches, list) or len(verify_matches) != 1:
-            raise MergeQueueError("created advisory persistence cannot be proven")
-        advisory_task_id = verify_matches[0].get("id") or advisory_task_id
-        created.append({"task_id": advisory_task_id, "advisory_identity": advisory_identity,
-                        "outcome": "created", "receipt": evidence_reference(receipt_path)})
-    return created
+def delivery_advisories(reviews: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return bounded nonblocking findings for the existing delivery evidence.
+
+    The immutable review references remain the provenance.  This projection is
+    deliberately side-effect free: review advisories never create Ledger tasks
+    and an external follow-up write cannot become an integration gate.
+    """
+    return [finding for finding in consolidate_review_findings(reviews)
+            if not finding["blocking"]]
 
 
 def _kanban_protected_projection(task: dict[str, Any]) -> dict[str, Any]:
@@ -3368,9 +3285,9 @@ def prior_findings_summary(controller: Path, record: dict[str, Any],
         references = []
         for review in compact_findings:
             if (not isinstance(review, dict) or not isinstance(review.get("findings"), list)
-                    or not isinstance(review.get("managed_runner"), dict)):
+                    or not isinstance(review.get("review_reference"), dict)):
                 raise MergeQueueError("prior cancellation-bound findings are malformed")
-            runner = review["managed_runner"]
+            runner = review["review_reference"]
             references.append(
                 f"{runner.get('receipt_path')} sha256={runner.get('receipt_sha256')}")
             for finding in review["findings"]:
@@ -3433,9 +3350,10 @@ def prior_findings_summary(controller: Path, record: dict[str, Any],
             f"{evidence_path.resolve()} sha256={hashlib.sha256(data).hexdigest()}"
         )
         for review in evidence.get("reviews", []):
-            managed = review.get("managed_runner", {})
+            reference = review.get("review_reference", {})
             runner = bounded_json_reference(
-                {"path": managed.get("receipt_path"), "sha256": managed.get("receipt_sha256")},
+                {"path": reference.get("receipt_path"),
+                 "sha256": reference.get("receipt_sha256")},
                 limit, "prior managed reviewer receipt",
             )
             response = bounded_json_reference(
@@ -3522,9 +3440,16 @@ def render_managed_review_prompt(controller: Path, candidate_root: Path,
         "affected_validation": attempt.get("validation", []),
         "full_suite_admission": admission,
     })
+    try:
+        requirement_identity = task_runtime.canonical_requirement_identity(controller, task_id)
+    except task_runtime.TaskWorkspaceError as exc:
+        raise MergeQueueError(str(exc)) from exc
     requirements = (
-        f"Canonical Kanban task ({task_path}, sha256={hashlib.sha256(task_data).hexdigest()}):\n\n"
+        f"Canonical Kanban task ({task_path}, requirements identity "
+        f"{requirement_identity['requirements_sha256']}):\n\n"
         + task_data.decode("utf-8")
+        + "\n\nCanonical task/PDR revision identity:\n\n"
+        + canonical(requirement_identity)
         + "\n\nQueue-bound risk plan:\n\n" + canonical(plan)
         + "\n\nQueue-bound validation summary:\n\n" + validation_bundle
     )
@@ -3535,7 +3460,8 @@ def render_managed_review_prompt(controller: Path, candidate_root: Path,
         "repository": str(candidate_root.resolve()),
         "base_sha": plan["candidate"]["base_sha"],
         "tip_sha": plan["candidate"]["candidate_sha"],
-        "checklist_path": f"{task_path} sha256={hashlib.sha256(task_data).hexdigest()}",
+        "checklist_path": (f"{task_path} requirements_sha256="
+                           f"{requirement_identity['requirements_sha256']}"),
         "findings_summary_path": findings_path,
         "validation_evidence_path": validation_path,
         "requirements_bundle": requirements,
@@ -4578,9 +4504,7 @@ def _overlapped_review_and_suite(
                              / f"attempt-{claimed['attempt_number']}.json")
         cancellation = lifecycle_runtime.atomic_json(
             cancellation_path, cancellation_body, exclusive=True)
-        advisories = persist_advisory_followups(
-            controller, task_id, candidate_sha, plan["policy_identity"],
-            compact_reviews)
+        advisories = delivery_advisories(compact_reviews)
         review_round = record.get("review_round", 1)
         outcome = ("REVIEW_FINDINGS_EXHAUSTED" if review_round >= 2
                    else "REVIEW_FINDINGS")
@@ -4592,7 +4516,7 @@ def _overlapped_review_and_suite(
                    "review_suite_overlap": {"events": overlap["events"],
                                             "elapsed_ms": overlap["elapsed_ms"]},
                    "blocking_findings": compact_reviews,
-                   "advisory_followups": advisories}
+                   "delivery_advisories": advisories}
         persist_attempt(controller, updated, state_name=outcome)
         return updated
     if overlap["suite_error"] is not None:
@@ -4646,12 +4570,11 @@ def _overlapped_review_and_suite(
     reference = evidence_reference(evidence_file)
     verified = risk_runtime.verify_candidate_evidence(
         policy, request, risk_flags(record), reference)
-    advisories = persist_advisory_followups(
-        controller, task_id, candidate_sha, plan["policy_identity"], compact_reviews)
+    advisories = delivery_advisories(compact_reviews)
     outcome = "RISK_EVIDENCE_READY" if verified["eligible"] else "REVIEW_FINDINGS"
     risk_state = {**current_stored, "status": outcome, "evidence": reference}
     updated = {**current_attempt, "risk": risk_state, "review": risk_state,
-               "outcome": outcome, "advisory_followups": advisories}
+               "outcome": outcome, "delivery_advisories": advisories}
     persist_attempt(controller, updated,
                     state_name="AWAITING_RISK" if verified["eligible"] else outcome)
     return updated
@@ -5003,9 +4926,8 @@ def merge_review(controller: Path, task_id: str, *, overlap_suite: bool = False)
             compact_reviews = [risk_runtime._compact_review(
                 review, plan["reviewer_sequence"][index], index + 1, candidate_sha,
                 plan["policy_identity"], plan) for index, review in enumerate(reviews)]
-            advisory_followups = persist_advisory_followups(
-                controller, task_id, candidate_sha, plan["policy_identity"], compact_reviews)
-            attempt = {**attempt, "advisory_followups": advisory_followups}
+            advisories = delivery_advisories(compact_reviews)
+            attempt = {**attempt, "delivery_advisories": advisories}
         except MergeValidationError as exc:
             if claimed is not None and exc.receipt_reference is not None:
                 failed_admission = (
@@ -7096,6 +7018,8 @@ def _status_task_row(controller: Path, repository: Path, config: dict[str, Any],
            "tip_sha": record.get("tip_sha"), "candidate_sha": attempt.get("candidate_sha"),
            "outcome": attempt.get("outcome") or record.get("last_queue_outcome"),
            "risk_status": risk.get("status"),
+           "advisory_count": (len(attempt.get("delivery_advisories"))
+                              if isinstance(attempt.get("delivery_advisories"), list) else 0),
            "review_attempt_counter": progress.get("review_attempt_counter"),
            "recovery_command": (attempt.get("recovery_command") if action or detail else None),
            "kanban_sync_required": (isinstance(record.get("kanban_sync"), dict)
@@ -7144,6 +7068,8 @@ def _status_task_row(controller: Path, repository: Path, config: dict[str, Any],
                 "steps": [{"reviewer": step.get("reviewer"), "status": step.get("status")}
                           for step in steps[:MERGE_STATUS_DETAIL_ITEMS] if isinstance(step, dict)],
             }),
+            "delivery_advisories": _bounded_status_value(
+                attempt.get("delivery_advisories", [])),
             "post_integration": {str(key)[:MERGE_STATUS_STRING_CHARS]: ({"status": value.get("status"),
                                          "outcome": value.get("outcome")}
                                         if isinstance(value, dict) else _bounded_status_value(value))
