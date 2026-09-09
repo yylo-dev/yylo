@@ -66,17 +66,21 @@ stable version:
 
 ```bash
 yy skills install
-yy skills install --version 1.0.0
+yy skills install --version 2.0.0
 yy skills update --force
 yy skills status
 ```
 
 Only `skills install` and `skills update` access the network. Acquisition is
 staged through `npx skills add` first and falls back to a shallow exact-tag Git
-clone. The four canonical skills are copied to `.agents/skills`,
-`.claude/skills`, and `.pi/skills`. Differing YYLO skill directories are refused
-unless `--force` is supplied; unrelated skills are preserved. `skills list` and
-`skills status` use only the local install record.
+clone. The seven user-intent-first skills (`artifact-yylo`, `ledger-tasks-yylo`,
+`plan-ledger-tasks-yylo`, `ralph-loop-yylo`, `understand-project-yylo`,
+`wiki-yylo`, and `workflow-yylo`) are copied to `.agents/skills`,
+`.claude/skills`, and `.pi/skills`. Differing canonical directories are refused
+unless `--force` is supplied. An explicit install/update retires a legacy YYLO
+skill only when its local install record and current digest prove it unchanged;
+customized legacy and unrelated skills are preserved with a warning. `skills
+list` and `skills status` use only the local install record.
 
 ## What YYLO owns
 

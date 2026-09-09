@@ -288,7 +288,7 @@ describe('Binary Execution Tests', () => {
       const servicesDir = path.join(homeDir, '.yylo', 'services');
       const installedExtension = path.join(projectDir, '.pi/extensions/juno-skill-preprocessor.ts');
       const compiledExtension = path.join(projectDir, '.pi/extensions/juno-skill-preprocessor.mjs');
-      const installedSkill = path.join(projectDir, '.pi/skills/ralph-loop/SKILL.md');
+      const installedSkill = path.join(projectDir, '.pi/skills/ralph-loop-yylo/SKILL.md');
       const harnessPath = path.join(tempDir, 'invoke-installed-preprocessor.mjs');
       const observedPromptPath = path.join(tempDir, 'prompt-before-preprocessor.txt');
       const kanbanCallsPath = path.join(tempDir, 'kanban-read-calls.txt');
@@ -313,7 +313,7 @@ describe('Binary Execution Tests', () => {
       await fs.copy(fixturePiExtension, installedExtension);
       await fs.writeFile(
         installedSkill,
-        '---\nname: ralph-loop\n---\nFixture instructions for $ARGUMENTS\n',
+        '---\nname: ralph-loop-yylo\n---\nFixture instructions for $ARGUMENTS\n',
       );
       await execa(path.join(PROJECT_ROOT, 'node_modules/.bin/esbuild'), [
         installedExtension,
@@ -367,7 +367,7 @@ exit 1
 
       const noCodeDirective = `${String.fromCharCode(64, 64)}no_code`;
       const payload = [
-        '%ralph-loop ## oD5g4o',
+        '%ralph-loop-yylo ## oD5g4o',
         'What is the root cause of 504',
         noCodeDirective,
       ].join('\n');
@@ -389,7 +389,7 @@ exit 1
 
       expect(result.exitCode, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`).toBe(0);
       const rewritten = await fs.readFile(observedPromptPath, 'utf8');
-      expect(rewritten).toBe(payload.replace('%ralph-loop', '/skill:ralph-loop'));
+      expect(rewritten).toBe(payload.replace('%ralph-loop-yylo', '/skill:ralph-loop-yylo'));
       expect(rewritten.split(noCodeDirective)).toHaveLength(2);
       expect(await fs.readFile(kanbanCallsPath, 'utf8')).toContain('get oD5g4o');
       for (const exact of [
@@ -400,7 +400,7 @@ exit 1
         expect(result.stdout.split(exact)).toHaveLength(2);
       }
       expect(result.stdout).toContain(
-        `<skill name="ralph-loop" location="${await fs.realpath(installedSkill)}">`,
+        `<skill name="ralph-loop-yylo" location="${await fs.realpath(installedSkill)}">`,
       );
       expect(`${result.stdout}\n${result.stderr}`).toContain('fixture-no-provider');
       expect(await fs.pathExists(path.join(projectDir, '.juno_task', 'tasks'))).toBe(false);
@@ -1073,7 +1073,7 @@ exit 1
       expect(await fs.pathExists(path.join(tempDir, 'AGENTS.md'))).toBe(true);
       expect(await fs.pathExists(path.join(tempDir, 'CLAUDE.md'))).toBe(true);
       for (const root of ['.agents/skills', '.claude/skills', '.pi/skills']) {
-        expect(await fs.pathExists(path.join(tempDir, root, 'kanban-workflow/SKILL.md'))).toBe(false);
+        expect(await fs.pathExists(path.join(tempDir, root, 'ledger-tasks-yylo/SKILL.md'))).toBe(false);
       }
       expect(await fs.readFile(configPath, 'utf8')).toBe(configBytes);
       const updatedPolicy = await fs.readJson(policyPath);
