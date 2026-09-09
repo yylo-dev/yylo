@@ -7794,10 +7794,23 @@ def target_arbiter_status(controller: Path) -> dict[str, Any]:
                 and row.get("target_ref") == config["target_ref"]
                 and row.get("state") in TARGET_ARBITER_WORK_STATES]
     eligible.sort(key=lambda item: item["task_id"])
-    if state and state.get("state") == "ACTIVE" and observation["status"] == "alive":
+    conflict = next((row for row in eligible if row["state"] == "CONFLICT"), None)
+    resume = task_runtime.decisions.plan_resume(task_runtime.decisions.ResumeFacts(
+        owner="target", producer_status=observation["status"],
+        launch_observed=state is not None,
+        exact_terminal=isinstance(state, dict) and state.get("state") != "ACTIVE",
+        resumable_stage="FINALIZING" if isinstance(state, dict)
+        and state.get("outcome") == "POST_INTEGRATION_PENDING" else "FIFO",
+        conflict=conflict is not None))
+    if resume.classification == task_runtime.decisions.RESUME_LIVE_AUTHORITY:
         reason_code, next_action = "arbiter_running", "observe with: yy merge arbiter status"
+    elif resume.classification == task_runtime.decisions.RESUME_UNKNOWN_OUTCOME:
+        reason_code, next_action = resume.reason_code, "inspect target arbiter process-instance evidence"
+    elif conflict is not None:
+        reason_code = resume.reason_code
+        next_action = f"yy merge resolve {conflict['task_id']}"
     elif eligible:
-        reason_code, next_action = "eligible_work", "yy merge arbiter run"
+        reason_code, next_action = "eligible_work", "yy merge resume"
     else:
         reason_code, next_action = "queue_idle", "none: worker exits while target queue is idle"
     return {"schema_version": TARGET_ARBITER_SCHEMA,
@@ -7807,6 +7820,11 @@ def target_arbiter_status(controller: Path) -> dict[str, Any]:
             "current_fifo": (current_fifo_identity(controller, config, None)
                              if eligible else None),
             "eligible_task_ids": [row["task_id"] for row in eligible],
+            "resume_decision": {
+                "classification": resume.classification, "admitted": resume.admitted,
+                "owner_command": resume.owner_command,
+                "restart_stage": resume.restart_stage,
+                "reason_code": resume.reason_code},
             "reason_code": reason_code, "next_action": next_action}
 
 
@@ -8393,10 +8411,15 @@ def merge_drive(controller: Path, through: Optional[str] = None) -> dict[str, An
         _drive_scope(controller, config, through)
         previous = _arbiter_state(root)
         observation = _arbiter_observation(previous)
-        if (previous and previous.get("state") == "ACTIVE"
-                and observation["status"] != "dead"):
+        resume = task_runtime.decisions.plan_resume(task_runtime.decisions.ResumeFacts(
+            owner="target", producer_status=observation["status"],
+            launch_observed=previous is not None,
+            exact_terminal=isinstance(previous, dict) and previous.get("state") != "ACTIVE",
+            resumable_stage="FIFO"))
+        if previous and previous.get("state") == "ACTIVE" and not resume.admitted:
             raise MergeQueueError(
-                "target arbiter predecessor is not provably dead; expiry alone never grants takeover")
+                f"target arbiter resume refused ({resume.reason_code}); "
+                "expiry alone never grants takeover")
         attempt = int((previous or {}).get("attempt") or 0) + 1
         token = secrets.token_urlsafe(32)
         active = {"schema_version": TARGET_ARBITER_SCHEMA,
@@ -8437,6 +8460,8 @@ def parser() -> argparse.ArgumentParser:
     status_command.add_argument("--human", action="store_true", help=argparse.SUPPRESS)
     drive = sub.add_parser("drive")
     drive.add_argument("--through")
+    resume = sub.add_parser("resume")
+    resume.add_argument("--through")
     arbiter = sub.add_parser("arbiter")
     arbiter_sub = arbiter.add_subparsers(dest="arbiter_operation", required=True)
     arbiter_sub.add_parser("status")
@@ -8543,7 +8568,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             result = merge_plan(controller, args.task_id, args.against)
             print(canonical(result) if args.json else human_plan(result))
             return 0
-        audit_operation = args.operation
+        audit_operation = "drive" if args.operation == "resume" else args.operation
         if args.operation == "arbiter":
             audit_operation = "status" if args.arbiter_operation == "status" else "drive"
         audit_task_id = getattr(args, "task_id", None)
@@ -8554,8 +8579,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         if args.operation == "status":
             level = "full" if args.full else "detail" if args.detail is not None else "summary"
             result = status_projection(controller, level=level, task_id=(args.detail or None))
-        elif args.operation == "drive":
+        elif args.operation in {"drive", "resume"}:
             result = merge_drive(controller, args.through)
+            if args.operation == "resume":
+                result = {**result, "resume_owner": "target-arbiter"}
         elif args.operation == "arbiter":
             result = (target_arbiter_status(controller) if args.arbiter_operation == "status"
                       else merge_drive(controller, args.through))

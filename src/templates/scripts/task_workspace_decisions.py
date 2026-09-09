@@ -581,6 +581,83 @@ LEASE_CODE_PRODUCER_UNKNOWN = "lease_producer_unknown"
 LEASE_CODE_NOT_ACTIVE = "lease_not_active"
 LEASE_CODE_RELEASED = "lease_released"
 
+# One vocabulary shared by task-run attempts and the protected-target arbiter.
+# These are classifications, not new durable workflow states.
+RESUME_LAUNCH_NOT_STARTED = "launch_not_started"
+RESUME_EXACT_TERMINAL_CAPTURE = "exact_terminal_capture"
+RESUME_DETERMINISTIC_PHASE = "resumable_deterministic_phase"
+RESUME_REAL_CONFLICT = "real_conflict"
+RESUME_STALE_AUTHORITY = "stale_authority"
+RESUME_UNKNOWN_OUTCOME = "unknown_outcome"
+RESUME_BUDGET_EXHAUSTED = "budget_exhausted"
+RESUME_LIVE_AUTHORITY = "live_authority"
+
+
+@dataclass(frozen=True)
+class ResumeFacts:
+    """Verified facts supplied by an existing task or target execution owner."""
+
+    owner: str  # "task" | "target"
+    producer_status: str = "inactive"  # "alive" | "dead" | "unknown" | "inactive"
+    launch_observed: bool = False
+    exact_terminal: bool = False
+    resumable_stage: Optional[str] = None
+    conflict: bool = False
+    stale_authority: bool = False
+    ambiguous: bool = False
+    budget_remaining: bool = True
+    explicit_handoff: bool = False
+
+
+@dataclass(frozen=True)
+class ResumeDecision:
+    """Earliest safe continuation under the already-fenced execution owner."""
+
+    classification: str
+    admitted: bool
+    owner_command: str
+    restart_stage: Optional[str]
+    reason_code: str
+
+
+def plan_resume(facts: ResumeFacts) -> ResumeDecision:
+    """Classify one resume without granting authority from elapsed time.
+
+    The caller must verify receipts, Git bytes, process-instance anchors, and
+    handoff evidence before constructing ``facts``. This planner only chooses
+    the smallest safe stage; it never creates another worker or target owner.
+    """
+    if facts.owner not in {"task", "target"}:
+        raise ValueError(f"unknown resume owner: {facts.owner!r}")
+    command = "yy task run" if facts.owner == "task" else "yy merge arbiter run"
+    if facts.ambiguous or facts.producer_status == "unknown":
+        return ResumeDecision(RESUME_UNKNOWN_OUTCOME, False, command, None,
+                              "material_outcome_ambiguity")
+    if facts.conflict:
+        return ResumeDecision(RESUME_REAL_CONFLICT, False, command, None,
+                              "explicit_conflict_resolution_required")
+    if facts.stale_authority:
+        return ResumeDecision(RESUME_STALE_AUTHORITY, False, command, None,
+                              "stale_fence_refused")
+    if not facts.budget_remaining:
+        return ResumeDecision(RESUME_BUDGET_EXHAUSTED, False, command, None,
+                              "bounded_attempt_budget_exhausted")
+    if facts.producer_status == "alive":
+        return ResumeDecision(RESUME_LIVE_AUTHORITY, False, command, None,
+                              "existing_owner_live")
+    if facts.exact_terminal:
+        return ResumeDecision(RESUME_EXACT_TERMINAL_CAPTURE, True, command,
+                              facts.resumable_stage, "reuse_exact_terminal")
+    if not facts.launch_observed:
+        return ResumeDecision(RESUME_LAUNCH_NOT_STARTED, True, command,
+                              facts.resumable_stage or "DISPATCH",
+                              "dispatch_under_existing_owner")
+    if facts.producer_status == "dead" or facts.explicit_handoff:
+        return ResumeDecision(RESUME_DETERMINISTIC_PHASE, True, command,
+                              facts.resumable_stage, "resume_verified_stage")
+    return ResumeDecision(RESUME_UNKNOWN_OUTCOME, False, command, None,
+                          "material_outcome_ambiguity")
+
 
 @dataclass(frozen=True)
 class LeaseObservation:

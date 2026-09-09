@@ -5,7 +5,7 @@ import { Command } from 'commander';
 import { routeControlPlane } from '../../utils/control-plane-router.js';
 import { checkpointControllerAfterFinalization } from '../../utils/controller-checkpoint.js';
 
-export type MergeQueueOperation = 'status' | 'drive' | 'arbiter-status' | 'arbiter-run' | 'plan' | 'next' | 'resolve' | 'review' | 'reopen' | 'recover-full-suite-failure' | 'recover-repair-predispatch' | 'recover-authority-drift' | 'supersede-lifecycle-journal' | 'reconcile' | 'refresh' | 'withdraw';
+export type MergeQueueOperation = 'status' | 'drive' | 'resume' | 'arbiter-status' | 'arbiter-run' | 'plan' | 'next' | 'resolve' | 'review' | 'reopen' | 'recover-full-suite-failure' | 'recover-repair-predispatch' | 'recover-authority-drift' | 'supersede-lifecycle-journal' | 'reconcile' | 'refresh' | 'withdraw';
 export type MergeQueueInvoker = (
   operation: MergeQueueOperation,
   taskId?: string,
@@ -81,7 +81,7 @@ export async function checkpointMergeQueueAfterFinalization(
     : undefined;
   // Do not checkpoint successful intermediate review/admission transitions.
   // MERGED is persisted only after the terminal Kanban mutation and readback.
-  if (!['next', 'resolve'].includes(operation) || exitCode !== 0
+  if (!['next', 'resolve', 'resume'].includes(operation) || exitCode !== 0
       || payload?.outcome !== 'MERGED' || kanbanPhase?.status !== 'complete') return;
   const checkpointTaskId = typeof payload?.task_id === 'string' ? payload.task_id : undefined;
   if (checkpointTaskId) await checkpoint(controllerRoot, exitCode, checkpointTaskId);
@@ -167,6 +167,13 @@ export function configureMergeQueueCommand(
     .action((options: { through?: string }) => options.through
       ? invoke('drive', undefined, ['--through', options.through])
       : invoke('drive'));
+  merge
+    .command('resume')
+    .description('Resume through the existing fenced target arbiter from the earliest verified stage')
+    .option('--through <task-id>', 'Stop after this FIFO-authorized task')
+    .action((options: { through?: string }) => options.through
+      ? invoke('resume', undefined, ['--through', options.through])
+      : invoke('resume'));
   const arbiter = merge.command('arbiter')
     .description('Observe or explicitly run the one on-demand fenced owner for this protected target');
   arbiter.command('status')
