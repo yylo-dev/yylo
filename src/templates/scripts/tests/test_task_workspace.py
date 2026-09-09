@@ -1738,6 +1738,13 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
             self.assertEqual(result.returncode, 2, operation)
             self.assertIn("invalid choice", result.stderr, operation)
 
+    def test_resume_is_a_thin_public_spelling_for_the_task_run_owner(self) -> None:
+        parsed = task_runtime.parser().parse_args(["resume", "--task", "X"])
+        self.assertEqual((parsed.operation, parsed.task), ("resume", "X"))
+        source = SCRIPT.read_text()
+        self.assertIn('if args.operation in {"run", "resume"}:', source)
+        self.assertIn('"resume_owner": "task-run"', source)
+
     def test_recovery_plan_audit_requires_kanban_routing_policy(self) -> None:
         self.payload("start", "X")
         with mock.patch.dict(os.environ, {
@@ -6531,6 +6538,10 @@ class TaskFencingLeaseTests(TaskWorkspaceFixture):
         self.assertIn("release_receipt", terminal)
         status_after = self.payload("lease-status", "X")
         self.assertEqual(status_after["successor_readiness"]["code"], "lease_released")
+        task_status = self.payload("status", "X")
+        self.assertEqual(task_status["resume_decision"]["classification"],
+                         task_runtime.decisions.RESUME_EXACT_TERMINAL_CAPTURE)
+        self.assertEqual(task_status["resume_decision"]["owner_command"], "yy task run X")
         # The queued idempotent retry proceeds unfenced and stays released.
         again = self.payload("finish", "X")
         self.assertEqual((again["outcome"], self.fencing_record("X")["state"]),
