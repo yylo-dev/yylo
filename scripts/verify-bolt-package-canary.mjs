@@ -52,6 +52,9 @@ try {
     'dist/templates/scripts/integration_candidate.py',
     'dist/templates/scripts/integration_owner_preflight.py',
     'dist/templates/scripts/worktree_lifecycle.py',
+    'dist/templates/scripts/release_train.py',
+    'dist/templates/scripts/tests/test_release_train.py',
+    'dist/templates/wiki/controller/sealed_release_epochs.md',
     'dist/templates/config/lifecycle.json',
     'dist/templates/config/controller-workspace.json',
   ]) {
@@ -59,12 +62,17 @@ try {
   }
 
   const instructionFiles = [
+    'dist/templates/controller-agent/AGENTS.md',
+    'dist/templates/controller-agent/CLAUDE.md',
     'dist/templates/prompts/new_task_workflow.md',
     'dist/templates/prompts/clean_worktree.md',
     'dist/templates/prompts/run_workflow.md',
   ];
   for (const relative of instructionFiles) {
     const instruction = readFileSync(path.join(installed, relative), 'utf8');
+    assert.doesNotMatch(instruction, /release[-_ ]train|sealed release epoch/iu,
+      `packed retired release-train instruction: ${relative}`);
+    if (relative.includes('/controller-agent/')) continue;
     assert.match(instruction, /yy task preflight TASK_ID/u, `missing task preflight: ${relative}`);
     assert.match(instruction, /\.\.\/wiki\/controller\/task_dependency_hydration\.md/u,
       `stale controller wiki link: ${relative}`);
