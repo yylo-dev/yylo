@@ -9,6 +9,8 @@ import { fileURLToPath } from 'node:url';
 
 export const SCHEMA = 'juno.lifecycle_simplification.corpus.v1';
 export const RESULT_SCHEMA = 'juno.lifecycle_simplification.baseline.v1';
+export const ACCEPTANCE_SCHEMA = 'juno.lifecycle_simplification.acceptance_observation.v1';
+export const ACCEPTANCE_RESULT_SCHEMA = 'juno.lifecycle_simplification.acceptance.v1';
 const METRICS = [
   'active_wall_ms',
   'whole_delivery_ms',
@@ -204,6 +206,102 @@ export function aggregateManifest(manifest, options = {}) {
     ).size,
     unavailable_measurements: manifest.unavailable_measurements,
     complete: true,
+  };
+}
+
+function acceptanceFail(message) {
+  throw new Error(`invalid lifecycle acceptance observation: ${message}`);
+}
+
+/**
+ * Aggregate a bounded candidate replay without converting missing telemetry into
+ * improvement. The caller supplies observations; the frozen corpus stays unchanged.
+ */
+export function aggregateAcceptance(manifest, observation, options = {}) {
+  const baseline = aggregateManifest(manifest, options);
+  if (observation?.schema_version !== ACCEPTANCE_SCHEMA) acceptanceFail('schema_version');
+  if (observation.baseline_corpus_sha256 !== manifest.manifest_sha256)
+    acceptanceFail('baseline_corpus_sha256');
+  for (const field of ['candidate_commit', 'candidate_tree']) {
+    if (typeof observation[field] !== 'string' || !/^[0-9a-f]{40}$/.test(observation[field]))
+      acceptanceFail(field);
+  }
+  if (!Array.isArray(observation.identities) || !observation.identities.length)
+    acceptanceFail('identities');
+  for (const identity of observation.identities) {
+    if (!identity.name || typeof identity.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(identity.sha256))
+      acceptanceFail('identity digest');
+  }
+  if (!Array.isArray(observation.scenarios)) acceptanceFail('scenarios');
+  const byId = new Map(observation.scenarios.map((scenario) => [scenario.id, scenario]));
+  const scenarios = baseline.scenarios.map((baselineScenario) => {
+    const candidate = byId.get(baselineScenario.id);
+    if (!candidate) acceptanceFail(`missing scenario ${baselineScenario.id}`);
+    if (!Array.isArray(candidate.repeats) || candidate.repeats.length < 3)
+      acceptanceFail(`${candidate.id} requires at least three repeats`);
+    if (candidate.repeats.some((repeat) => repeat.outcome !== 'passed'))
+      acceptanceFail(`${candidate.id} safety replay failed`);
+    const walls = candidate.repeats.map((repeat) => repeat.fixture_wall_ms);
+    if (walls.some((value) => typeof value !== 'number' || !Number.isFinite(value) || value < 0))
+      acceptanceFail(`${candidate.id} fixture_wall_ms`);
+    const interventions = candidate.repeats.map((repeat) => repeat.coordination_interventions);
+    if (interventions.some((value) => value !== null &&
+        (typeof value !== 'number' || !Number.isFinite(value) || value < 0)))
+      acceptanceFail(`${candidate.id} coordination_interventions`);
+    return {
+      id: candidate.id,
+      cohort: baselineScenario.cohort,
+      weight: baselineScenario.weight,
+      guarantees: baselineScenario.guarantees,
+      selector: candidate.selector,
+      safety_passed: true,
+      fixture_wall_ms: summarize(walls),
+      coordination_interventions: interventions.every((value) => value !== null)
+        ? summarize(interventions) : null,
+    };
+  });
+  if (byId.size !== scenarios.length) acceptanceFail('unexpected scenario');
+  const routine = scenarios.filter((scenario) => scenario.cohort === 'routine');
+  const targetComplete = routine.every((scenario) => scenario.coordination_interventions !== null);
+  const candidateWeightedMedian = targetComplete
+    ? routine.reduce((sum, scenario) =>
+      sum + scenario.weight * scenario.coordination_interventions.median, 0)
+    : null;
+  const reduction = candidateWeightedMedian === null
+    ? null
+    : 1 - candidateWeightedMedian / baseline.primary_target.baseline_weighted_median;
+  const safetyPassed = scenarios.every((scenario) => scenario.safety_passed);
+  const targetPassed = reduction !== null && reduction >= baseline.primary_target.reduction_required;
+  return {
+    schema_version: ACCEPTANCE_RESULT_SCHEMA,
+    baseline_corpus_sha256: manifest.manifest_sha256,
+    candidate: {
+      commit: observation.candidate_commit,
+      tree: observation.candidate_tree,
+      identities: observation.identities,
+      environment: observation.environment,
+    },
+    safety: { passed: safetyPassed, scenario_count: scenarios.length },
+    primary_target: {
+      metric: baseline.primary_target.metric,
+      cohort: baseline.primary_target.cohort,
+      baseline_weighted_median: baseline.primary_target.baseline_weighted_median,
+      candidate_weighted_median: candidateWeightedMedian,
+      reduction,
+      reduction_required: baseline.primary_target.reduction_required,
+      stretch_reduction: baseline.primary_target.stretch_reduction,
+      complete: targetComplete,
+      passed: targetPassed,
+    },
+    readiness: safetyPassed && targetPassed ? 'ACCEPTED' : 'NEEDS_DECISION',
+    reason: !safetyPassed ? 'safety_replay_failed'
+      : !targetComplete ? 'target_metric_unknown'
+        : !targetPassed ? 'primary_target_not_reached' : null,
+    scenarios,
+    unavailable_measurements: observation.unavailable_measurements ?? [],
+    percentile_policy: 'three repeats support median/range only; no p99 claim',
+    analysis_complete: true,
+    next_version_accepted: safetyPassed && targetPassed,
   };
 }
 
