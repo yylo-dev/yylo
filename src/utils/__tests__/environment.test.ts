@@ -425,6 +425,7 @@ describe('Terminal Capabilities', () => {
     });
 
     test('should return none when colors are not supported', () => {
+      delete process.env.FORCE_COLOR;
       process.env.NO_COLOR = '1';
       expect(getColorSupport()).toBe('none');
     });
