@@ -26,6 +26,9 @@ publication, Git tag, GitHub release, push, or deployment is implied.
 - **Template copying invokes the correct script entry.** The build now executes
   the intended template copier and verifies the resulting candidate payload
   (`2d6be606c`).
+- **Lifecycle routing covers resumable operations.** The launcher routes the
+  registered `task resume` and `merge resume` commands through the same fenced
+  orchestration boundary as their CLI registrations.
 - **Exact-base lock updates remain merge-admissible.** Merge composition admits
   the package-lock changes produced from the frozen exact base (`6d540e520`).
 - **Candidate guidance and managed identity match the shipped generation.**
