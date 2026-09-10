@@ -89,6 +89,69 @@ install_juno_admission_fixture = _fixture.install_juno_admission_fixture
 PACKAGE_ROOT = Path(_fixture.__file__).resolve().parents[4]
 PUBLIC_YY = PACKAGE_ROOT / "dist/bin/yylo.sh"
 
+
+def install_exact_lock_hydration_fixture(controller: Path, worktree: Path,
+                                          task_id: str) -> None:
+    """Materialize and bind a deterministic minimal dependency tree for a task."""
+    config = task_runtime.load_config(controller)
+    rows = [*config["focused_validation"], config["full_suite_validation"]]
+    for profile in config.get("validation_profiles") or []:
+        rows.extend(profile["commands"])
+    seen: set[str] = set()
+    for row in rows:
+        relative = task_runtime.normalized_relative(row["cwd"], "validation cwd")
+        if relative in seen:
+            continue
+        seen.add(relative)
+        package = worktree / relative
+        lock = package / "package-lock.json"
+        if not lock.is_file():
+            continue
+        node_modules = package / "node_modules"
+        node_modules.mkdir(parents=True, exist_ok=True)
+        try:
+            package_json = json.loads((package / "package.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            package_json = {}
+        try:
+            lock_json = json.loads(lock.read_text())
+        except json.JSONDecodeError:
+            lock_json = {}
+        installed: dict[str, dict[str, str]] = {}
+        dependencies = package_json.get("dependencies") or {}
+        for name, requested in sorted(dependencies.items()):
+            locked = (lock_json.get("packages") or {}).get(f"node_modules/{name}", {})
+            version = locked.get("version")
+            if not isinstance(version, str):
+                version = str(requested).lstrip("^~<>= ") or "0.0.0"
+            dependency = node_modules / Path(name)
+            dependency.mkdir(parents=True, exist_ok=True)
+            (dependency / "package.json").write_text(json.dumps(
+                {"name": name, "version": version}, sort_keys=True) + "\n")
+            installed[f"node_modules/{name}"] = {"version": version}
+        (node_modules / ".package-lock.json").write_text(json.dumps({
+            "name": package_json.get("name", "fixture"),
+            "version": package_json.get("version", "1.0.0"),
+            "lockfileVersion": 3, "packages": installed,
+        }, sort_keys=True) + "\n")
+        (node_modules / ".yylo-package-lock.sha256").write_text(
+            hashlib.sha256(lock.read_bytes()).hexdigest() + "\n")
+
+    content = task_runtime._dependency_content_manifest(worktree, config)
+    data = (json.dumps(content, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    manifest = (controller / ".juno_task/runtime/test-fixture-hydration" /
+                task_id / "content-manifest.json")
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_bytes(data)
+    state = task_runtime.read_state(controller)
+    record = state["tasks"][task_id]
+    record.setdefault("hydration", {})["content_manifest"] = {
+        "path": str(manifest.resolve()), "sha256": hashlib.sha256(data).hexdigest(),
+        "file_count": len(content),
+    }
+    task_runtime.write_state(controller, state)
+
+
 # Immutable creation-order authorities from the two production defect shapes.
 # 0IttWR differs only by its originally admitted juno_kanban subtree.
 VHC90C_CREATION_PATHS = [
@@ -2105,6 +2168,31 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
             "shared real-Git fixture declarations drifted from admission "
             "requirements; update real_git_fixture.py in the same change",
         )
+
+    def test_exact_lock_fixture_binds_stamp_and_installed_content_manifest(self) -> None:
+        self.payload("start", "X")
+        worktree = self.workspaces / "X"
+        package = worktree / "src"
+        (package / "package.json").write_text(json.dumps({
+            "name": "fixture", "version": "1.0.0", "dependencies": {"left-pad": "1.3.0"},
+        }) + "\n")
+        (package / "package-lock.json").write_text(json.dumps({
+            "name": "fixture", "version": "1.0.0", "lockfileVersion": 3,
+            "packages": {"": {"name": "fixture", "version": "1.0.0",
+                                "dependencies": {"left-pad": "1.3.0"}},
+                         "node_modules/left-pad": {"version": "1.3.0"}},
+        }) + "\n")
+
+        install_exact_lock_hydration_fixture(self.controller, worktree, "X")
+
+        record = task_runtime.read_state(self.controller)["tasks"]["X"]
+        stamp = package / "node_modules/.yylo-package-lock.sha256"
+        self.assertEqual(stamp.read_text().strip(), hashlib.sha256(
+            (package / "package-lock.json").read_bytes()).hexdigest())
+        self.assertIn("src/node_modules/left-pad/package.json", json.loads(
+            Path(record["hydration"]["content_manifest"]["path"]).read_text()))
+        task_runtime._verify_dependency_tree(
+            worktree, task_runtime.load_config(self.controller), record["hydration"])
 
     def test_declared_generator_and_managed_outputs_are_hash_bound_and_queue_at_byte_parity(self) -> None:
         fixtures = self.install_declared_output_fixtures()
