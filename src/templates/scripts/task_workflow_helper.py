@@ -2151,20 +2151,6 @@ def grouped_coherence(controller: Path, repository: Path, head: str,
     tree_paths = set(_git(repository, "ls-tree", "-r", "--name-only", head).splitlines())
     runtime_prefix = ".juno_task/scripts/"
     template_prefix = "juno-code/src/templates/scripts/"
-    managed_runtime_paths: set[str] = set()
-    managed_definition_raw = _git_file(
-        repository, head, "juno-code/src/templates/managed-assets.json")
-    try:
-        managed_definition = json.loads(managed_definition_raw or b"null")
-        assets = managed_definition.get("assets") if isinstance(managed_definition, dict) else None
-        if isinstance(assets, list):
-            managed_runtime_paths = {
-                asset["destination"] for asset in assets
-                if isinstance(asset, dict) and asset.get("installClass") == "script"
-                and isinstance(asset.get("destination"), str)
-            }
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        pass
     for path in sorted(changed_paths):
         twin = None
         if path.startswith(runtime_prefix):
@@ -2174,10 +2160,7 @@ def grouped_coherence(controller: Path, repository: Path, head: str,
         if twin:
             checked.append("runtime_template")
             left, right = _git_file(repository, head, path), _git_file(repository, head, twin)
-            retired_unmanaged_template = (
-                path.startswith(template_prefix) and left is None
-                and right is not None and twin not in managed_runtime_paths)
-            if not retired_unmanaged_template and (left is None or right is None or left != right):
+            if left is None or right is None or left != right:
                 findings.append({"code": "coherence.runtime_template_mismatch", "path": path,
                                  "twin": twin})
     for root in ("juno-code", "juno-benchmark"):
@@ -2238,6 +2221,8 @@ def grouped_coherence(controller: Path, repository: Path, head: str,
             findings.append({"code": "coherence.generated_contract_malformed",
                              "path": "juno-code/scripts/implementation-contract.json"})
 
+    managed_definition_raw = _git_file(
+        repository, head, "juno-code/src/templates/managed-assets.json")
     if managed_definition_raw is not None:
         checked.append("managed_declaration")
         try:
