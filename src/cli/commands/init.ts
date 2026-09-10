@@ -703,6 +703,8 @@ ${variables.EDITOR ? `using ${variables.EDITOR} as primary AI subagent` : ''}
         // Only copy files (not directories)
         const stats = await fs.stat(sourcePath);
         if (stats.isFile()) {
+          const sourceContent = await fs.readFile(sourcePath, 'utf8');
+          if (sourceContent.startsWith('# Retired')) continue;
           await fs.copy(sourcePath, destPath);
 
           // Set executable permissions (chmod +x) for .sh files

@@ -56,8 +56,7 @@ Use the installed Juno control plane; do not create another workflow engine.
    task and merge lifecycle. Package preparation uses the repository maintainer
    release script only after the version-bump task is integrated. RC/tag creation,
    push, publication, deployment, production mutation, cleanup, and post-deploy
-   E2E remain distinct authorities outside `yy`; the removed release-train CLI
-   must not be invoked or emulated.
+   E2E remain distinct authorities outside `yy`.
 9. **Hand off truth.** Report ordered task outcomes, exact commits and SHAs,
    sessions, costs where available, durations, tests, PID/log/footer paths,
    Kanban updates/new bugs, blockers, contention waits, canary limitations, and
@@ -65,7 +64,7 @@ Use the installed Juno control plane; do not create another workflow engine.
 
 ## Evolution
 
-This is schema `juno.life_cycle.v1`, revision 6. Change the canonical source in
+This is schema `juno.life_cycle.v1`, revision 7. Change the canonical source in
 `juno-code/src/templates/prompts/life_cycle.md`, update this revision and release
 notes when behavior changes, and validate source/dist/tarball plus managed-install
 parity. Project customizations are user-owned: managed update must preserve or
