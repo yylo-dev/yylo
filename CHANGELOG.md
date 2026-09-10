@@ -39,6 +39,10 @@ publication, Git tag, GitHub release, push, or deployment is implied.
   TERM-resistant descendant test allows enough startup time for PID evidence;
   CLI hard-kill and detached-descendant fixtures wait for complete/observable
   process evidence; color capability tests explicitly isolate `FORCE_COLOR`.
+- **Merge-queue fixtures follow current evidence contracts.** Exact-lock
+  hydration, managed-destination reopen, frozen candidate identity, and
+  target-keyed attempt assertions now exercise the current runtime contracts
+  without relying on map insertion order.
 - **Benchmark remains the version-locked companion.** Aside from that test-only
   release-gate repair, Benchmark has no product code delta from rc.1 and is
   rebuilt and packed as `0.1.1-rc.2` so the local pair has one unambiguous
