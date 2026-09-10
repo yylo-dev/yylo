@@ -591,8 +591,6 @@ describe('ScriptInstaller', {
       await fs.writeFile(path.join(scriptsDir, 'target_runtime_provenance.py'), '#!/usr/bin/env python3\n');
       await fs.writeFile(path.join(scriptsDir, 'merge_queue.py'), '#!/usr/bin/env python3\n');
       await fs.writeFile(path.join(scriptsDir, 'operation_snapshot.py'), '#!/usr/bin/env python3\n');
-      await fs.writeFile(path.join(scriptsDir, 'release_train.py'), '#!/usr/bin/env python3\n');
-      await fs.writeFile(path.join(scriptsDir, 'tests/test_release_train.py'), '#!/usr/bin/env python3\n');
       await fs.writeFile(path.join(scriptsDir, 'migration_inventory.py'), '#!/usr/bin/env python3\n');
       await fs.writeFile(path.join(scriptsDir, 'metadata_evacuation.py'), '#!/usr/bin/env python3\n');
       await fs.writeFile(path.join(scriptsDir, 'controller_registration.py'), '#!/usr/bin/env python3\n');
