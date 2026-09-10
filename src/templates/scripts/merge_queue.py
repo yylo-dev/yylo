@@ -802,7 +802,7 @@ def merge_plan(controller: Path, task_id: str, against: Optional[str] = None,
         findings.append(_finding("target.not_descendant_of_base", "error",
                                  "ancestry_target_movement",
                                  {"base_sha": base_sha, "target_sha": target_sha},
-                                 f"yy task refresh {task_id}"))
+                                 f"yy merge refresh plan {task_id}"))
 
     eligible = ({"next": {"QUEUED", "AWAITING_RISK", "REQUEUING_STALE"}, "resolve": {"CONFLICT", "CONFLICT_RESOLVED"},
                  "reopen": {"REVIEW_FINDINGS", "REVIEW_FINDINGS_EXHAUSTED",
@@ -968,7 +968,10 @@ def merge_plan(controller: Path, task_id: str, against: Optional[str] = None,
             if target_item["present"] and feature_item["present"] and target_item["sha256"] != feature_item["sha256"]:
                 pair = _target_refresh_package_pair(
                     repository, feature_sha, path, set(authored))
-                refresh = ({"valid": True, "reason": "target_refresh_planning"}
+                refresh = ({"valid": True, "reason": "exact_base_refresh_not_required",
+                            "feature_sha": feature_sha, "target_sha": target_sha}
+                           if target_sha == base_sha else
+                           {"valid": True, "reason": "target_refresh_planning"}
                            if operation == "target-refresh" else
                            _current_target_refresh_receipt(
                                controller, task_id, record, feature_sha, target_sha))
@@ -978,7 +981,7 @@ def merge_plan(controller: Path, task_id: str, against: Optional[str] = None,
                                               "feature_sha256": feature_item["sha256"],
                                               "target_refresh_pair": pair,
                                               "target_refresh_receipt": refresh},
-                                             f"yy task refresh {task_id}"))
+                                             f"yy merge refresh plan {task_id}"))
     versions = {row["path"]: row.get("version") for row in packages["feature"]
                 if row["path"].endswith("package.json") and isinstance(row.get("version"), str)}
     fixture_hits: list[dict[str, str]] = []
@@ -7029,6 +7032,16 @@ def _status_task_row(controller: Path, repository: Path, config: dict[str, Any],
     if row["kanban_sync_required"]:
         row["safe_next_command"] = task_runtime.KANBAN_SYNC_RECOVERY.format(task=task_id)
         row["reason_code"] = "kanban_sync_required"
+    elif (action or detail) and record.get("state") in {"QUEUED", "AWAITING_RISK", "REQUEUING_STALE"}:
+        # Do not recommend an unchanged arbiter rerun when the current immutable
+        # plan already proves that a moved-target package pair needs refresh.
+        current_plan = merge_plan(controller, task_id)
+        package_blocker = next((finding for finding in current_plan["findings"]
+                                if finding["severity"] == "error"
+                                and finding["code"] == "package.lock_diverged"), None)
+        if package_blocker is not None:
+            row["safe_next_command"] = package_blocker["repair_command"]
+            row["reason_code"] = "package_lock_refresh_required"
     eligibility = _merge_mutation_contract(task_id, record.get("state"))
     if row.get("safe_next_command"):
         eligibility.update({"operation": row["safe_next_command"].split()[2]

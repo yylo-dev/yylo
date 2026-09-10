@@ -178,6 +178,41 @@ class MergeQueueTests(unittest.TestCase):
         git(setup, "commit", "-m", "add package pair")
         git(self.repository, "worktree", "remove", str(setup))
 
+    def add_two_package_pair_base(self) -> None:
+        setup = self.root / "two-package-pair-base"
+        git(self.repository, "worktree", "add", str(setup), "product")
+        for package_root, name in (("juno-code", "@yylo/cli"),
+                                   ("juno-benchmark", "@yylo/benchmark")):
+            root = setup / "src" / package_root
+            root.mkdir(parents=True)
+            (root / "package.json").write_text(json.dumps({
+                "name": name, "version": "1.0.0", "dependencies": {},
+            }) + "\n")
+            (root / "package-lock.json").write_text(json.dumps({
+                "name": name, "version": "1.0.0", "lockfileVersion": 3,
+                "packages": {"": {"name": name, "version": "1.0.0",
+                                  "dependencies": {}}},
+            }) + "\n")
+        git(setup, "add", "src/juno-code", "src/juno-benchmark")
+        git(setup, "commit", "-m", "add two package pairs")
+        git(self.repository, "worktree", "remove", str(setup))
+
+    def write_two_package_version_bump(self, task_id: str) -> None:
+        worktree = self.workspaces / task_id
+        for package_root, name in (("juno-code", "@yylo/cli"),
+                                   ("juno-benchmark", "@yylo/benchmark")):
+            root = worktree / "src" / package_root
+            (root / "package.json").write_text(json.dumps({
+                "name": name, "version": "1.0.1", "dependencies": {},
+            }) + "\n")
+            (root / "package-lock.json").write_text(json.dumps({
+                "name": name, "version": "1.0.1", "lockfileVersion": 3,
+                "packages": {"": {"name": name, "version": "1.0.1",
+                                  "dependencies": {}}},
+            }) + "\n")
+        git(worktree, "add", "src/juno-code", "src/juno-benchmark")
+        git(worktree, "commit", "-m", "bump both package versions")
+
     def write_feature_package_pair(self, task_id: str, *, malformed: bool = False,
                                    include_manifest: bool = True) -> None:
         worktree = self.workspaces / task_id
@@ -1328,6 +1363,23 @@ class MergeQueueTests(unittest.TestCase):
         self.assertEqual(repaired["changed_paths"], ["src/security/auth.py"])
         self.assertNotIn(".juno_task/state/target.json", repaired["changed_paths"])
 
+    def test_exact_base_admits_coherent_two_package_version_bump_without_refresh(self) -> None:
+        self.install_merge_planner_runtime()
+        self.add_two_package_pair_base()
+        self.task("start", "X")
+        self.write_two_package_version_bump("X")
+        self.task("finish", "X")
+
+        report = merge_runtime.merge_plan(self.controller.resolve(), "X")
+
+        self.assertEqual(report["identities"]["target"]["sha"],
+                         report["identities"]["task"]["base_sha"])
+        self.assertNotIn("package.lock_diverged",
+                         {row["code"] for row in report["findings"]})
+        composed = merge_runtime.merge_next(self.controller.resolve())
+        self.assertEqual(composed["outcome"], "AWAITING_RISK")
+        self.assertEqual(self.task("status", "X")["state"], "AWAITING_RISK")
+
     def test_target_refresh_admits_valid_task_authored_package_pair(self) -> None:
         self.install_merge_planner_runtime()
         self.add_package_pair_base()
@@ -1392,6 +1444,39 @@ class MergeQueueTests(unittest.TestCase):
                        if row["code"] == "package.lock_diverged")
         self.assertEqual(finding["evidence"]["target_refresh_receipt"]["reason"],
                          "current_reference_missing")
+
+    def test_moved_target_package_divergence_status_routes_to_installed_refresh(self) -> None:
+        self.install_merge_planner_runtime()
+        self.add_two_package_pair_base()
+        self.task("start", "X")
+        self.write_two_package_version_bump("X")
+        self.task("finish", "X")
+        self.advance_target("src/target.txt", "target\n")
+
+        report = merge_runtime.merge_plan(self.controller.resolve(), "X")
+        findings = [row for row in report["findings"]
+                    if row["code"] == "package.lock_diverged"]
+        self.assertEqual(len(findings), 2)
+        finding = findings[0]
+        self.assertEqual(finding["repair_command"], "yy merge refresh plan X")
+        self.assertEqual(finding["evidence"]["target_refresh_receipt"]["reason"],
+                         "reference_missing")
+        status = merge_runtime.status_projection(
+            self.controller.resolve(), level="detail", task_id="X")
+        self.assertEqual(status["next_action"], "yy merge refresh plan X")
+        self.assertEqual(status["task"]["reason_code"],
+                         "package_lock_refresh_required")
+        self.assertNotEqual(status["next_action"], "yy merge arbiter run")
+
+        refreshed = self.merge_target_into("X")
+        planned = merge_runtime.persist_target_refresh_plan(self.controller.resolve(), "X")
+        applied = merge_runtime.apply_target_refresh(
+            self.controller.resolve(), "X", planned["receipt"]["path"],
+            planned["receipt"]["sha256"])
+        self.assertEqual(applied["tip_sha"], refreshed)
+        after = merge_runtime.merge_plan(self.controller.resolve(), "X")
+        self.assertNotIn("package.lock_diverged",
+                         {row["code"] for row in after["findings"]})
 
     def test_target_refresh_rejects_malformed_task_authored_package_lock(self) -> None:
         self.install_merge_planner_runtime()
