@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'fs-extra';
+import { realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -15,7 +16,9 @@ function git(root: string, ...args: string[]): string {
 }
 
 async function repository(): Promise<string> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'yylo-fresh-init-probe-'));
+  // Git reports the physical toplevel; on macOS os.tmpdir() sits behind the
+  // /var -> /private/var symlink, so fixtures must resolve through it.
+  const root = realpathSync(await fs.mkdtemp(path.join(os.tmpdir(), 'yylo-fresh-init-probe-')));
   temporary.push(root);
   git(root, 'init', '-b', 'main');
   return root;
