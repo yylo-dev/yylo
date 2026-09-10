@@ -3318,7 +3318,8 @@ steps:
         state = json.loads((self.controller / ".juno_task/state/tasks.json").read_text())
         record = state["tasks"]["X"]
         attempt = record["queue_attempt"]
-        last_attempt = next(iter(state["queues"].values()))["last_attempt"]
+        queue_key = merge_runtime.target_key(self.repository, "refs/heads/product")
+        last_attempt = state["queues"][queue_key]["last_attempt"]
         for persisted in (attempt, last_attempt):
             self.assertEqual(persisted["outcome"], "POST_INTEGRATION_OWNER_FAILED")
             self.assertEqual(persisted["recovery_command"], "yy merge next")
@@ -3356,7 +3357,8 @@ steps:
         self.assertEqual(attempt["outcome"], "PRE_CAS_FAILED")
         self.assertEqual(attempt["failure"], "frozen candidate drifted before compare-and-swap")
         self.assertEqual(attempt["recovery_command"], "yy merge next")
-        last_attempt = next(iter(state["queues"].values()))["last_attempt"]
+        queue_key = merge_runtime.target_key(self.repository, "refs/heads/product")
+        last_attempt = state["queues"][queue_key]["last_attempt"]
         self.assertEqual(last_attempt["outcome"], "PRE_CAS_FAILED")
         self.assertEqual(last_attempt["recovery_command"], "yy merge next")
         status_row = next(row for row in merge_runtime.status(self.controller.resolve())["tasks"]

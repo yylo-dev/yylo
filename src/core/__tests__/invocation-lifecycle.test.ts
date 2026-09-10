@@ -378,11 +378,18 @@ setInterval(() => {}, 1000);
       env: { ...process.env, XDG_STATE_HOME: path.join(root, 'state') },
       stdio: 'ignore',
     });
+    const runtimePid = path.join(root, 'runtime-pid');
     expect(await waitUntil(
-      async () => fs.pathExists(path.join(root, 'runtime-pid')),
+      async () => {
+        try {
+          return Number(await fs.readFile(runtimePid, 'utf8')) === child.pid;
+        } catch {
+          return false;
+        }
+      },
       [root],
     )).toBe(true);
-    expect(Number(await fs.readFile(path.join(root, 'runtime-pid'), 'utf8'))).toBe(child.pid);
+    expect(Number(await fs.readFile(runtimePid, 'utf8'))).toBe(child.pid);
     child.kill('SIGKILL');
     expect(await close(child)).toEqual({ code: null, signal: 'SIGKILL' });
     expect((await events(root)).map((event) => event.event_type)).toEqual(['invocation_started']);

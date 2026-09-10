@@ -236,9 +236,12 @@ describe('task-workspace supported profiler and runner', () => {
     const probe = path.join(root, 'escaped-session.py');
     const childPid = path.join(root, 'escaped-child.pid');
     fs.writeFileSync(probe, [
-      'import pathlib, subprocess, sys',
+      'import pathlib, subprocess, sys, time',
       `p=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True, env={})`,
       `pathlib.Path(${JSON.stringify(childPid)}).write_text(str(p.pid))`,
+      // Keep the producer alive long enough for the runner's ownership monitor
+      // to observe the deliberately env-scrubbing, session-detached child.
+      'time.sleep(0.25)',
     ].join('\n'));
     let pid: number | undefined;
     try {
