@@ -628,6 +628,29 @@ class RiskPolicyTest(unittest.TestCase):
         self.assertLess(output.stat().st_size, self.policy["limits"]["max_receipt_bytes"])
         self.assertNotIn("transcript", output.read_text())
 
+    def test_full_suite_command_provenance_accepts_bounded_input_paths(self) -> None:
+        plan = self.plan({"juno-benchmark/package.json": "{}\n"})
+        command = {"id": "benchmark-test", "cwd": "juno-benchmark",
+                   "argv": ["npm", "test"], "timeout_seconds": 900,
+                   "max_output_bytes": 32768,
+                   "input_paths": ["juno-benchmark/package.json",
+                                   "juno-benchmark/src"]}
+        rp._validate_command_row(command, plan)
+
+    def test_full_suite_command_provenance_rejects_invalid_input_paths(self) -> None:
+        plan = self.plan({"juno-benchmark/package.json": "{}\n"})
+        base = {"id": "benchmark-test", "cwd": "juno-benchmark",
+                "argv": ["npm", "test"], "timeout_seconds": 900,
+                "max_output_bytes": 32768}
+        invalid = ([], ["../package.json"], ["/tmp/package.json"],
+                   ["juno-benchmark/./src"], ["juno-benchmark/src"] * 2,
+                   [f"path-{index}" for index in range(65)])
+        for input_paths in invalid:
+            with self.subTest(input_paths=input_paths):
+                with self.assertRaisesRegex(
+                        rp.RiskPolicyError, "command row provenance is invalid"):
+                    rp._validate_command_row({**base, "input_paths": input_paths}, plan)
+
     def test_lifecycle_infrastructure_requires_two_sequential_reviewers(self) -> None:
         for path in (".juno_task/scripts/merge_queue.py",
                      "juno-code/src/templates/scripts/merge_queue.py"):
