@@ -209,15 +209,9 @@ describe('Bolt task workspace managed runtime', () => {
     }
 
     // Agent skills ship through explicit, versioned remote acquisition from
-    // yylo-dev/yylo-skills releases; local admission covers only the controller
-    // scripts and the Pi skill-preprocessor extension.
-    const skillOutputs = [
-      {
-        source: 'extensions/pi/juno-skill-preprocessor.ts',
-        destination: '.pi/extensions/juno-skill-preprocessor.ts',
-      },
-    ];
-    const nonSkillOutputs = [
+    // yylo-dev/yylo-skills releases; local admission covers only controller
+    // runtime assets and the Pi skill-preprocessor extension.
+    const managedOutputs = [
       {
         source: 'scripts/controller_workspace.py',
         destination: '.juno_task/scripts/controller_workspace.py',
@@ -242,14 +236,13 @@ describe('Bolt task workspace managed runtime', () => {
         source: 'scripts/kanban.sh',
         destination: '.juno_task/scripts/kanban.sh',
       },
+      {
+        source: 'extensions/pi/juno-skill-preprocessor.ts',
+        destination: '.pi/extensions/juno-skill-preprocessor.ts',
+      },
     ];
-    expect(managed.admissionOutputs).toEqual(
-      expect.arrayContaining([
-        ...nonSkillOutputs,
-        ...skillOutputs,
-      ]),
-    );
-    expect(managed.admissionOutputs).toHaveLength(nonSkillOutputs.length + skillOutputs.length);
+    expect(managed.admissionOutputs).toEqual(expect.arrayContaining(managedOutputs));
+    expect(managed.admissionOutputs).toHaveLength(managedOutputs.length);
     expect(policy.allowed_paths).not.toEqual(
       expect.arrayContaining(['.agents', '.claude', '.pi', '.juno_task/scripts']),
     );

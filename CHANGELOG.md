@@ -1,5 +1,65 @@
 # YYLO release notes
 
+## 0.2.3-rc.2 (local candidate)
+
+Companion package: `@yylo/benchmark@0.1.1-rc.2`.
+
+Comparison baseline: local `@yylo/cli@0.2.3-rc.1` and
+`@yylo/benchmark@0.1.1-rc.1`. This is a local candidate only: no npm
+publication, Git tag, GitHub release, push, or deployment is implied.
+
+### Issues and capabilities to verify
+
+- **CLI skills use the canonical suffixed set.** Command routing, installed
+  skill names, argument contracts, and task-workspace admission expectations
+  now target the independently versioned suffixed skill set instead of stale
+  unsuffixed package copies (`cbd382d68`).
+- **Fresh initialization creates a healthy workspace topology.** `yy init` now
+  bootstraps the managed controller registration and local topology required by
+  `yy info`, workspace doctor, and ordinary commands in a new Git repository
+  (`80cdfd22d`).
+- **Retired release-train assets stay retired.** Candidate packages no longer
+  copy removed release-train templates or emit their tombstones as package
+  payload (`036df69c7`, `90cdfa247`, `c6f3db6be`).
+- **Template package tests retain their explicit mode.** Retirement cleanup no
+  longer strips the package-template test-mode contract (`f25f2e12f`).
+- **Template copying invokes the correct script entry.** The build now executes
+  the intended template copier and verifies the resulting candidate payload
+  (`2d6be606c`).
+- **Lifecycle routing covers resumable operations.** The launcher routes the
+  registered `task resume` and `merge resume` commands through the same fenced
+  orchestration boundary as their CLI registrations.
+- **Exact-base lock updates remain merge-admissible.** Merge composition admits
+  the package-lock changes produced from the frozen exact base (`6d540e520`).
+- **Candidate guidance and managed identity match the shipped generation.**
+  Exact CLI/Benchmark install examples, the controller inventory checksum and
+  package identity, and the target-bound recovery fixture are refreshed after
+  the post-rc.1 changes so identity/parity checks accept the coherent pair.
+- **Release-suite fixtures are deterministic under host load.** Benchmark's
+  TERM-resistant descendant test allows enough startup time for PID evidence;
+  CLI hard-kill and detached-descendant fixtures wait for complete/observable
+  process evidence; color capability tests explicitly isolate `FORCE_COLOR`.
+- **Merge-queue fixtures follow current evidence contracts.** Exact-lock
+  hydration, managed-destination reopen, frozen candidate identity, and
+  target-keyed attempt assertions now exercise the current runtime contracts
+  without relying on map insertion order.
+- **Benchmark remains the version-locked companion.** Aside from that test-only
+  release-gate repair, Benchmark has no product code delta from rc.1 and is
+  rebuilt and packed as `0.1.1-rc.2` so the local pair has one unambiguous
+  candidate identity.
+
+### Candidate acceptance checklist
+
+- CLI and Benchmark tests, typechecks, and builds pass from exact lockfiles on
+  Node 22; managed-asset, skill-contract, and fresh-init package checks pass.
+- Packed artifact identities are exactly `@yylo/cli@0.2.3-rc.2` and
+  `@yylo/benchmark@0.1.1-rc.2`, with SHA-256 checksums recorded outside Git.
+- Both local tarballs install globally and `yy --version` plus
+  `yylo-benchmark --version` resolve from the active npm prefix.
+- A unique disposable `/tmp` Git repository passes non-interactive `yy init`,
+  `yy info --json`, `yy doctor workspace`, CLI/Benchmark help delegation, and
+  `yy watch exec pwd` without model or provider dispatch.
+
 ## 0.2.3-rc.1 (local candidate)
 
 Companion package: `@yylo/benchmark@0.1.1-rc.1`.
