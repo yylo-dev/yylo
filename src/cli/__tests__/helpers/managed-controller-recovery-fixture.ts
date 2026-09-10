@@ -9,35 +9,35 @@ import { ManagedProjectAssets } from '../../../utils/managed-project-assets.js';
 const sha256 = (value: Buffer | string) => createHash('sha256').update(value).digest('hex');
 
 export const REAL_METADATA_CONTROLLER_TARGET_REF =
-  '9f304582967514ccbef6ac9be9ebc96d7ef36291';
+  'f621fd4ee060502b2d16083259c9c75b0fbf9c64';
 export const REAL_STALE_CONTROLLER_SCRIPTS = {
   'managed_agent_runner.py': {
-    targetSha256: 'd37df7d5a9b5bfeecaef7e29876535f437a1d99ac2171fa36cd49a4625bd14c3',
+    targetSha256: 'dd3f7e225c9523fc876b244964e69ce0329424887a78c3f9d242052813efe862',
     staleBlob: 'b1bbfa5e8a0220f2d60b1d162b91055ea64f686f',
     staleSha256: '506451eb01ab720bdfe6e32fa4ff435fde53ede01c2fc6c123d4884da83eead5',
   },
   'merge_queue.py': {
-    targetSha256: '24a25e905c40c80a306b91220842cf11c1759a0772458d319aa553dcf7d7d768',
+    targetSha256: '42985d7fc5c8522fbd064dd5efed3226be0ab39c7d0c44f76b6d235f283a4374',
     staleBlob: '52c166d2ef414ca84547a5bcb42b99fdf9d5e2d6',
     staleSha256: 'd46dca5d1309d3069480ad5b2cdfe67e581925fbe23e127437424a59da05e862',
   },
   'task_workspace.py': {
-    targetSha256: '307ac1cce8d13e5c2bc1e0a47326359ce014fe7e1d19b8371b577c34126dd77d',
+    targetSha256: '0471f34d34fc06714154e190d95fa2a13e2a8dd1e64496d41a02aa6c0632320f',
     staleBlob: '989dfd43547c646d6e88478cfe47a27f7f997d8e',
     staleSha256: '861abba186bc8f87e76c3c1204e50eed8f07b6797bd6f38a582f6c6560e95c48',
   },
   'tests/test_managed_agent_runner.py': {
-    targetSha256: '679f2a2e17babe2151d65e52126015e4b9168c54433b4cbf734ccde24c7cc78b',
+    targetSha256: 'b5d1bbca2b300f260e4bd4e4cbdac1027eb94dd76290ba50d6a35ac41d5d1630',
     staleBlob: 'f2fa9ecc94b14342d1591fb5b6326f29609e77bb',
     staleSha256: '30652580f93cb4150b4435c868e1b750cdfaa7a2e9b188d124fd3668f3d902f4',
   },
   'tests/test_merge_queue.py': {
-    targetSha256: 'b74988042d33f03c312db0afab869dd9d2f36698cf0440371bd14f0dd40af4ae',
+    targetSha256: '281684be5866209889df74c508c907086164693ae90924796414dfea92f480d9',
     staleBlob: '842f255e1d93470af02b068c5171657e5090f8ec',
     staleSha256: 'a7d3f9619943537660cab3741096aeb51c60d71f7215ece6cf796e798c41d41f',
   },
   'tests/test_task_workspace.py': {
-    targetSha256: 'bcff3e8eca644b733f4ea6150e0bfad599676ee2f39aec8100c28f477db2fc2a',
+    targetSha256: '987c474f521e01043e789a8ff15b72b561efb249b4b02755c5dd49c3b375074c',
     staleBlob: '8eb5516fbcd6d71da53cc74b424078a304c55561',
     staleSha256: '1a12eee625de2f2f2b81fa4a5ff931a08b64807d8afab3b501a0c4f009791051',
   },
