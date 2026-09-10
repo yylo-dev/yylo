@@ -46,7 +46,7 @@ npm install --global '@yylo/cli@latest'
 # Explicit prerelease
 npm install --global '@yylo/cli@next'
 # Exact local/prerelease candidate for reproducible installs
-npm install -g @yylo/cli@0.2.3-rc.1
+npm install -g @yylo/cli@0.2.3-rc.2
 
 npm view '@yylo/cli' version dist-tags --json
 yy --version
@@ -380,7 +380,7 @@ Install canonical packages independently:
 
 ```bash
 python3 -m pip install 'yylo-ledger==0.2.0'
-npm install --global '@yylo/benchmark@0.1.1-rc.1'
+npm install --global '@yylo/benchmark@0.1.1-rc.2'
 
 yylo-ledger --help
 yy ledger --help
