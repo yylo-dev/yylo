@@ -208,34 +208,10 @@ describe('Bolt task workspace managed runtime', () => {
       ]);
     }
 
-    const skillFiles = [
-      'kanban-workflow/SKILL.md',
-      'plan-kanban-tasks/SKILL.md',
-      'ralph-loop/SKILL.md',
-      'ralph-loop/references/first_check.md',
-      'understand-project/SKILL.md',
-    ];
+    // Agent skills ship through explicit, versioned remote acquisition from
+    // yylo-dev/yylo-skills releases; local admission covers only the controller
+    // scripts and the Pi skill-preprocessor extension.
     const skillOutputs = [
-      ...skillFiles.map((file) => ({
-        source: `skills/codex/${file}`,
-        destination: `.agents/skills/${file}`,
-      })),
-      {
-        source: 'scripts/kanban.sh',
-        destination: '.agents/skills/ralph-loop/scripts/kanban.sh',
-      },
-      ...skillFiles.map((file) => ({
-        source: `skills/claude/${file}`,
-        destination: `.claude/skills/${file}`,
-      })),
-      {
-        source: 'scripts/kanban.sh',
-        destination: '.claude/skills/ralph-loop/scripts/kanban.sh',
-      },
-      ...skillFiles.map((file) => ({
-        source: `skills/pi/${file}`,
-        destination: `.pi/skills/${file}`,
-      })),
       {
         source: 'extensions/pi/juno-skill-preprocessor.ts',
         destination: '.pi/extensions/juno-skill-preprocessor.ts',
