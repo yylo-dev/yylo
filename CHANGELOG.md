@@ -29,9 +29,9 @@ publication, Git tag, GitHub release, push, or deployment is implied.
 - **Exact-base lock updates remain merge-admissible.** Merge composition admits
   the package-lock changes produced from the frozen exact base (`6d540e520`).
 - **Managed bundle identity matches the shipped generation.** The controller
-  inventory checksum and package identity are refreshed after the post-rc.1
-  asset retirements, preventing managed-asset parity checks from rejecting an
-  otherwise coherent candidate.
+  inventory checksum/package identity and exact target-bound recovery fixture
+  are refreshed after the post-rc.1 asset retirements, preventing parity and
+  recovery checks from rejecting an otherwise coherent candidate.
 - **Release-suite fixtures are deterministic under host load.** Benchmark's
   TERM-resistant descendant test allows enough startup time for PID evidence;
   CLI hard-kill and detached-descendant fixtures wait for complete/observable
