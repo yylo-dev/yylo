@@ -31,10 +31,10 @@ publication, Git tag, GitHub release, push, or deployment is implied.
   inventory checksum and package identity are refreshed after the post-rc.1
   asset retirements, preventing managed-asset parity checks from rejecting an
   otherwise coherent candidate.
-- **Release-suite process readiness is race-free.** Benchmark's TERM-resistant
-  descendant test retains a strict forced-kill bound while allowing enough
-  startup time for PID evidence on a loaded host; the CLI hard-kill fixture now
-  waits for complete PID contents rather than racing file creation.
+- **Release-suite fixtures are deterministic under host load.** Benchmark's
+  TERM-resistant descendant test allows enough startup time for PID evidence;
+  CLI hard-kill and detached-descendant fixtures wait for complete/observable
+  process evidence; color capability tests explicitly isolate `FORCE_COLOR`.
 - **Benchmark remains the version-locked companion.** Aside from that test-only
   release-gate repair, Benchmark has no product code delta from rc.1 and is
   rebuilt and packed as `0.1.1-rc.2` so the local pair has one unambiguous
