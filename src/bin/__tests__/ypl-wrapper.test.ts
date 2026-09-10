@@ -441,7 +441,7 @@ describe('ypl wrapper', () => {
     { args: ['task', 'status', 'T1'], operation: 'kanban' },
     { args: ['task', 'preflight', 'T1'], operation: 'kanban' },
     { args: ['task', 'doctor'], operation: 'kanban' },
-    { args: ['task', 'recovery-plan', 'T1'], operation: 'kanban' },
+    { args: ['task', 'recovery-plan', 'T1'], operation: null },
     { args: ['evidence', 'status', 'T1'], operation: 'kanban' },
     { args: ['merge', 'status'], operation: 'kanban' },
     { args: ['merge', 'plan', 'T1'], operation: 'kanban' },
@@ -525,7 +525,7 @@ describe('ypl wrapper', () => {
       if (operation === null) {
         expect(await fs.pathExists(operationMarker)).toBe(false);
         expect(result.stderr).toContain(
-          `control-plane routing refused unknown ${args[0]} subcommand 'mystery'`,
+          `control-plane routing refused unknown ${args[0]} subcommand '${args[1]}'`,
         );
       } else {
         expect(await fs.readFile(operationMarker, 'utf8')).toBe(operation);
