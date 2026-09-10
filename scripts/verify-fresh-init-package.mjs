@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -34,6 +34,15 @@ try {
     { cwd: root, encoding: 'utf8' },
   ))[0];
   const archive = path.join(packDirectory, packed.filename);
+  const packageFiles = new Set(packed.files.map((entry) => entry.path));
+  const retiredAssets = [
+    'dist/templates/scripts/release_train.py',
+    'dist/templates/scripts/tests/test_release_train.py',
+    'dist/templates/wiki/controller/sealed_release_epochs.md',
+  ];
+  for (const retired of retiredAssets) {
+    assert.equal(packageFiles.has(retired), false, `packed retired release-train asset: ${retired}`);
+  }
   execFileSync('npm', ['install', '--ignore-scripts', '--prefix', prefix, archive], {
     cwd: temporary,
     stdio: 'pipe',
@@ -54,6 +63,19 @@ try {
     cwd: project,
     env,
   }), 'installed yy init');
+  for (const retired of [
+    '.juno_task/scripts/release_train.py',
+    '.juno_task/scripts/tests/test_release_train.py',
+    '.juno_task/wiki/controller/sealed_release_epochs.md',
+  ]) {
+    await assert.rejects(access(path.join(project, retired)),
+      undefined, `fresh init installed retired release-train asset: ${retired}`);
+  }
+  for (const instruction of ['AGENTS.md', 'CLAUDE.md']) {
+    assert.doesNotMatch(await readFile(path.join(project, instruction), 'utf8'),
+      /release[-_ ]train|sealed release epoch/iu,
+      `fresh init installed retired release-train instruction: ${instruction}`);
+  }
   const info = run(yy, ['info', '--json'], { cwd: project, env });
   expectOk(info, 'installed yy info');
   const topology = JSON.parse(info.stdout);
