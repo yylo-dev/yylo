@@ -31,9 +31,14 @@ publication, Git tag, GitHub release, push, or deployment is implied.
   inventory checksum and package identity are refreshed after the post-rc.1
   asset retirements, preventing managed-asset parity checks from rejecting an
   otherwise coherent candidate.
-- **Benchmark remains the version-locked companion.** Benchmark has no product
-  code delta from rc.1, but is rebuilt and packed as `0.1.1-rc.2` so the local
-  pair has one unambiguous candidate identity.
+- **Benchmark process-tree coverage is stable under release-suite load.** The
+  TERM-resistant descendant test retains a strict forced-kill bound while
+  allowing enough startup time for the descendant PID evidence to be written
+  on a loaded host.
+- **Benchmark remains the version-locked companion.** Aside from that test-only
+  release-gate repair, Benchmark has no product code delta from rc.1 and is
+  rebuilt and packed as `0.1.1-rc.2` so the local pair has one unambiguous
+  candidate identity.
 
 ### Candidate acceptance checklist
 
