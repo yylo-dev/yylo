@@ -11,8 +11,9 @@ publication, Git tag, GitHub release, push, or deployment is implied.
 ### Issues and capabilities to verify
 
 - **CLI skills use the canonical suffixed set.** Command routing, installed
-  skill names, and argument contracts now target the independently versioned
-  suffixed skill set instead of stale unsuffixed package copies (`cbd382d68`).
+  skill names, argument contracts, and task-workspace admission expectations
+  now target the independently versioned suffixed skill set instead of stale
+  unsuffixed package copies (`cbd382d68`).
 - **Fresh initialization creates a healthy workspace topology.** `yy init` now
   bootstraps the managed controller registration and local topology required by
   `yy info`, workspace doctor, and ordinary commands in a new Git repository
