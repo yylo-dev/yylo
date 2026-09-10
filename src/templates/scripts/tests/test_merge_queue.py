@@ -32,6 +32,7 @@ except task_runtime.TaskWorkspaceError as exc:
     print(f"merge queue test setup: {exc}", file=sys.stderr)
     raise SystemExit(2)
 install_juno_admission_fixture = _fixture.install_juno_admission_fixture
+install_exact_lock_hydration_fixture = test_task_workspace.install_exact_lock_hydration_fixture
 
 
 def run(argv: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -231,9 +232,7 @@ class MergeQueueTests(unittest.TestCase):
         git(worktree, "add", "src/package-lock.json",
             *(["src/package.json"] if include_manifest else []))
         git(worktree, "commit", "-m", "update package pair")
-        modules = worktree / "src/node_modules"
-        modules.mkdir(exist_ok=True)
-        (modules / ".package-lock.json").write_text("hydrated\n")
+        install_exact_lock_hydration_fixture(self.controller, worktree, task_id)
 
     def test_live_authority_projects_only_unmet_dependency_blockers(self) -> None:
         satisfied = merge_runtime._authority_task_projection({
@@ -554,6 +553,36 @@ class MergeQueueTests(unittest.TestCase):
             except json.JSONDecodeError:
                 pass
         return result
+
+    def rebuild_submission_fixture(self, task_id: str) -> None:
+        """Rebind queued submission evidence after intentional fixture authority changes."""
+        state = task_runtime.read_state(self.controller)
+        record = state["tasks"][task_id]
+        closure = record["review_ready_closure"]
+        creation = record["creation_receipt"]
+        requirements = task_runtime.canonical_requirement_identity(self.controller, task_id)
+        closure["allowed_paths_sha256"] = task_runtime.stable_sha256(
+            creation.get("allowed_paths"))
+        closure["generated_output_admission_sha256"] = task_runtime.stable_sha256(
+            creation.get("generated_output_admission"))
+        closure["requirements"] = requirements
+        submission = closure["submission"]
+        submission.update({
+            "requirements_sha256": requirements["requirements_sha256"],
+            "admitted_scope_sha256": task_runtime.stable_sha256(
+                creation.get("allowed_paths")),
+            "generated_scope_sha256": task_runtime.stable_sha256(
+                creation.get("generated_output_admission")),
+        })
+        submission_body = {key: value for key, value in submission.items()
+                           if key != "submission_sha256"}
+        submission["submission_sha256"] = task_runtime.stable_sha256(submission_body)
+        closure_body = {key: value for key, value in closure.items()
+                        if key != "closure_sha256"}
+        closure["closure_sha256"] = task_runtime.stable_sha256(closure_body)
+        task_runtime.write_state(self.controller, state)
+        self.assertTrue(merge_runtime.verify_task_submission(
+            self.controller, self.repository, task_id, record)["valid"])
 
     def task(self, operation: str, task_id: str) -> dict:
         extra: list[str] = []
@@ -1683,8 +1712,7 @@ class MergeQueueTests(unittest.TestCase):
         (a_worktree / "src/shared.txt").write_text("target side\n")
         git(a_worktree, "add", "src/shared.txt")
         git(a_worktree, "commit", "-m", "target side")
-        (a_worktree / "src/node_modules").mkdir()
-        (a_worktree / "src/node_modules/.package-lock.json").write_text("hydrated\n")
+        install_exact_lock_hydration_fixture(self.controller, a_worktree, "A")
         self.task("finish", "A")
         self.queue_payload("next")
         worktree = self.workspaces / "B"
@@ -1693,8 +1721,7 @@ class MergeQueueTests(unittest.TestCase):
         (worktree / "src/package.json").write_text('{"version":"01.2.3"}\n')
         git(worktree, "add", "src")
         git(worktree, "commit", "-m", "conflicting stale package")
-        (worktree / "src/node_modules").mkdir()
-        (worktree / "src/node_modules/.package-lock.json").write_text("hydrated\n")
+        install_exact_lock_hydration_fixture(self.controller, worktree, "B")
         self.task("finish", "B")
         holder = self.root / "target-holder"
         git(self.repository, "worktree", "add", str(holder), "product")
@@ -3202,12 +3229,7 @@ steps:
         self.assertIn("post_integration", full_row)
 
     def test_merge_status_machine_and_human_render_projection_and_truncation(self) -> None:
-        state = task_runtime.read_state(self.controller)
-        state["tasks"]["X"] = {
-            "task_id": "X", "target_ref": "refs/heads/product", "state": "QUEUED",
-            "tip_sha": self.base, "enqueue_sequence": 1,
-        }
-        task_runtime.write_state(self.controller, state)
+        self.commit_feature("X", "docs/status.md", "status\n")
         machine = self.command(QUEUE, ["status"])
         projection = json.loads(machine.stdout)
         self.assertEqual(projection["projection"]["level"], "summary")
@@ -4123,6 +4145,7 @@ steps:
         state["tasks"]["X"]["queue_attempt"]["review"]["full_suite_repair"] = repair
         state_path.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
         self.write_policy()
+        self.rebuild_submission_fixture("X")
         worktree = self.workspaces / "X"
         (worktree / "src/security/auth.py").write_text("fixed\n")
         git(worktree, "add", "src/security/auth.py")
@@ -5119,6 +5142,7 @@ steps:
             }],
         }
         state_path.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
+        self.rebuild_submission_fixture("X")
 
         worktree = self.workspaces / "X"
         (worktree / "src/security/auth.py").write_text("fixed\n")
@@ -5180,8 +5204,7 @@ steps:
             '{"lockfileVersion":3,"target":"feature"}\n')
         git(worktree, "add", "src/package-lock.json")
         git(worktree, "commit", "-m", "feature lock drift")
-        (worktree / "src/node_modules").mkdir()
-        (worktree / "src/node_modules/.package-lock.json").write_text("hydrated\n")
+        install_exact_lock_hydration_fixture(self.controller, worktree, "A")
         self.task("finish", "A")
         report = merge_runtime.merge_plan(self.controller.resolve(), "A")
         self.assertIn("package.lock_diverged", {row["code"] for row in report["findings"]})
@@ -5661,8 +5684,8 @@ steps:
         security.write_text("auth\n")
         modules = worktree / "src/node_modules"
         modules.mkdir()
-        (modules / ".package-lock.json").write_text("hydrated\n")
         (modules / "probe.txt").write_text("ready\n")
+        install_exact_lock_hydration_fixture(self.controller, worktree, "X")
         provenance = (modules.resolve(), modules.stat().st_dev, modules.stat().st_ino)
         git(worktree, "add", "src/security/auth.py")
         git(worktree, "commit", "-m", "high risk feature")
@@ -5703,7 +5726,7 @@ steps:
         git(worktree, "add", "src/security/auth.py")
         git(worktree, "commit", "-m", "unhydrated high risk feature")
         modules = worktree / "src/node_modules"
-        modules.mkdir(); (modules / ".package-lock.json").write_text("hydrated\n")
+        install_exact_lock_hydration_fixture(self.controller, worktree, "X")
         self.task("finish", "X")
         shutil.rmtree(modules)
         with (mock.patch.object(merge_runtime, "validation_rows") as validation,
@@ -5730,8 +5753,8 @@ steps:
             (worktree / path).write_text(f"{task_id}\n")
             modules = worktree / "src/node_modules"
             modules.mkdir()
-            (modules / ".package-lock.json").write_text("hydrated\n")
             (modules / "probe.txt").write_text("ready\n")
+            install_exact_lock_hydration_fixture(self.controller, worktree, task_id)
             git(worktree, "add", path)
             git(worktree, "commit", "-m", f"feature {task_id}")
             self.task("finish", task_id)
@@ -5912,6 +5935,9 @@ steps:
         state = merge_runtime.task_runtime.read_state(self.controller)
         self.assertEqual(state["tasks"]["X"]["state"], "QUEUED")
         self.assertEqual(state["queues"], {
+            "delivery_tracking_owners": {
+                "schema_version": "juno_task_delivery_tracking_owners.v1", "owners": {}
+            },
             "task_workspace_fifo": {"schema_version": "juno_task_workspace_fifo.v1", "next": 2},
             "umbrella_child_reservations": {
                 "schema_version": "juno_task_umbrella_child_reservations.v1", "owners": {}
