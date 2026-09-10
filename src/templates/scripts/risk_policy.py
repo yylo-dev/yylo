@@ -790,8 +790,10 @@ def verify_full_suite_admission(admission: Any, plan: dict[str, Any],
 
 def _validate_command_row(command: Any, plan: dict[str, Any]) -> None:
     command_keys = {"id", "cwd", "argv", "timeout_seconds", "max_output_bytes"}
+    optional_keys = {"resource", "input_paths"}
     if (not isinstance(command, dict)
-            or set(command) not in (command_keys, command_keys | {"resource"})
+            or not command_keys.issubset(command)
+            or set(command) - command_keys - optional_keys
             or not isinstance(command.get("id"), str) or not command["id"]
             or not isinstance(command.get("cwd"), str)
             or not isinstance(command.get("argv"), list) or not command["argv"]
@@ -804,6 +806,18 @@ def _validate_command_row(command: Any, plan: dict[str, Any]) -> None:
             or command["max_output_bytes"] <= 0
             or command["max_output_bytes"] > plan["evidence_limits"]["max_receipt_bytes"]):
         raise RiskPolicyError("full-suite command row provenance is invalid")
+    input_paths = command.get("input_paths")
+    if input_paths is not None:
+        if (not isinstance(input_paths, list) or not input_paths or len(input_paths) > 64
+                or any(not isinstance(path, str) or not path
+                       or len(path.encode()) > 1024 for path in input_paths)
+                or len(set(input_paths)) != len(input_paths)):
+            raise RiskPolicyError("full-suite command row provenance is invalid")
+        for path in input_paths:
+            value = PurePosixPath(path)
+            if value.is_absolute() or str(value) != path or any(
+                    part in {"", ".", ".."} for part in value.parts):
+                raise RiskPolicyError("full-suite command row provenance is invalid")
 
 
 def _validate_command_suite(commands: Any, plan: dict[str, Any]) -> list[dict[str, Any]]:
