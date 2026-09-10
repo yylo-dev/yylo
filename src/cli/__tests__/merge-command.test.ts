@@ -232,6 +232,7 @@ describe('merge queue CLI', () => {
     const command = (name: string) => merge?.commands.find((entry) => entry.name() === name);
     const arbiter = command('arbiter');
     const arbiterCommand = (name: string) => arbiter?.commands.find((entry) => entry.name() === name);
+    const refresh = command('refresh');
     expect(command('status')?.description()).toContain('Read-only');
     expect(command('status')?.description()).toContain('bounded');
     expect(command('status')?.options.map((option) => option.long)).toEqual([
@@ -239,6 +240,12 @@ describe('merge queue CLI', () => {
     ]);
     expect(arbiterCommand('status')?.description()).toContain('Read-only');
     expect(arbiterCommand('run')?.description()).toContain('Explicit mutation');
+    expect(refresh?.description()).toContain('queued candidate');
+    expect(refresh?.commands.map((entry) => entry.name())).toEqual(['plan', 'apply']);
+    expect(refresh?.commands[0]?.registeredArguments[0]?.required).toBe(true);
+    expect(refresh?.commands[1]?.options.map((option) => option.long)).toEqual([
+      '--receipt', '--receipt-sha256',
+    ]);
     expect(command('resume')?.description()).toContain('existing fenced target arbiter');
     expect(command('next')?.description()).toContain('Explicit recovery mutation');
     expect(command('next')?.description()).toContain('continue paused evidence');
