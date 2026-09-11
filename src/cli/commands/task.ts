@@ -6,6 +6,7 @@ import fs from 'fs-extra';
 import { Command } from 'commander';
 import { routeControlPlane } from '../../utils/control-plane-router.js';
 import { checkpointControllerAfterFinalization } from '../../utils/controller-checkpoint.js';
+import { addMachineOutputOptions, invokeMachineAwareChild, resolveMachineOutput } from '../machine-output.js';
 
 export type TaskWorkspaceOperation =
   | 'start'
@@ -156,18 +157,15 @@ export async function invokeTaskWorkspace(
   const controllerRoot = route.controllerRoot;
   const script = await selectTaskWorkspaceRuntime(controllerRoot, operation);
   const taskEnv = route.env;
-  const exitCode = await new Promise<number>((resolve, reject) => {
-    const pathArgs = requiredPaths.flatMap((requiredPath) => ['--path', requiredPath]);
-    const child = spawn('python3', [script, operation, '--task', taskId, ...pathArgs, ...admissionArgs], {
-      cwd: controllerRoot,
-      env: taskEnv,
-      stdio: 'inherit',
-    });
-    child.once('error', reject);
-    child.once('exit', (code, signal) => {
-      if (signal) reject(new Error(`Task workspace command terminated by signal ${signal}`));
-      else resolve(code ?? 1);
-    });
+  const pathArgs = requiredPaths.flatMap((requiredPath) => ['--path', requiredPath]);
+  const machine = resolveMachineOutput(process.argv.slice(2), { jsonFlag: true });
+  const { exitCode } = await invokeMachineAwareChild({
+    executable: 'python3',
+    args: [script, operation, '--task', taskId, ...pathArgs, ...admissionArgs],
+    cwd: controllerRoot,
+    env: taskEnv,
+    command: `task.${operation}`,
+    ...(machine ? { machine } : {}),
   });
   await checkpointTaskWorkspaceAfterFinalization(operation, controllerRoot, exitCode,
     checkpointControllerAfterFinalization, taskId);
@@ -179,9 +177,9 @@ export function configureTaskWorkspaceCommand(
   invoke: TaskWorkspaceInvoker = invokeTaskWorkspace,
   invokeBootstrap: TaskRuntimeBootstrapInvoker = invokeTaskRuntimeBootstrap,
 ): void {
-  const task = program
+  const task = addMachineOutputOptions(program
     .command('task')
-    .description('Create, inspect, and queue one exact-base feature worktree');
+    .description('Create, inspect, and queue one exact-base feature worktree'));
   task
     .command('run')
     .description('Execute the controller-owned typed task workflow through QUEUED')

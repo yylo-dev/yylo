@@ -18,7 +18,8 @@ describe('public Juno execution envelope', () => {
     ['openai-codex', 'gpt-5.6-luna'], ['zai', 'glm-5.2'],
   ])('keeps separately observed %s/%s identity', (provider, model) => {
     expect(buildJunoExecutionEnvelope(result({ session_id: 'S', provider, model, total_cost_usd: 0 }), '2.1.3')).toEqual({
-      schema_version: 'juno_execution_envelope.v1', status: 'success', session_id: 'S', provider, model, juno_version: '2.1.3',
+      schema_version: 'juno_execution_envelope.v1', command: { name: 'managed.run', version: 1 },
+      status: 'success', session_id: 'S', provider, model, juno_version: '2.1.3', error: null,
       cost: { completeness: 'complete', usd: 0 },
     });
   });
