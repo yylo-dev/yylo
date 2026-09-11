@@ -92,7 +92,7 @@ list` and `skills status` use only the local install record.
 | Validation evidence | `evidence run|status|await` | Content-addressed task evidence tied to exact inputs. |
 | Repository topology | `info`, `where`, `doctor workspace`, `integration` | Read-only discovery is separate from guarded sync/repair/push. |
 | Feature lifecycle | `task start|run|status|checkpoint|preflight|finish` | Implementation belongs in the returned exact-base task worktree. |
-| Protected delivery | `merge status|plan|arbiter|drive|next|resolve` | One fenced target owner and expected-old-SHA CAS; dirt is preserved. |
+| Protected delivery | `merge status [TASK_ID]`, `merge land TASK_ID`, `merge project TASK_ID` | One-task native Git composition plus expected-old ref update; Ledger projection is separate and retryable. |
 | Maintainer release | repository `scripts/release-cli.sh` | Prepare is read-only; publish needs separate authority. |
 | Records/evaluation | `ledger`, `benchmark` | Transparent delegation to independently installed canonical packages. |
 
@@ -276,10 +276,13 @@ This section is for repositories initialized with the current controller/task po
 
 ```bash
 yy task run TASK_ID
-yy merge drive --through TASK_ID
+yy merge land TASK_ID
+yy merge project TASK_ID
 ```
 
-`TASK_ID` is a Ledger task ID. `task run` executes the controller-owned workflow through `QUEUED`; `merge drive` is an explicit fenced target mutation.
+`TASK_ID` is a Ledger task ID. `task run` executes the controller-owned workflow
+through `QUEUED`. `merge land` composes and lands exactly that task with native
+Git; `merge project` separately records an already successful Git result.
 
 ### Manual implementation path
 
@@ -289,45 +292,36 @@ yy task start TASK_ID
 # Read its AGENTS.md/CLAUDE.md, implement, run focused tests, and commit.
 yy task preflight TASK_ID
 yy task finish TASK_ID
-yy merge status                       # bounded operational summary
-yy merge status --detail TASK_ID      # bounded task diagnostics
-yy merge status --full                # explicit legacy exhaustive output
-yy merge arbiter status
-yy merge arbiter run --through TASK_ID
+yy merge status TASK_ID
+yy merge land TASK_ID
+yy merge project TASK_ID
 ```
 
-The guarded manual admission order is `yy task preflight ID -> yy task finish ID`; merge remains a separate queue-owned step.
+The guarded admission order is `yy task preflight ID -> yy task finish ID`.
+Delivery remains a separate one-task operation.
 
 Safety invariants:
 
 1. `task start` freezes the protected target SHA, creates a dedicated branch/worktree, and completes configured dependency hydration before reporting `WORKING`.
 2. Product edits and focused tests occur only in that task worktree. Controller metadata and integration-owner product bytes are separate authorities.
 3. `preflight` is read-only and catches closure defects before expensive gates. `finish` requires a clean committed tip and queues it; it does not merge.
-4. The merge queue owns risk-based review and moved-target composition. Low risk has no semantic reviewer, normal risk at most one, and high risk two sequential reviewers on one frozen candidate. After one repair candidate and one delta-review group, unresolved findings stop as `REVIEW_FINDINGS_EXHAUSTED` instead of starting an unbounded review loop.
-5. Target mutation is serialized under one fencing owner and expected-old-SHA CAS. Lease age alone never transfers authority.
-6. Conflicts and unrelated dirty bytes are preserved. Use the exact recovery packet and `yy merge resolve TASK_ID`; do not reset, stash, force, rebase, or squash to bypass it.
+4. Tests and semantic reviews are explicit project checks outside merge. Merge launches no models, chooses no reviewers, schedules no suites, and maintains no validation cache.
+5. `merge land` selects one immutable task source, composes in a private detached candidate, and uses Git expected-old ref protection. A moved target requires recomposition and renewed candidate checks.
+6. A conflict remains private to its task and cannot block an unrelated task. Preserve conflicts and unrelated dirty bytes; do not reset, stash, force, rebase, squash, or clean to bypass them.
+7. Git success and Ledger projection are separate. A projection retry never repeats Git integration and never blocks another independent land.
 
 Observation commands are safe to repeat:
 
 ```bash
 yy task status TASK_ID
 yy task doctor TASK_ID
-yy merge plan TASK_ID --json
 yy merge status
-# When needed:
-yy merge status --detail TASK_ID
-yy merge status --detail              # active FIFO attempt
-yy merge status --full                # exhaustive compatibility/diagnosis
-yy merge arbiter status
+yy merge status TASK_ID
 ```
 
-Bare status is `merge-status.summary.v1`, capped at 32 KiB and 19 projected rows.
-Detail remains capped at 32 KiB and identifies omitted diagnostic material;
-`--full` is the unbounded `merge-status.full.v1` compatibility projection. JSON
-always includes schema, projection, truncation, and cursor metadata. Interactive
-status renders those same identifiers; pass `--json` to force structured output.
-
-`yy merge next` and `yy merge resolve` are explicit recovery mutations, not polling commands.
+Merge status reports only independently landable active tasks and always reports
+`model_calls: 0`. Historical queue receipts remain immutable data, not an
+executable compatibility surface.
 
 ## Maintainer npm release
 

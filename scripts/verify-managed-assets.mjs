@@ -21,29 +21,26 @@ if (uniqueSources.size !== assets.length || uniqueDestinations.size !== assets.l
   throw new Error('Managed asset manifest contains duplicate source or destination entries');
 }
 
-const boundedReviewMarkers = [
+const retiredMergeReviewMarkers = [
   'managed merge queue is the sole lifecycle-semantic review owner',
   'Reviewer A then Reviewer B',
   'at most one repair candidate',
   'REVIEW_FINDINGS_EXHAUSTED',
 ];
-const assertBoundedReviewContract = (content, label) => {
+const assertNativeDeliveryReviewBoundary = (content, label) => {
   const text = content.toString();
-  for (const marker of boundedReviewMarkers) {
-    assert.ok(text.includes(marker), `${label} omits bounded-review marker: ${marker}`);
+  for (const marker of retiredMergeReviewMarkers) {
+    assert.ok(!text.includes(marker), `${label} retains retired merge-review marker: ${marker}`);
   }
-  assert.ok(
-    !text.includes('launch a fresh read-only independent `yy pi` review'),
-    `${label} tells an implementation worker to launch lifecycle review`,
-  );
+  assert.match(text, /merge\s+launches\s+zero models/i, `${label} omits zero-model merge boundary`);
 };
 
 const lifecycleSource = readFileSync(path.join('src', 'templates', 'prompts', 'life_cycle.md'));
-assertBoundedReviewContract(lifecycleSource, 'source @@life_cycle prompt');
+assertNativeDeliveryReviewBoundary(lifecycleSource, 'source @@life_cycle prompt');
 const canonicalImplementation = readFileSync(
   path.join('src', 'templates', 'skills', 'canonical', 'ralph-loop', 'references', 'implement.md'),
 );
-assertBoundedReviewContract(canonicalImplementation, 'canonical implementation instruction');
+assertNativeDeliveryReviewBoundary(canonicalImplementation, 'canonical implementation instruction');
 for (const asset of assets) {
   const source = readFileSync(path.join('src', 'templates', asset.source));
   const built = readFileSync(path.join('dist', 'templates', asset.source));
@@ -96,7 +93,7 @@ try {
     }
   }
 
-  assertBoundedReviewContract(
+  assertNativeDeliveryReviewBoundary(
     readFileSync(path.join(packDirectory, 'package', 'dist/templates/prompts/life_cycle.md')),
     'packed @@life_cycle prompt',
   );

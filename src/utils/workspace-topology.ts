@@ -417,7 +417,7 @@ export function inspectWorkspaceTopology(
           candidateSha: targetSha,
           outcome: typeof value.outcome === 'string' ? value.outcome : null,
           firstIncompletePhase,
-          recoveryCommand: 'yy merge next',
+          recoveryCommand: `yy merge project ${taskId}`,
         });
       }
     } catch {

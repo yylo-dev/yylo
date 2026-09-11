@@ -1173,12 +1173,6 @@ TASK_OPERATIONS = (
     "task.implementation", "task.closure", "evidence.consume_or_execute",
     "task.attributable_repair", "task.finish",
 )
-MERGE_OPERATIONS = (
-    "merge.freeze_fifo", "merge.compose_or_refresh", "evidence.consume_or_execute",
-    "merge.grouped_coherence", "merge.classify_risk", "merge.review_and_suite",
-    "merge.cas_and_finalize",
-)
-
 
 class LifecycleContractError(RuntimeError):
     pass
@@ -2316,17 +2310,16 @@ def _tracked_committed_blob(controller: Path, path: Path) -> tuple[str, str]:
 
 def compile_lifecycle_template(controller: Path, kind: str, task_id: Optional[str], *,
                                model_identity: Optional[str] = None) -> dict[str, Any]:
-    if kind not in {"task-run", "merge-drive"}:
+    if kind != "task-run":
         raise LifecycleContractError("unknown lifecycle template kind")
-    name = "yy-task-run.yaml" if kind == "task-run" else "yy-merge-drive.yaml"
-    template = controller / ".juno_task/workflows" / name
+    template = controller / ".juno_task/workflows/yy-task-run.yaml"
     try:
         raw = template.read_bytes(); value = json.loads(raw)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise LifecycleContractError(f"invalid controller lifecycle template: {exc}") from exc
     controller_head, relative = _tracked_committed_blob(controller, template)
     required = {"schema_version", "template_id", "revision", "kind", "budgets", "steps", "prompts"}
-    expected_operations = TASK_OPERATIONS if kind == "task-run" else MERGE_OPERATIONS
+    expected_operations = TASK_OPERATIONS
     if (not isinstance(value, dict) or set(value) != required or value.get("kind") != kind
             or value.get("schema_version") != "juno_lifecycle_template.v1"
             or not isinstance(value.get("revision"), int) or value["revision"] < 1

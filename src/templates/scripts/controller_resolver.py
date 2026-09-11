@@ -74,53 +74,6 @@ def fail(message: str, result: dict[str, object]) -> None:
     raise ResolverError(message, result)
 
 
-def managed_queue_binding_matches(controller: Path, evidence: dict[str, object]) -> bool:
-    raw = os.environ.get("JUNO_MANAGED_CONTROLLER_BINDING_JSON", "").strip()
-    if not raw:
-        return False
-    try:
-        binding = json.loads(raw)
-    except json.JSONDecodeError:
-        return False
-    required = {"schema_version", "root", "head", "branch_ref", "config_sha256",
-                "policy_identity", "queue_state"}
-    if not isinstance(binding, dict) or set(binding) != required \
-            or binding.get("schema_version") != "juno_managed_controller_binding.v1" \
-            or binding.get("root") != str(controller):
-        return False
-    queue_state = binding.get("queue_state")
-    if not isinstance(queue_state, list) or not queue_state:
-        return False
-    expected: dict[str, str] = {}
-    for item in queue_state:
-        if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
-            return False
-        relative, digest = item.get("path"), item.get("sha256")
-        if (not isinstance(relative, str) or relative in expected
-                or not (relative == ".juno_task/state/tasks.json"
-                        or relative.startswith(".juno_task/state/merge-queue/"))
-                or not isinstance(digest, str) or len(digest) != 64):
-            return False
-        expected[relative] = digest
-    unstaged = set(filter(None, (git(controller, "diff", "--name-only") or "").splitlines()))
-    staged = set(filter(None, (git(controller, "diff", "--cached", "--name-only") or "").splitlines()))
-    untracked = set(filter(None, (git(
-        controller, "ls-files", "--others", "--exclude-standard") or "").splitlines()))
-    if staged or unstaged | untracked != set(expected):
-        return False
-    for relative, digest in expected.items():
-        path = controller / relative
-        if path.is_symlink() or not path.is_file() \
-                or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-            return False
-    config_path = controller / ".juno_task/config.json"
-    return (binding.get("head") == git(controller, "rev-parse", "HEAD")
-            and binding.get("branch_ref") == git(controller, "symbolic-ref", "-q", "HEAD")
-            and config_path.is_file()
-            and binding.get("config_sha256") == hashlib.sha256(config_path.read_bytes()).hexdigest()
-            and binding.get("policy_identity") == evidence.get("policy_identity"))
-
-
 def resolve(cwd: Path, operation: str) -> dict[str, object]:
     cwd = cwd.resolve()
     repo_root_text = git(cwd, "rev-parse", "--show-toplevel")
@@ -232,11 +185,7 @@ def resolve(cwd: Path, operation: str) -> dict[str, object]:
                     if not evidence["passed"]:
                         failed = sorted(name for name, passed in evidence["checks"].items() if not passed)
                         message = "canonical sparse controller policy refused: " + ",".join(failed)
-                        bound_orchestration = (operation == "orchestration"
-                                               and failed == ["clean"]
-                                               and managed_queue_binding_matches(
-                                                   controller, evidence))
-                        if (operation == "diagnostic" and failed == ["clean"]) or bound_orchestration:
+                        if operation == "diagnostic" and failed == ["clean"]:
                             result["diagnostics"].append(message)
                         else:
                             errors.append(message)

@@ -52,8 +52,6 @@ BLOCKING_REVIEW_IMPACTS = {
 }
 TERMINAL_RESULT_SCHEMA = "juno_managed_agent_terminal_result.v1"
 TERMINAL_STATES = {"completed", "blocked", "incomplete", "failed"}
-QUEUE_STATE_PATH = ".juno_task/state/tasks.json"
-QUEUE_RECEIPT_ROOT = ".juno_task/state/merge-queue/"
 CAPTURE_LIMIT = 4 * 1024 * 1024
 TASK_RE = __import__("re").compile(r"[A-Za-z0-9_-]{1,64}\Z")
 SHA_RE = __import__("re").compile(r"[0-9a-f]{40}\Z")
@@ -479,19 +477,11 @@ def fingerprint(root: Path) -> dict[str, Any]:
 
 
 def resolver_policy_passes(result: subprocess.CompletedProcess[str], resolved: Any,
-                           workspace: Any, queue_state_bound: bool) -> bool:
-    if not isinstance(resolved, dict) or not isinstance(workspace, dict) \
-            or not isinstance(workspace.get("checks"), dict):
-        return False
-    if result.returncode == 0:
-        return resolved.get("valid") is True and workspace.get("passed") is True
-    failed = sorted(name for name, passed in workspace["checks"].items() if passed is not True)
-    expected = "canonical sparse controller policy refused: clean"
-    return (queue_state_bound and result.returncode == 2
-            and result.stderr.strip() == "controller-resolver: " + expected
-            and resolved.get("valid") is False
-            and resolved.get("diagnostics") == [expected]
-            and workspace.get("passed") is False and failed == ["clean"])
+                           workspace: Any) -> bool:
+    return (isinstance(resolved, dict) and isinstance(workspace, dict)
+            and isinstance(workspace.get("checks"), dict)
+            and result.returncode == 0 and resolved.get("valid") is True
+            and workspace.get("passed") is True)
 
 
 def legacy_metadata_controller_policy(data: bytes) -> dict[str, Any]:
@@ -555,24 +545,7 @@ def controller_identity(root: Path) -> dict[str, Any]:
     if not config.is_file():
         raise RunnerError("controller is missing its config or is dirty")
     if mark["status"]:
-        unstaged = sorted(filter(None, git(root, "diff", "--name-only").splitlines()))
-        staged = sorted(filter(None, git(root, "diff", "--cached", "--name-only").splitlines()))
-        untracked = sorted(filter(None, git(
-            root, "ls-files", "--others", "--exclude-standard").splitlines()))
-        dirty_paths = sorted(set(unstaged + untracked))
-        allowed = all(path == QUEUE_STATE_PATH or path.startswith(QUEUE_RECEIPT_ROOT)
-                      for path in dirty_paths)
-        files = [root / path for path in dirty_paths]
-        if (not dirty_paths or staged or not allowed
-                or any(path.is_symlink() or not path.is_file() for path in files)):
-            raise RunnerError("controller is missing its config or is dirty")
-        # The merge queue must durably publish REVIEWING before dispatch.  Bind
-        # that one queue-owned worktree change so it may be dirty but cannot
-        # mutate while the managed agent is running.
-        mark["queue_state"] = [
-            {"path": relative, "sha256": sha(path.read_bytes())}
-            for relative, path in zip(dirty_paths, files)
-        ]
+        raise RunnerError("controller is missing its config or is dirty")
     mark["config_sha256"] = sha(config.read_bytes())
     resolver = root / ".juno_task/scripts/controller_resolver.py"
     if resolver.is_file():
@@ -585,7 +558,6 @@ def controller_identity(root: Path) -> dict[str, Any]:
         try: resolved = json.loads(result.stdout)
         except json.JSONDecodeError: resolved = {}
         workspace = resolved.get("controller_workspace") if isinstance(resolved, dict) else None
-        queue_state_bound = bool(mark.get("queue_state"))
         resolver_base_passes = (
             isinstance(resolved, dict)
             and Path(str(resolved.get("path"))).resolve() == root
@@ -599,8 +571,7 @@ def controller_identity(root: Path) -> dict[str, Any]:
         elif configured_workspace == CANONICAL_SPARSE_WORKSPACE:
             accepted = (resolver_base_passes
                         and (root / CANONICAL_SPARSE_WORKSPACE["policy"]).is_file()
-                        and resolver_policy_passes(
-                            result, resolved, workspace, queue_state_bound))
+                        and resolver_policy_passes(result, resolved, workspace))
             policy_identity = workspace.get("policy_identity") if accepted else None
         else:
             accepted = False
@@ -609,7 +580,7 @@ def controller_identity(root: Path) -> dict[str, Any]:
             raise RunnerError("canonical controller resolver/policy refused launch")
         mark["resolver"] = {"source": resolved.get("source"), "role": resolved.get("role"),
                             "policy_identity": policy_identity,
-                            "passed": True, "queue_state_bound": queue_state_bound}
+                            "passed": True}
     return mark
 
 
@@ -848,20 +819,6 @@ def validate_reviewer(args: argparse.Namespace, controller: dict[str, Any]) -> t
     return {"candidate_sha": args.candidate_sha, "candidate_root": str(candidate), "before": mark}, mark
 
 
-def managed_controller_binding(mark: dict[str, Any]) -> dict[str, Any] | None:
-    if not mark.get("queue_state"):
-        return None
-    resolver = mark.get("resolver")
-    policy_identity = resolver.get("policy_identity") if isinstance(resolver, dict) else None
-    if not isinstance(policy_identity, dict) or not policy_identity:
-        raise RunnerError("queue-owned dirty controller requires canonical resolver identity")
-    return {"schema_version": "juno_managed_controller_binding.v1",
-            "root": mark["root"], "head": mark["head"],
-            "branch_ref": mark["branch_ref"], "config_sha256": mark["config_sha256"],
-            "policy_identity": policy_identity,
-            "queue_state": mark["queue_state"]}
-
-
 def node_version(executable: str | None) -> str:
     if not executable:
         return "unknown"
@@ -958,10 +915,6 @@ def clean_environment(args: argparse.Namespace, capture: Path, metadata: Path,
             explicit["JUNO_LIFECYCLE_AUTHORITY_MAP"] = str(Path(args.authority_map).resolve())
     if binding is not None:
         explicit["JUNO_REVIEW_BINDING_JSON"] = canonical(binding).decode().strip()
-    controller_binding = managed_controller_binding(controller_mark or {})
-    if controller_binding is not None:
-        explicit["JUNO_MANAGED_CONTROLLER_BINDING_JSON"] = canonical(
-            controller_binding).decode().strip()
     env.update(explicit)
     env = child_invocation_environment(
         env, launch_surface="managed_agent_runner", task_id=args.task_id or None,

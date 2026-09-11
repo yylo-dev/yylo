@@ -21,9 +21,9 @@ Purity is enforced, not merely documented:
 against a strict allowlist and executes every pure table with ``open`` and
 process creation poisoned, in addition to bounding total wall time.
 
-Wave 3 pilot scope: task-workspace only. Whether the merge queue justifies
-the same extraction is a measured follow-up decision recorded in
-``docs/test-performance.md``; it is not silently absorbed here.
+This module remains task-workspace-only. Native delivery is implemented by the
+separate one-task Git adapter and does not import task validation or evidence
+planning into merge.
 """
 from __future__ import annotations
 
@@ -551,20 +551,6 @@ def validation_failure_message(row: dict[str, Any], result: dict[str, Any]) -> s
         return f"focused validation timed out ({row['id']}) after {row['timeout_seconds']}s"
     detail = result["stderr_tail"] or result["stdout_tail"]
     return f"focused validation failed ({row['id']}, exit {result['exit_code']}): {detail}"
-
-
-def next_enqueue_sequence(meta: Any) -> int:
-    """Validate the FIFO sequence section and decide the next sequence value.
-
-    Pure decision half of ``assign_enqueue_sequence``: the shell owns the
-    state mutation, this planner owns the admission contract.
-    """
-    if (not isinstance(meta, dict) or set(meta) != {"schema_version", "next"}
-            or meta.get("schema_version") != "juno_task_workspace_fifo.v1"
-            or not isinstance(meta.get("next"), int) or isinstance(meta.get("next"), bool)
-            or not 1 <= meta["next"] <= 2**63 - 1):
-        raise ValueError("task FIFO sequence state is invalid")
-    return meta["next"]
 
 
 def shared_queue_delta(before: Any, after: Any) -> list[str]:
