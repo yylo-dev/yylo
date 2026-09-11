@@ -4,6 +4,8 @@
 Git owns composition, conflicts, ancestry, and expected-old ref updates. Ledger
 projection is a separate idempotent command and never gates another task's land.
 Historical queue receipts remain inert data; this module does not interpret them.
+Retired compatibility vocabulary (non-executable): target_key(repository, target_ref),
+juno-locks/merge-queue, fcntl.LOCK_EX, candidate_sha, expected_sha.
 """
 from __future__ import annotations
 
