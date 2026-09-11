@@ -1,7 +1,7 @@
 ---
 juno_prompt_schema: juno.life_cycle.v1
 public_macro: "@@life_cycle"
-revision: 6
+revision: 8
 ---
 
 # Observable Juno task lifecycle
@@ -38,19 +38,19 @@ Use the installed Juno control plane; do not create another workflow engine.
    exact paths, and proportional focused tests. Commit one logical task at a
    time. Before shared heavy real-Git suites, inspect active workloads and avoid
    intentional resource-lock contention.
-6. **Keep semantic review queue-owned and bounded.** Implementation and repair
-   agents never launch lifecycle-semantic reviewers. The managed merge queue is the sole lifecycle-semantic review owner:
-   low risk uses zero reviewers, normal at most one, and high uses Reviewer A then Reviewer B
-   sequentially against one frozen predecessor-bound v1 candidate. It permits at most one repair candidate
-   and one delta review group; further material findings stop as `REVIEW_FINDINGS_EXHAUSTED`,
-   never an autonomous review loop.
+6. **Keep checks outside merge.** Implementation workers run the explicit
+   project tests and reviews required for their exact candidate. Merge launches
+   zero models, chooses no reviewer, schedules no suite, and owns no repair or
+   evidence-cache loop. Git ancestry is integration evidence, not proof of tests,
+   review, or fulfilled requirements.
 7. **Use managed lifecycle boundaries.** After a clean committed implementation,
    run read-only `yy task preflight TASK_ID`, repair closure defects while
    `WORKING`, then run separately authorized `yy task finish TASK_ID`. Observe
-   delivery with `yy merge status|arbiter status`; one fenced target owner uses
-   `yy merge arbiter run` or typed `yy merge drive` for expected-old-SHA delivery,
-   while `next|resolve` remain explicit recovery mutations. Never steal on elapsed time or discard dirty
-   recovery bytes. For integration-owner drift use `yy integration status`, then
+   with `yy merge status TASK_ID`; one target owner uses `yy merge land TASK_ID`
+   for native-Git expected-old delivery, then `yy merge project TASK_ID` for the
+   separate Ledger projection. Recompose and renew candidate checks after target
+   movement, preserve private conflict bytes, and never let one conflict block an
+   unrelated task. For integration-owner drift use `yy integration status`, then
    receipt-bound `repair --dry-run/--apply`.
 8. **Keep release authority explicit.** Integrate every change through the ordinary
    task and merge lifecycle. Package preparation uses the repository maintainer
@@ -64,7 +64,7 @@ Use the installed Juno control plane; do not create another workflow engine.
 
 ## Evolution
 
-This is schema `juno.life_cycle.v1`, revision 7. Change the canonical source in
+This is schema `juno.life_cycle.v1`, revision 8. Change the canonical source in
 `juno-code/src/templates/prompts/life_cycle.md`, update this revision and release
 notes when behavior changes, and validate source/dist/tarball plus managed-install
 parity. Project customizations are user-owned: managed update must preserve or

@@ -88,11 +88,29 @@ A target move invalidates candidate checks. A projection retry does not repeat G
 
 ## Replacement result
 
-The one-task replacement retains 302 authored adapter lines, 85 authored TypeScript CLI lines, and 18 lines for the integration-maintenance lock moved out of merge: **405 retained/new production lines total**. Against the frozen 9,041-line denominator, this deletes **8,636 lines (95.52%)** without counting runtime/template twins twice. It is 395 lines below the 800-line cap. The adapter has three public commands (`status`, `land`, `project`), three active delivery states (`QUEUED`, `CONFLICT`, `GIT_INTEGRATED` before terminal `MERGED`), one task-state write after Git, and one separately retriable Ledger write. Merge-owned model calls are zero.
+The final one-task replacement retains 304 authored adapter lines, 94 authored TypeScript CLI lines, and 18 lines for the integration-maintenance lock moved out of merge: **416 retained/new production lines total**. Against the frozen 9,041-line denominator, this deletes **8,625 lines (95.40%)** without counting runtime/template twins twice. It is 384 lines below the 800-line cap. The separately measured 99% stretch would require at most 90 retained lines and was not reached. The adapter has three public commands (`status`, `land`, `project`), three active delivery states (`QUEUED`, `CONFLICT`, `GIT_INTEGRATED` before terminal `MERGED`), one task-state write after Git, and one separately retriable Ledger write. Merge-owned model calls are zero.
 
 The replacement removed FIFO selection, arbiter/drive/resume journals, reviews, repair, risk routing, validation scheduling/cache, queue-tail authority, target refresh, reopen, reconciliation, supersession, and owner-checkout synchronization from the runtime. Focused real-Git tests cover clean divergent delivery, private conflict X plus unrelated Y, competing expected-old updates, target movement, dirty bytes, already-contained retry, attached-target refusal, and Git-success/Ledger-failure. Historical receipts are not read or deleted.
 
 This is a source-line deletion result, not an elapsed-time claim. Operator interventions, production ready-to-integrated time, and matched project-check overhead remain unknown until observed after activation.
+
+## Packed-package acceptance
+
+The final source checkout ran `npm run test:managed-assets`, `npm run
+test:installed-test-fixture-package`, `npm run test:fresh-init-package`, and `npm
+run test:bolt-package-canary`. The canary installed the real packed tarball and
+reported 14 selected tests, 7 expected refusals, 2 refused retired entrypoints,
+15,063 ms elapsed, and zero model calls, agent tool calls, failed agent calls,
+reviewer sessions, controller checkpoints, or tokens. The separately run 11-case
+native-Git fixture passed in 3,142.10 ms summed scenario wall time. These are
+local fixture timings only, not production latency claims.
+
+The runtime surface has four delivery states (`QUEUED`, `CONFLICT`,
+`GIT_INTEGRATED`, `MERGED`). `land` performs one expected-old Git ref write and
+then one task-state write recording Git truth; `project` performs one separately
+retryable revision-checked Ledger write. Conflict, attached target, stale target,
+and crash-before-update cases perform no target-ref or Ledger write. Every
+acceptance command launched zero models.
 
 ## Reproduction
 

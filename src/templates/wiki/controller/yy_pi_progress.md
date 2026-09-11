@@ -87,8 +87,8 @@ tip, tree, changed paths, command, dependency locks, controller policy, runtime,
 and local runner class. Unknown or mixed ownership falls back conservatively.
 A later tip reuses a command only when its complete input closure remains exact.
 `yy task finish` creates the final checkpoint, reuses valid receipts, runs only
-missing commands, and binds the receipts into the review-ready closure. The
-merge queue re-verifies those receipts before expensive admission.
+missing commands, and binds the receipts into the immutable task closure. Tests
+and semantic review end here; native delivery does not rerun or reinterpret them.
 
 ## Terminal files
 
@@ -123,18 +123,18 @@ strict observer for a pre-existing producer. It never signals that producer.
 New producers should use `yy watch exec` so PID publication, logging, footer
 publication, timeout handling, and descendant settlement are not hand-written.
 
-## Managed task and merge drivers
+## Managed task execution and native delivery
 
-Use `yy task run TASK_ID` for the controller-owned typed implementation path and
-`yy merge drive --through TASK_ID` for the frozen FIFO delivery path. Both write
-compact projections and immutable artifacts under
-`.juno_task/runtime/lifecycle-runs/`; they stop rather than inherit conflict,
-release, push, deploy, or other external authority. `yy task start|checkpoint|
-preflight|finish`, `yy evidence run|status|await`, and `yy merge status|next|
-resolve` remain the diagnostic and explicit recovery primitives.
+Use `yy task run TASK_ID` for the controller-owned typed implementation path.
+After it queues the immutable source, observe `yy merge status TASK_ID`, run
+`yy merge land TASK_ID`, then separately run `yy merge project TASK_ID`. Merge
+has no managed driver, FIFO scope, lifecycle YAML, model prompt, review, repair,
+or validation scheduler. It preserves a private conflict and refuses stale
+target updates rather than inheriting release, push, deploy, or other external
+authority.
 
-Lifecycle YAML and prompts are controller-owned committed assets. A run freezes
-the controller commit, raw/semantic template digest, prompt digests, compiler,
+Task lifecycle YAML and prompts are controller-owned committed assets. A task
+run freezes the controller commit, template and prompt digests, compiler,
 runtime, model, and budget identities. Customized assets are preserved by
 ordinary managed updates, active attempts are immutable, and automatic
 model-authored template or prompt mutation is refused.

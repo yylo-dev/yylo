@@ -15,14 +15,13 @@ describe('prompt-macro-resolver', () => {
       maxDepth: 8,
     });
     expect(result.resolvedPrompt).toBe(`${lifecycle} ${payload}`);
-    expect(result.resolvedPrompt).toContain('Implementation and repair');
-    expect(result.resolvedPrompt).toContain('sole lifecycle-semantic review owner');
-    expect(result.resolvedPrompt).toContain('Reviewer A then Reviewer B');
-    expect(result.resolvedPrompt).toContain('predecessor-bound v1 candidate');
-    expect(result.resolvedPrompt).toContain('at most one repair candidate');
-    expect(result.resolvedPrompt).toContain('one delta review group');
-    expect(result.resolvedPrompt).toContain('REVIEW_FINDINGS_EXHAUSTED');
-    expect(result.resolvedPrompt).not.toContain('launch a fresh read-only independent');
+    expect(result.resolvedPrompt).toContain('Keep checks outside merge');
+    expect(result.resolvedPrompt).toContain('Merge launches');
+    expect(result.resolvedPrompt).toContain('zero models');
+    expect(result.resolvedPrompt).toContain('yy merge land TASK_ID');
+    expect(result.resolvedPrompt).toContain('yy merge project TASK_ID');
+    expect(result.resolvedPrompt).not.toContain('sole lifecycle-semantic review owner');
+    expect(result.resolvedPrompt).not.toContain('REVIEW_FINDINGS_EXHAUSTED');
     expect(result.resolvedPrompt.indexOf(payload)).toBe(result.resolvedPrompt.lastIndexOf(payload));
     expect(result.warnings).toEqual([]);
   });

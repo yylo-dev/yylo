@@ -1046,18 +1046,6 @@ def _record_queue_attribution(controller: Path, data: bytes) -> None:
             os.unlink(temporary)
 
 
-def assign_enqueue_sequence(state: dict[str, Any]) -> int:
-    meta = state["queues"].setdefault(
-        "task_workspace_fifo", {"schema_version": "juno_task_workspace_fifo.v1", "next": 1}
-    )
-    try:
-        value = decisions.next_enqueue_sequence(meta)
-    except ValueError as exc:
-        raise TaskWorkspaceError(str(exc)) from exc
-    meta["next"] += 1
-    return value
-
-
 @contextmanager
 def state_lock(controller: Path) -> Iterator[Callable[[bool], None]]:
     # Runtime locks are ignored controller-local state; only tasks.json is durable truth.
@@ -2445,7 +2433,7 @@ def record_control_audit(controller: Path, surface: str, operation: str,
             "lease-status", "lease-heartbeat", "lease-handoff", "lease-successor",
             "lease-revoke", "lease-release"}:
         raise TaskWorkspaceError(f"unsupported task audit operation: {operation}")
-    if surface == "merge" and operation not in {"status", "drive", "next", "resolve", "review", "reopen", "reconcile", "refresh", "withdraw", "recover-full-suite-failure", "recover-repair-predispatch", "recover-authority-drift", "supersede-lifecycle-journal"}:
+    if surface == "merge" and operation not in {"status", "land", "project"}:
         raise TaskWorkspaceError(f"unsupported merge audit operation: {operation}")
     if forwarded_policy is not None and forwarded_policy != expected_policy:
         raise TaskWorkspaceError(
@@ -2879,8 +2867,8 @@ def project_kanban_lifecycle(controller: Path, task_id: str, lifecycle_state: st
                               {"task_id": task_id, "lifecycle_state": lifecycle_state})
     board_status = LIFECYCLE_BOARD_STATUS[lifecycle_state]
     if board_status == "done" and not allow_done:
-        # Verified merge finalization exclusively owns the done mutation; the
-        # projection only verifies it after the fact.
+        # Native delivery projection exclusively owns the done mutation; this
+        # helper only verifies it after the fact.
         current = read_kanban_task(controller, task_id)
         if current.get("status") == "done":
             return {"schema_version": KANBAN_SYNC_SCHEMA, "task_id": task_id,
@@ -2889,7 +2877,7 @@ def project_kanban_lifecycle(controller: Path, task_id: str, lifecycle_state: st
                     "board_status": "done",
                     "recovery_command": None}
         raise KanbanSyncError(
-            "merge finalization owns the done mutation; run the merge queue recovery",
+            "native delivery projection owns the done mutation; retry Ledger projection",
             {"task_id": task_id, "lifecycle_state": lifecycle_state,
              "board_status": current.get("status"),
              "recovery_command": f"yy merge project {task_id}"})
@@ -5081,7 +5069,6 @@ def _finish_once(controller: Path, task_id: str,
                 raise TaskWorkspaceError(
                     f"frozen umbrella admission drifted before queue mutation: {json.dumps(final_drift, sort_keys=True)}"
                 )
-        queued["enqueue_sequence"] = assign_enqueue_sequence(state)
         state["tasks"][task_id] = queued
         write_state(controller, state)
     try:
@@ -5875,8 +5862,8 @@ def _target_ref_holders(repository: Path, target_ref: str) -> list[dict[str, Any
 
 @contextmanager
 def _target_mutation_lock(repository: Path, target_ref: str) -> Iterator[None]:
-    # Contend on the merge queue's repository/ref lock inode. Runtime recovery
-    # and queue delivery must never mutate the same target concurrently.
+    # Contend on the native delivery adapter's repository/ref lock inode. Runtime
+    # recovery and delivery must never mutate the same target concurrently.
     common = Path(git(repository, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
     key = hashlib.sha256(f"{common}\0{target_ref}".encode()).hexdigest()
     path = common / "juno-locks/merge-queue" / f"{key}.lock"

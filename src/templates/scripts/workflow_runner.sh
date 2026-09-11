@@ -321,7 +321,7 @@ class StepLaunchOwnership:
 
 LOCAL_INTEGRATION_HARD_CUT = (
     "legacy local_integration execution is read-only; "
-    "use `yy task start TASK_ID` and `yy merge next`, or inspect historical artifacts with workflow_runner.sh doctor"
+    "use `yy task start TASK_ID` and `yy merge land TASK_ID`, or inspect historical artifacts with workflow_runner.sh doctor"
 )
 RETIRED_LIFECYCLE_HELPERS = {
     "worktree_lifecycle.py", "integration_candidate.py", "integration_owner_preflight.py",
@@ -4669,7 +4669,7 @@ def build_parser() -> argparse.ArgumentParser:
   JUNO_WORKFLOW_RECEIPT_<ID>. Receipt producers receive JUNO_WORKFLOW_STEP_ID and JUNO_WORKFLOW_STEP_DIGEST;
   every receipt required_fields list explicitly includes producer_step_digest.
   Legacy workflow_class: local_integration execution is hard-rejected. Use
-  `yy task start TASK_ID` and `yy merge next`; doctor remains available for historical artifacts.
+  `yy task start TASK_ID` and `yy merge land TASK_ID`; doctor remains available for historical artifacts.
 
 Helper commands:
   workflow_runner.sh lint --workflow WORKFLOW.yaml     # flag response/log template anti-patterns

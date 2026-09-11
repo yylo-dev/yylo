@@ -21,14 +21,12 @@ product code.
 5. After a clean task commit, run the read-only `yy task preflight TASK_ID`,
    repair any reported closure defect while the task is still `WORKING`, then
    finish with `yy task finish TASK_ID`.
-6. Do not launch lifecycle-semantic reviewers from implementation or repair.
-   The merge queue is the sole review owner: low risk uses zero reviewers,
-   normal at most one, and high exactly two sequential predecessor-bound v1
-   reviewers on one frozen tip. It permits one repair candidate and one delta
-   review group, then stops as `REVIEW_FINDINGS_EXHAUSTED`.
-7. Observe delivery with `yy merge status` or `yy merge arbiter status`. The
-   target owner uses one fenced `yy merge arbiter run` (or typed `yy merge drive`)
-   instead of session polling. `next|resolve` are explicit recovery mutations.
+6. Tests and semantic reviews are explicit project checks outside merge. The
+   native delivery adapter launches no models, chooses no reviewers, schedules
+   no suites, and owns no repair or evidence-cache loop.
+7. Observe one task with `yy merge status TASK_ID`. The target owner runs
+   `yy merge land TASK_ID`, then `yy merge project TASK_ID` to record the Git
+   result separately. Recompose after target movement; preserve private conflicts.
 8. Integration always uses the ordinary task and merge lifecycle. The finite
    `yy migrate legacy-lifecycle` surface is restricted to existing umbrella
    inventory/drain/conversion; live apply requires separate owner authority.

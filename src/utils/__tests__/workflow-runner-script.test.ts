@@ -385,7 +385,8 @@ describe('workflow_runner.sh template script', () => {
     expect(templateContent).not.toContain('env["JUNO_WORKFLOW_DIRECT_OWNER"]');
     expect(templateContent).toContain('legacy local_integration execution is read-only');
     expect(templateContent).toContain('yy task start TASK_ID');
-    expect(templateContent).toContain('yy merge next');
+    expect(templateContent).toContain('yy merge land TASK_ID');
+    expect(templateContent).not.toContain('yy merge next');
     expect(templateContent).not.toContain('local_integration requires schema_version: 2');
     expect(templateContent).toContain('required_fields must include producer_step_digest');
     expect(templateContent).not.toContain('--checkpoint-controller');
@@ -771,7 +772,8 @@ pathlib.Path(os.environ['JUNO_SUBAGENT_CAPTURE_PATH']).write_text(json.dumps(pay
       'legacy local_integration execution is read-only',
     );
     expect(accepted.stderr + accepted.stdout).toContain('yy task start TASK_ID');
-    expect(accepted.stderr + accepted.stdout).toContain('yy merge next');
+    expect(accepted.stderr + accepted.stdout).toContain('yy merge land TASK_ID');
+    expect(accepted.stderr + accepted.stdout).not.toContain('yy merge next');
     return;
 
     for (const reviewStepId of ['pre_merge_review', 'candidate_review']) {

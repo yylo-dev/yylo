@@ -153,7 +153,7 @@ describe('ManagedProjectAssets', {
     }
   });
 
-  it('keeps every active lifecycle instruction surface on the typed fenced contract', async () => {
+  it('keeps every active lifecycle instruction surface on the one-task native contract', async () => {
     const sourceRoot = path.join(process.cwd(), 'src/templates');
     const files = [
       'controller-agent/AGENTS.md', 'controller-agent/CLAUDE.md',
@@ -177,9 +177,13 @@ describe('ManagedProjectAssets', {
       'history-preserving train',
     ]) expect(surfaces.toLowerCase()).not.toContain(obsolete);
     for (const required of [
-      'yy merge arbiter status', 'yy merge arbiter run', 'fenced',
-      'expected-old-SHA', 'REVIEW_FINDINGS_EXHAUSTED',
+      'yy merge status', 'yy merge land TASK_ID', 'yy merge project TASK_ID',
+      'expected-old', 'zero models',
     ]) expect(surfaces).toContain(required);
+    for (const retired of [
+      'yy merge arbiter', 'yy merge drive', 'yy merge next', 'yy merge resolve',
+      'REVIEW_FINDINGS_EXHAUSTED',
+    ]) expect(surfaces).not.toContain(retired);
   });
 
   it('admits canonical controller runtime twins for coherent template changes', async () => {
@@ -361,20 +365,18 @@ describe('ManagedProjectAssets', {
     expect(dictionary.life_cycle).toContain('yy watch status|await');
     expect(dictionary.life_cycle).toContain('Never construct PID/log/footer');
     expect(dictionary.life_cycle).toContain('yy task preflight TASK_ID');
-    expect(dictionary.life_cycle).toContain('sole lifecycle-semantic review owner');
-    expect(dictionary.life_cycle).toContain('REVIEW_FINDINGS_EXHAUSTED');
+    expect(dictionary.life_cycle).toContain('Merge launches\n   zero models');
     expect(dictionary.life_cycle).not.toContain('launch a fresh read-only independent `yy pi` review');
-    expect(dictionary.life_cycle).toContain('expected-old-SHA delivery');
+    expect(dictionary.life_cycle).toContain('native-Git expected-old delivery');
     expect(dictionary.life_cycle).toContain('Package preparation uses the repository maintainer');
     expect(dictionary.life_cycle).toContain('RC/tag creation');
     expect(dictionary.life_cycle).not.toContain('immutable epoch');
     expect(dictionary.clean_worktree).toContain('# Clean Bolt task workspaces');
     expect(dictionary.clean_worktree).toContain('yy task start TASK_ID');
     expect(dictionary.clean_worktree).toContain('yy task preflight TASK_ID');
-    expect(dictionary.clean_worktree).toContain('Implementation workers never');
-    expect(dictionary.clean_worktree).toContain('sole lifecycle-semantic review owner');
-    expect(dictionary.clean_worktree).toContain('REVIEW_FINDINGS_EXHAUSTED');
-    expect(dictionary.clean_worktree).toContain('expected-SHA CAS');
+    expect(dictionary.clean_worktree).toContain('yy merge land TASK_ID');
+    expect(dictionary.clean_worktree).toContain('yy merge project TASK_ID');
+    expect(dictionary.clean_worktree).toContain('launches zero models');
     expect(dictionary.reflect).toContain('# End-of-session reflection');
     expect(dictionary.reflect).toContain('REFLECTION_TABLE');
     expect(dictionary.reflect).toContain('complete reflection table');
@@ -385,17 +387,18 @@ describe('ManagedProjectAssets', {
     expect(dictionary.new_task_workflow).toContain('yy task start TASK_ID');
     expect(dictionary.new_task_workflow).toContain('yy task preflight TASK_ID');
     expect(dictionary.new_task_workflow).toContain('yy task finish TASK_ID');
-    expect(dictionary.new_task_workflow).toContain('sole lifecycle-semantic review owner');
-    expect(dictionary.new_task_workflow).toContain('REVIEW_FINDINGS_EXHAUSTED');
-    expect(dictionary.new_task_workflow).toContain('yy merge arbiter status');
+    expect(dictionary.new_task_workflow).toContain('yy merge land TASK_ID');
+    expect(dictionary.new_task_workflow).toContain('yy merge project TASK_ID');
+    expect(dictionary.new_task_workflow).toContain('launches zero models');
     expect(dictionary.new_task_workflow).toContain('maintainer-only');
     expect(dictionary.new_task_workflow).not.toContain('release train');
     expect(dictionary.new_task_workflow).not.toContain('immutable epoch');
     expect(dictionary.run_workflow).toContain('# Run a workflow or Bolt task');
     expect(dictionary.run_workflow).toContain('yy task preflight TASK_ID');
     expect(dictionary.run_workflow).toContain('read-only doctor support');
-    expect(dictionary.run_workflow).toContain('sole lifecycle-semantic review owner');
-    expect(dictionary.run_workflow).toContain('REVIEW_FINDINGS_EXHAUSTED');
+    expect(dictionary.run_workflow).toContain('yy merge land TASK_ID');
+    expect(dictionary.run_workflow).toContain('yy merge project TASK_ID');
+    expect(dictionary.run_workflow).toContain('launches zero models');
     expect(dictionary.migrate_juno_code_v1_to_v2).toContain('# Migrate a YYLO v1 project');
     expect(dictionary.migrate_juno_kanban_v1_to_v2).toContain('# Migrate juno-kanban v1 storage');
     expect(dictionary.migrate_juno_kanban_v1_to_v2).toContain('resolve its latest reviewed commit');
@@ -486,9 +489,9 @@ describe('ManagedProjectAssets', {
         'utf8',
       );
       expect(controllerInstruction, relative).toContain('yy task preflight TASK_ID');
-      expect(controllerInstruction, relative).toContain('sole review owner');
-      expect(controllerInstruction, relative).toContain('REVIEW_FINDINGS_EXHAUSTED');
-      expect(controllerInstruction, relative).toContain('yy merge arbiter status');
+      expect(controllerInstruction, relative).toContain('yy merge land TASK_ID');
+      expect(controllerInstruction, relative).toContain('yy merge project TASK_ID');
+      expect(controllerInstruction, relative).toContain('launches no models');
     }
     const installedWatcher = await fs.readFile(
       path.join(projectDir, '.juno_task/scripts/watch_progress.py'),
@@ -526,14 +529,10 @@ describe('ManagedProjectAssets', {
       expect(implementationReference).toContain('# Bolt implementation worker contract');
       expect(implementationReference).toContain('yy task start TASK_ID');
       expect(implementationReference).toContain('yy task finish TASK_ID');
-      expect(implementationReference).toContain('Never launch lifecycle-semantic reviewers');
-      expect(implementationReference).toContain(
-        'managed merge queue is the sole lifecycle-semantic review owner',
-      );
-      expect(implementationReference).toContain('Reviewer A then');
-      expect(implementationReference).toContain('at most one repair candidate');
-      expect(implementationReference).toContain('REVIEW_FINDINGS_EXHAUSTED');
-      expect(implementationReference).toContain('expected-SHA CAS');
+      expect(implementationReference).toContain('Tests and semantic reviews remain explicit');
+      expect(implementationReference).toContain('yy merge land TASK_ID');
+      expect(implementationReference).toContain('yy merge project TASK_ID');
+      expect(implementationReference).toContain('merge launches zero models');
       expect(implementationReference).toContain('controller checkpoint');
     }
 

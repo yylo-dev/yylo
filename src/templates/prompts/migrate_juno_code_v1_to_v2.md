@@ -70,15 +70,18 @@ yy task preflight CANARY_X
 yy task preflight CANARY_Y
 yy task finish CANARY_X
 yy task finish CANARY_Y
-yy merge status
-yy merge next
+yy merge status CANARY_X
+yy merge land CANARY_X
+yy merge project CANARY_X
+yy merge land CANARY_Y
+yy merge project CANARY_Y
 ```
 
-Prove concurrent worktrees, a moved-target composition, a real preserved
-conflict followed by `yy merge resolve TASK_ID`, failed-test no-movement, and
-expected-SHA CAS. Low risk uses zero semantic reviewers, normal at most one,
-high Reviewer A then Reviewer B on one frozen candidate. Post-CAS verification
-is deterministic identity/readback only.
+Prove concurrent worktrees, target-move refusal and recomposition, a private
+preserved conflict that does not block an unrelated task, failed-test
+no-movement, and expected-old Git update. Tests and semantic reviews remain
+explicit project checks outside merge; merge launches zero models. Post-Git
+projection failure is separately retryable without duplicate integration.
 
 ## 4. Cut over and verify
 

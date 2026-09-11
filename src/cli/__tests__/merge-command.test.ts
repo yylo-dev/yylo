@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import fs from 'fs-extra';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  configureMergeQueueCommand,
+  configureMergeCommand,
   invokeMergeAtController,
   mergeControlOperation,
 } from '../commands/merge.js';
@@ -19,7 +19,7 @@ afterEach(async () => {
 describe('native Git merge CLI', () => {
   it('exposes only status, one-task land, and separate projection', () => {
     const program = new Command();
-    configureMergeQueueCommand(program, async () => undefined);
+    configureMergeCommand(program, async () => undefined);
     const merge = program.commands.find((command) => command.name() === 'merge');
     expect(merge?.commands.map((command) => command.name())).toEqual([
       'status', 'land', 'project',
@@ -45,7 +45,7 @@ describe('native Git merge CLI', () => {
   ] as const)('forwards $argv', async ({ argv, expected }) => {
     const invoke = vi.fn(async () => undefined);
     const program = new Command().exitOverride();
-    configureMergeQueueCommand(program, invoke);
+    configureMergeCommand(program, invoke);
     await program.parseAsync(['node', 'yy', 'merge', ...argv]);
     expect(invoke).toHaveBeenCalledWith(...expected);
   });
@@ -53,7 +53,7 @@ describe('native Git merge CLI', () => {
   it('binds a resolved candidate to its exact observed target', async () => {
     const invoke = vi.fn(async () => undefined);
     const program = new Command().exitOverride();
-    configureMergeQueueCommand(program, invoke);
+    configureMergeCommand(program, invoke);
     await program.parseAsync(['node', 'yy', 'merge', 'land', 'T123',
       '--candidate', 'a'.repeat(40), '--expected-target', 'b'.repeat(40)]);
     expect(invoke).toHaveBeenCalledWith('land', 'T123', [
@@ -63,7 +63,7 @@ describe('native Git merge CLI', () => {
 
   it('refuses a partially specified resolved candidate', async () => {
     const program = new Command().exitOverride();
-    configureMergeQueueCommand(program, async () => undefined);
+    configureMergeCommand(program, async () => undefined);
     await expect(program.parseAsync(['node', 'yy', 'merge', 'land', 'T123',
       '--candidate', 'a'.repeat(40)])).rejects.toThrow(
       '--candidate and --expected-target must be supplied together',

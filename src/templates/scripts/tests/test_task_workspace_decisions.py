@@ -495,22 +495,7 @@ class FailureContractTables(unittest.TestCase):
         return {"id": "suite", "timeout_seconds": 900}
 
 
-class QueueingDecisionTables(unittest.TestCase):
-    def test_sequence_admission_contract(self) -> None:
-        with poisoned_surface():
-            self.assertEqual(decisions.next_enqueue_sequence(
-                {"schema_version": "juno_task_workspace_fifo.v1", "next": 7}), 7)
-            for bad in (None, 3, {}, {"schema_version": "other", "next": 1},
-                        {"schema_version": "juno_task_workspace_fifo.v1"},
-                        {"schema_version": "juno_task_workspace_fifo.v1",
-                         "next": True},
-                        {"schema_version": "juno_task_workspace_fifo.v1", "next": 0},
-                        {"schema_version": "juno_task_workspace_fifo.v1",
-                         "next": 2**63},
-                        {"schema_version": "juno_task_workspace_fifo.v1", "next": 1,
-                         "extra": 2}):
-                self.assertRaises(ValueError, decisions.next_enqueue_sequence, bad)
-
+class HistoricalStateAttributionTables(unittest.TestCase):
     def test_shared_queue_delta_reports_only_queue_owned_changes(self) -> None:
         before = {"schema_version": "s", "tasks": {"A": {"state": "WORKING"}},
                   "queues": {"fifo": {"next": 1}}}
@@ -564,7 +549,7 @@ class ShellWiringCharacterization(unittest.TestCase):
         self.assertIn("decisions.plan_evidence_reuse(", shell)
         self.assertIn("decisions.validation_failure_message(", shell)
         self.assertIn("decisions.status_projection(", shell)
-        self.assertIn("decisions.next_enqueue_sequence(", shell)
+        self.assertNotIn("decisions.next_enqueue_sequence(", shell)
 
     def test_shell_fence_gates_call_the_lease_planners(self) -> None:
         shell = (Path(__file__).resolve().parents[1] / "task_workspace.py").read_text()

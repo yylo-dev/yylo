@@ -1922,36 +1922,21 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
             with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "expected kanban"):
                 task_runtime.record_control_audit(self.controller, "task", "recovery-plan", "X")
 
-    def test_merge_lifecycle_supersession_audit_is_canonical_and_unknown_still_refuses(self) -> None:
-        with mock.patch.dict(os.environ, {
-            "JUNO_CONTROL_INVOCATION_ROOT": str(self.controller),
-            "JUNO_CONTROL_INVOCATION_ROLE": "controller",
-            "JUNO_CONTROL_EFFECTIVE_ROOT": str(self.controller),
-            "JUNO_CONTROL_OPERATION": "orchestration",
-        }, clear=False):
-            reference = task_runtime.record_control_audit(
-                self.controller, "merge", "supersede-lifecycle-journal", "WxK4xy")
-            with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
-                                        "unsupported merge audit operation"):
-                task_runtime.record_control_audit(
-                    self.controller, "merge", "supersede-unknown-journal", None)
-        receipt = json.loads(Path(reference["path"]).read_text())
-        self.assertEqual((receipt["surface"], receipt["operation"],
-                          receipt["policy_operation"], receipt["task_id"]),
-                         ("merge", "supersede-lifecycle-journal", "orchestration", "WxK4xy"))
-    def test_merge_recover_authority_drift_audit_is_exact_and_unknown_operations_refuse(self) -> None:
+    def test_merge_audit_exposes_only_native_delivery_operations(self) -> None:
         audit_root = self.controller / ".juno_task/runtime/control-audit/merge"
-        receipt = task_runtime.record_control_audit(
-            self.controller, "merge", "recover-authority-drift", "X")
-        audit = json.loads(Path(receipt["path"]).read_text())
-        self.assertEqual((audit["surface"], audit["operation"], audit["task_id"],
-                          audit["policy_operation"]),
-                         ("merge", "recover-authority-drift", "X", "orchestration"))
+        for operation in ("land", "project"):
+            receipt = task_runtime.record_control_audit(
+                self.controller, "merge", operation, "X")
+            audit = json.loads(Path(receipt["path"]).read_text())
+            self.assertEqual((audit["surface"], audit["operation"], audit["task_id"],
+                              audit["policy_operation"]),
+                             ("merge", operation, "X", "orchestration"))
         before = sorted(audit_root.glob("*.json"))
-        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
-                                    "unsupported merge audit operation: recover-authority-drift-unknown"):
-            task_runtime.record_control_audit(
-                self.controller, "merge", "recover-authority-drift-unknown", "X")
+        for retired in ("drive", "next", "resolve", "review",
+                        "recover-authority-drift", "supersede-lifecycle-journal"):
+            with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
+                                        f"unsupported merge audit operation: {retired}"):
+                task_runtime.record_control_audit(self.controller, "merge", retired, "X")
         self.assertEqual(sorted(audit_root.glob("*.json")), before)
 
     def test_clean_working_umbrella_recovery_preserves_predecessor_and_is_idempotent(self) -> None:
@@ -6734,7 +6719,7 @@ steps:
         task_runtime.start(self.controller, "X")
         state = json.loads((self.controller / ".juno_task/state/tasks.json").read_text())
         merged = {**state["tasks"]["X"], "state": "MERGED"}
-        with self.assertRaisesRegex(task_runtime.KanbanSyncError, "merge finalization owns the done mutation"):
+        with self.assertRaisesRegex(task_runtime.KanbanSyncError, "native delivery projection owns the done mutation"):
             task_runtime.ensure_kanban_sync(self.controller, "X", merged)
         self.assertEqual(self.board_task("X")["status"], "in_progress")
         self.set_board_task("X", status="done", commit_hash=state["tasks"]["X"]["tip_sha"])
@@ -6752,29 +6737,6 @@ steps:
         recovered = self.payload("sync", "X")
         self.assertEqual(recovered["outcome"], "projected")
         self.assertEqual(self.board_task("X")["status"], "in_progress")
-
-    def test_merge_recover_authority_drift_audit_is_exact_and_unknown_operations_refuse(self) -> None:
-        audit_root = self.controller / ".juno_task/runtime/control-audit/merge"
-        repair_receipt = task_runtime.record_control_audit(
-            self.controller, "merge", "recover-full-suite-failure", "X")
-        repair_payload = json.loads(Path(repair_receipt["path"]).read_text())
-        self.assertEqual(
-            (repair_payload["surface"], repair_payload["operation"],
-             repair_payload["task_id"], repair_payload["policy_operation"]),
-            ("merge", "recover-full-suite-failure", "X", "orchestration"))
-        receipt = task_runtime.record_control_audit(
-            self.controller, "merge", "recover-authority-drift", "X")
-        audit = json.loads(Path(receipt["path"]).read_text())
-        self.assertEqual((audit["surface"], audit["operation"], audit["task_id"],
-                          audit["policy_operation"]),
-                         ("merge", "recover-authority-drift", "X", "orchestration"))
-        before = sorted(audit_root.glob("*.json"))
-        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
-                                    "unsupported merge audit operation: recover-authority-drift-unknown"):
-            task_runtime.record_control_audit(
-                self.controller, "merge", "recover-authority-drift-unknown", "X")
-        self.assertEqual(sorted(audit_root.glob("*.json")), before)
-
 
 
 class TaskFencingLeaseTests(TaskWorkspaceFixture):

@@ -26,11 +26,9 @@ task's workspace.
 1. Edit only requested product paths and preserve project sources of truth.
 2. Use focused affected tests in the edit loop. Other feature worktrees may run
    concurrently; do not wait for or modify them.
-3. Never launch lifecycle-semantic reviewers.
-   The managed merge queue is the sole lifecycle-semantic review owner. Candidate
-   review is risk-based: low gets zero,
-   normal gets at most one, and high gets exactly Reviewer A then Reviewer B on
-   one frozen candidate.
+3. Run any project-required tests and semantic reviews explicitly during task
+   work. Merge launches zero models, selects no reviewer, and owns no repair or
+   validation loop. Never delegate those checks to delivery.
 4. If blocked, record bounded truthful state and stop without claiming success.
 
 ## 3. Queue and hand off
@@ -47,14 +45,13 @@ task's workspace.
    attempt a controller checkpoint after terminal metadata is durable; checkpoint
    failure remains a warning and must not change the task or merge outcome.
 
-Stop after queueing. Read-only delivery observation uses `yy merge status` or
-`yy merge arbiter status`. One fenced target owner runs `yy merge arbiter run`
-(or typed `yy merge drive`) through the expected-SHA CAS gate and exits when idle
-or blocked; implementation agents
-do not poll, steal on timeout, discard dirty bytes, or invoke `next|resolve`
-except under explicit recovery authority. The merge owner applies the bounded
-risk-based review sequence and permits at most one repair candidate. A second
-material finding terminalizes as `REVIEW_FINDINGS_EXHAUSTED`.
+Stop after queueing. Read-only delivery observation uses `yy merge status
+TASK_ID`. One authorized target owner runs `yy merge land TASK_ID` for exactly
+that immutable source, then `yy merge project TASK_ID` to record the Git result
+separately. Implementation agents do not land their own work, discard dirty
+bytes, reuse a stale candidate after target movement, or claim that Git ancestry
+proves tests or requirements. Tests and semantic reviews remain explicit project
+checks outside merge; merge launches zero models and owns no repair loop.
 
 Release-version changes use this same ordinary task/merge lifecycle. Package
 preparation is maintainer-only and outside `yy`. Never create a tag, push,

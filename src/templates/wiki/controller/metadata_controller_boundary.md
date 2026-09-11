@@ -190,30 +190,26 @@ common directory and all protected worktrees.
 The controller branch remains separate because it owns Kanban state. A separate
 long-lived integration branch is not required merely to synchronize controller
 and product state. `integration-owner` is a protected clean worktree role for
-the real product target. Its checkout is detached while the merge queue owns the
-target-ref CAS window, then attached to the exact target for shared validation,
-servers, release, or deploy. A project may still choose a staging branch as an
-explicit product policy, but the controller never merges into it.
+the real product target. Keep its checkout detached while native delivery updates
+the target ref with expected-old protection; attach it to the exact target only
+for separately authorized shared validation, servers, release, or deploy. A
+project may still choose a staging branch as explicit product policy, but the
+controller never merges into it.
 
 ```text
 metadata controller branch/worktree (Kanban, ledger, decisions, receipts)
         | task start X                         | task start Y
         v                                      v
 feature/X branch + worktree              feature/Y branch + worktree
-  agent edits + focused tests              agent edits + focused tests
+  agent edits + project checks             agent edits + project checks
         | task finish                         | task finish
-        +---------------- merge queue --------+
-                              |
-                              v
-                  real product target ref (CAS guarded;
-                   integration owner detached)
-                              |
-                              v
-             attach clean integration-owner at exact target SHA
-                full suite, shared local stack, deploy manager
-                              |
-                              v
-                detach before the next queue mutation
+        v                                     v
+  immutable source X                    immutable source Y
+        | yy merge land X                     | independently selectable
+        v                                     v
+private native-Git candidate -- expected-old update --> product target ref
+        |
+        +-- Git result --> yy merge project X --> Ledger
 ```
 
 Run Kanban and task/merge orchestration from the metadata controller. Run agent
@@ -226,10 +222,11 @@ give each isolated ports and state; otherwise keep the shared stack solely in
 the integration-owner worktree.
 
 The transition is serialized: stop shared servers and require a clean checkout,
-detach the integration owner before the explicit `yy merge arbiter run` or typed
-`yy merge drive`, await its terminal receipt rather than polling, then attach the
-exact target for shared validation/deployment and detach before another mutation. Never leave the target ref attached while
-expecting queue CAS to advance it.
+detach the integration owner before the explicit `yy merge land TASK_ID`, read
+its Git result, then run the separate `yy merge project TASK_ID`. Attach the
+exact target only for shared validation/deployment and detach before another
+mutation. Never leave the target ref attached while expecting native expected-old
+delivery to advance it.
 
 ## Refusal rules
 

@@ -32,7 +32,7 @@ class ManagedAgentRunnerTests(unittest.TestCase):
                   "envFilePath":".env.yylo", "promptMacros":{"global":{"reflect":{"path":".juno_task/prompts/reflect.md"}},"local":{}}}
         (self.controller / ".juno_task/config.json").write_text(json.dumps(config) + "\n")
         (self.controller / ".juno_task/state").mkdir()
-        (self.controller / runner.QUEUE_STATE_PATH).write_text("{}\n")
+        (self.controller / ".juno_task/state/tasks.json").write_text("{}\n")
         subprocess.run(["git", "-C", str(self.controller), "add", "."], check=True)
         subprocess.run(["git", "-C", str(self.controller), "-c", "user.name=T", "-c", "user.email=t@t", "commit", "-m", "controller"], check=True, stdout=subprocess.DEVNULL)
         self.candidate = self.tmp / "candidate"; self.candidate.mkdir()
@@ -172,40 +172,25 @@ print(json.dumps({'path':str(pathlib.Path.cwd().resolve()),'role':'controller',
         self.assertEqual(hashlib.sha256(data).hexdigest(), runner.LEGACY_METADATA_POLICY_SHA256)
         return data
 
-    def test_controller_identity_binds_only_queue_owned_dirty_state(self):
-        state = self.controller / runner.QUEUE_STATE_PATH
+    def test_controller_identity_refuses_every_dirty_controller(self):
+        state = self.controller / ".juno_task/state/tasks.json"
         state.write_text('{"state":"reviewing"}\n')
-        receipt = self.controller / runner.QUEUE_RECEIPT_ROOT / "T1/candidate/attempt-1/receipt.json"
-        receipt.parent.mkdir(parents=True)
-        receipt.write_text('{"outcome":"passed"}\n')
-        before = runner.controller_identity(self.controller)
-        self.assertEqual([item["path"] for item in before["queue_state"]],
-                         [runner.QUEUE_RECEIPT_ROOT + "T1/candidate/attempt-1/receipt.json",
-                          runner.QUEUE_STATE_PATH])
-        with self.assertRaisesRegex(runner.RunnerError, "canonical resolver identity"):
-            runner.managed_controller_binding(before)
-        before["resolver"] = {"policy_identity": {"fixture": "identity"}}
-        binding = runner.managed_controller_binding(before)
-        self.assertEqual(binding["schema_version"], "juno_managed_controller_binding.v1")
-        self.assertEqual(binding["queue_state"], before["queue_state"])
-        state.write_text('{"state":"reviewed"}\n')
-        after = runner.controller_identity(self.controller)
-        self.assertNotEqual(before, after)
+        with self.assertRaisesRegex(runner.RunnerError, "controller is missing"):
+            runner.controller_identity(self.controller)
+        state.unlink()
         (self.controller / ".juno_task/config.json").write_text("{}\n")
         with self.assertRaisesRegex(runner.RunnerError, "controller is missing"):
             runner.controller_identity(self.controller)
 
-    def test_resolver_policy_accepts_only_exact_bound_cleanliness_failure(self):
-        expected = "canonical sparse controller policy refused: clean"
-        result = subprocess.CompletedProcess([], 2, "", "controller-resolver: " + expected + "\n")
-        resolved = {"valid": False, "diagnostics": [expected]}
-        workspace = {"passed": False, "checks": {"clean": False, "root_exact": True}}
-        self.assertTrue(runner.resolver_policy_passes(result, resolved, workspace, True))
-        self.assertFalse(runner.resolver_policy_passes(result, resolved, workspace, False))
-        wrong = {"passed": False, "checks": {"clean": False, "root_exact": False}}
-        self.assertFalse(runner.resolver_policy_passes(result, resolved, wrong, True))
-        other = subprocess.CompletedProcess([], 2, "", "controller-resolver: another failure\n")
-        self.assertFalse(runner.resolver_policy_passes(other, resolved, workspace, True))
+    def test_resolver_policy_requires_clean_success(self):
+        passed = subprocess.CompletedProcess([], 0, "", "")
+        resolved = {"valid": True, "diagnostics": []}
+        workspace = {"passed": True, "checks": {"clean": True, "root_exact": True}}
+        self.assertTrue(runner.resolver_policy_passes(passed, resolved, workspace))
+        refused = subprocess.CompletedProcess([], 2, "", "controller-resolver: refused\n")
+        self.assertFalse(runner.resolver_policy_passes(refused, resolved, workspace))
+        self.assertFalse(runner.resolver_policy_passes(
+            passed, {"valid": False}, {"passed": False, "checks": {"clean": False}}))
 
     def test_pretty_metadata_controller_launches_with_null_sparse_evidence(self):
         _, policy_path = self.install_metadata_controller_contract()
@@ -214,11 +199,6 @@ print(json.dumps({'path':str(pathlib.Path.cwd().resolve()),'role':'controller',
         subprocess.run(["git", "-C", str(self.controller), "-c", "user.name=T",
                         "-c", "user.email=t@t", "commit", "-m", "pretty policy"],
                        check=True, stdout=subprocess.DEVNULL)
-        (self.controller / runner.QUEUE_STATE_PATH).write_text('{"state":"reviewing"}\n')
-        queue_receipt = (self.controller / runner.QUEUE_RECEIPT_ROOT
-                         / "T1/candidate/attempt-1/receipt.json")
-        queue_receipt.parent.mkdir(parents=True)
-        queue_receipt.write_text('{"outcome":"passed"}\n')
         out = self.tmp / "metadata-launch"
         result = subprocess.run(self.command(out), env=self.env(), capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -230,10 +210,8 @@ print(json.dumps({'path':str(pathlib.Path.cwd().resolve()),'role':'controller',
             "controller_branch": "refs/heads/controller",
         })
         self.assertTrue(resolver["passed"])
-        self.assertTrue(resolver["queue_state_bound"])
-        self.assertEqual([item["path"] for item in receipt["controller_before"]["queue_state"]],
-                         [runner.QUEUE_RECEIPT_ROOT + "T1/candidate/attempt-1/receipt.json",
-                          runner.QUEUE_STATE_PATH])
+        self.assertNotIn("queue_state_bound", resolver)
+        self.assertNotIn("queue_state", receipt["controller_before"])
 
     def test_exact_legacy_metadata_controller_generation_launches(self):
         config_path, policy_path = self.install_metadata_controller_contract()

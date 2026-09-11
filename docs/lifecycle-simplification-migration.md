@@ -3,14 +3,15 @@
 This contract retires umbrella execution from the ordinary task interface while
 preserving existing attempts and immutable evidence. New work uses one ordinary
 Ledger task, one exact worktree, optional ordered delivery checkpoints, one
-submission, and one queue-owned review/integration boundary.
+submission, and one selected-task native-Git delivery boundary.
 
 ## Supported surface
 
 Normal delivery uses `yy task start|status|checkpoint|preflight|finish` and
-`yy merge status|arbiter|drive`. `preflight` is optional and read-only; `finish`
-enforces the same closure. Reporting task relationships do not own worktrees,
-leases, candidates, reviews, or integration.
+`yy merge status|land|project`. `preflight` is optional and read-only; `finish`
+enforces the same closure. `land` selects one immutable task and uses native Git;
+`project` records Git success separately. Reporting relationships do not own
+worktrees, candidates, tests, reviews, or integration.
 
 No `yy task` command creates or advances an umbrella. Finite legacy handling is
 isolated under `yy migrate legacy-lifecycle`; it calls the same managed task
@@ -25,14 +26,16 @@ the active queue as permission to mutate it:
 
 | Observed state | Disposition |
 | --- | --- |
-| ordinary `WORKING` or hydration/repair state | Keep its frozen runtime and active producer; drain normally or use receipt-bound fenced handoff |
-| ordinary `QUEUED`, risk pending, or conflict | Preserve FIFO, candidate, review and conflict evidence; queue recovery remains the only owner |
-| landed with pending finalization | Resume finalization from the recorded successful CAS; never integrate again |
-| terminal, withdrawn, or historical | Read only; retain receipts and task identity |
+| ordinary `WORKING` or hydration/repair state | Preserve its worktree, source commit, dirty bytes, runtime and owner; finish or use a receipt-bound fenced handoff before native delivery |
+| legacy `QUEUED` | Preserve the immutable source and queue receipt; map only that task to `yy merge land TASK_ID` after the retired writer is stopped |
+| legacy reviewed/risk-pending | Preserve review/risk evidence as historical data; it grants no native-delivery test/review claim; land only after explicit current checks |
+| legacy `CONFLICT` | Preserve the dirty candidate and every byte; do not import it automatically; owner either resolves to an explicit commit or keeps it blocked while unrelated tasks land |
+| post-CAS/finalization pending | Verify source ancestry and exact target readback, map to `GIT_INTEGRATED`, and run only `yy merge project TASK_ID`; never integrate again |
+| terminal, withdrawn, or historical | Read only; retain receipts and task identity; expose no executable old command |
 | dirty attempt | Preserve every byte and refuse conversion until the owner supplies an authorized clean boundary or replacement |
 | unconverted legacy umbrella already `WORKING` | Eligible only for the exact plan/authorization/apply flow below |
 | converted legacy umbrella | Verify or continue as one ordinary delivery with reporting-only child IDs |
-| unknown ownership, schema, runtime, target, or evidence | Refuse without mutation |
+| unknown ownership, schema, runtime, target, or evidence | Refuse without mutation and request an owner disposition |
 
 New umbrella starts are unsupported. Existing unconverted attempts may drain an
 already-admitted child checkpoint with `legacy-lifecycle checkpoint`; this never
@@ -73,7 +76,12 @@ Verification binds the immutable plan and authorization to the supersession,
 ordinary checkpoint contract, reporting ownership, preserved changed paths and
 full prior commit history. It writes no controller state.
 
-## Runtime and authority boundary
+## One-time cutover and authority boundary
+
+Inventory `WORKING`, queued, reviewed, conflicted, and post-CAS-pending records
+before activating native delivery. Stop or hand off every old producer, record
+the disposition from the table above, then verify no retired workflow/arbiter
+entry point is installed. Never run old and new writers concurrently.
 
 An active producer remains pinned to the runtime recorded at task start. Do not
 replace its engine in place. Drain it or obtain the explicit fenced handoff or
@@ -91,5 +99,5 @@ actions.
 schemas. It can be removed only when an owner-proved inventory contains no
 unconverted active umbrella attempt and retention policy no longer requires an
 executable reader. Historical files remain immutable even after command
-retirement. Ordinary task and merge commands are the sole supported execution
-surface throughout the transition.
+retirement. Ordinary task commands and `yy merge status|land|project` are the sole supported
+execution surface throughout the transition.
