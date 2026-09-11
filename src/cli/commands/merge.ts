@@ -6,6 +6,8 @@ import { routeControlPlane } from '../../utils/control-plane-router.js';
 import { addMachineOutputOptions, invokeMachineAwareChild, resolveMachineOutput } from '../machine-output.js';
 
 export type MergeOperation = 'status' | 'land' | 'project';
+/** Transitional source aliases for consumers compiled before the native-delivery cutover. */
+export type MergeQueueOperation = MergeOperation;
 export type MergeInvoker = (
   operation: MergeOperation,
   taskId?: string,
@@ -15,6 +17,7 @@ export type MergeInvoker = (
 export function mergeControlOperation(operation: MergeOperation): 'kanban' | 'orchestration' {
   return operation === 'status' ? 'kanban' : 'orchestration';
 }
+export const mergeQueueControlOperation = mergeControlOperation;
 
 export async function invokeMergeAtController(
   operation: MergeOperation,
