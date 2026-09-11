@@ -17,6 +17,7 @@ export type MergeInvoker = (
 export function mergeControlOperation(operation: MergeOperation): 'kanban' | 'orchestration' {
   return operation === 'status' ? 'kanban' : 'orchestration';
 }
+// Keep the old symbol names source-compatible without retaining the old engine.
 export const mergeQueueControlOperation = mergeControlOperation;
 
 export async function invokeMergeAtController(
