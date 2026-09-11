@@ -458,6 +458,7 @@ describe('ypl wrapper', () => {
     { args: ['merge', 'project', 'T1'], operation: 'orchestration' },
     { args: ['integration', 'status'], operation: 'kanban' },
     { args: ['integration', 'sync'], operation: 'orchestration' },
+    { args: ['integration', 'runtime-adopt-source', '--previous-sha', 'a'.repeat(40), '--target-sha', 'b'.repeat(40), '--install-prefix', '/tmp/runtime', '--output', '/tmp/adoption.json'], operation: 'orchestration' },
     { args: ['integration', 'runtime-doctor'], operation: 'orchestration' },
     { args: ['integration', 'runtime-refresh', '--previous-sha', 'a'.repeat(40)], operation: 'orchestration' },
     { args: ['task', 'runtime-bootstrap', '--dry-run'], operation: 'orchestration' },
@@ -528,7 +529,7 @@ describe('ypl wrapper', () => {
     }
   });
 
-  it('forwards the effective task policy to the pinned controller runtime', async () => {
+  it('forwards source adoption through a stale launcher to the pinned controller runtime', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'juno-wrapper-forwarded-policy-'));
     try {
       const controller = path.join(tempDir, 'controller');
@@ -565,10 +566,14 @@ describe('ypl wrapper', () => {
       await fs.symlink('yylo', path.join(launcherBin, 'yy'));
       await fs.writeFile(path.join(launcherBin, 'cli.mjs'), 'process.exit(98)\n');
 
-      const result = await execa(path.join(launcherBin, 'yy'), ['task', 'finish', 'T1'], {
+      const result = await execa(path.join(launcherBin, 'yy'), [
+        'integration', 'runtime-adopt-source',
+        '--previous-sha', 'a'.repeat(40), '--target-sha', 'b'.repeat(40),
+        '--install-prefix', '/tmp/runtime', '--output', '/tmp/adoption.json',
+      ], {
         cwd: integration,
         reject: false,
-      env: { ...process.env, PATH: `${launcherBin}${path.delimiter}${process.env.PATH ?? ''}` },
+        env: { ...process.env, PATH: `${launcherBin}${path.delimiter}${process.env.PATH ?? ''}` },
       });
       expect(result.exitCode).toBe(0);
       expect(await fs.readFile(runtimeMarker, 'utf8')).toBe('orchestration');

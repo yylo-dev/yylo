@@ -13,6 +13,7 @@ import {
   type MergeOperation,
 } from '../../cli/commands/merge.js';
 import { configureEvidenceCommand } from '../../cli/commands/evidence.js';
+import { configureIntegrationCommand } from '../../cli/commands/integration.js';
 
 const PROJECT_ROOT = path.resolve(__dirname, '../../..');
 const YYLO_SOURCE = path.join(PROJECT_ROOT, 'src/bin/yylo.sh');
@@ -28,7 +29,7 @@ function parseRouterAllowlist(source: string): Map<string, ControlOperation> {
   const classification = new Map<string, ControlOperation>();
   for (const line of source.split('\n')) {
     const match = line.match(
-      /^\s*((?:task|merge|evidence):[^\s|)]*(?:\|(?:task|merge|evidence):[^\s|)]*)*)\)\s+effective_operation=(kanban|orchestration)\s+;;/,
+      /^\s*((?:task|merge|evidence|integration):[^\s|)]*(?:\|(?:task|merge|evidence|integration):[^\s|)]*)*)\)\s+effective_operation=(kanban|orchestration)\s+;;/,
     );
     if (!match) continue;
     for (const alternative of match[1].split('|')) {
@@ -50,7 +51,7 @@ function registeredSubcommands(
 }
 
 describe('yylo.sh router allowlist contract', () => {
-  it('classifies every registered task, merge, and evidence subcommand exactly like the CLI', async () => {
+  it('classifies every registered control-plane subcommand exactly like the CLI', async () => {
     const router = parseRouterAllowlist(await fs.readFile(YYLO_SOURCE, 'utf8'));
 
     const taskOperations = registeredSubcommands(
@@ -64,6 +65,10 @@ describe('yylo.sh router allowlist contract', () => {
     const evidenceOperations = registeredSubcommands(
       (program) => configureEvidenceCommand(program, async () => undefined),
       'evidence',
+    );
+    const integrationOperations = registeredSubcommands(
+      (program) => configureIntegrationCommand(program, async () => undefined),
+      'integration',
     );
 
     const expected = new Map<string, ControlOperation>();
@@ -85,6 +90,9 @@ describe('yylo.sh router allowlist contract', () => {
         taskWorkspaceControlOperation(`evidence-${operation}` as TaskWorkspaceOperation),
       );
     }
+    for (const operation of integrationOperations) {
+      expected.set(`integration:${operation}`, operation === 'status' ? 'kanban' : 'orchestration');
+    }
 
     const missing = [...expected.keys()].filter((key) => !router.has(key));
     expect(
@@ -98,7 +106,7 @@ describe('yylo.sh router allowlist contract', () => {
     expect(mismatches, 'the wrapper must classify control commands identically to the CLI').toEqual([]);
 
     const helpForms = new Set<string>();
-    for (const prefix of ['task', 'merge', 'evidence']) {
+    for (const prefix of ['task', 'merge', 'evidence', 'integration']) {
       helpForms.add(`${prefix}:`);
       helpForms.add(`${prefix}:-h`);
       helpForms.add(`${prefix}:--help`);
