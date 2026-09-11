@@ -7,11 +7,11 @@ enable-shell-directives: true
 
 ## YYLO Ledger CLI Reference
 
-Use `yy ledger` for all commands. YYLO 0.2.2 supports the exact `yylo-ledger 0.2.0` task CLI. `yy kanban` is a labelled compatibility alias for the same controller-routed task runtime.
+Use `yy ledger` for all commands. YYLO supports the exact `yylo-ledger 0.3.0` task CLI. `yy kanban` is a labelled compatibility alias for the same controller-routed task runtime.
 
 ### Supported task contract
 
-- The public Ledger 0.2.0 surface is task-oriented: create, get, update, mark, archive, list/search, dependencies, ordering, history, doctor, compatibility, conversion, rollback, and cold archive operations.
+- The public Ledger 0.3.0 surface is task-oriented: create, get, update, mark, archive, list/search, dependencies, ordering, history, doctor, compatibility, conversion, rollback, and cold archive operations.
 - Do not advertise `record`, `wiki`, `workflow`, or `artifact` namespaces unless the installed `yy ledger --help` explicitly provides them in a future supported release.
 - Read current task state before mutation, preserve mutation receipts where offered, and never bypass controller routing or lifecycle state with direct file edits.
 - Normal discovery is hot-only unless an explicit cold-archive command is used.
