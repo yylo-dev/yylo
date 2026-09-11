@@ -960,16 +960,16 @@ describe('ScriptInstaller', {
       expect(updated).toBe(true);
       expect(await fs.pathExists(path.join(testDir, '.juno_task/scripts/task_workspace.py'))).toBe(true);
       expect(await fs.pathExists(path.join(testDir, '.juno_task/scripts/merge_queue.py'))).toBe(true);
-      // Controller-class lifecycle seeds install on the metadata controller:
-      // compile_lifecycle_template fails closed without these tracked assets.
+      // Only task-run lifecycle seeds remain. Native delivery has no workflow
+      // engine or semantic-repair prompt.
       expect(await fs.pathExists(path.join(testDir, '.juno_task/workflows/yy-task-run.yaml'))).toBe(true);
-      expect(await fs.pathExists(path.join(testDir, '.juno_task/workflows/yy-merge-drive.yaml'))).toBe(true);
+      expect(await fs.pathExists(path.join(testDir, '.juno_task/workflows/yy-merge-drive.yaml'))).toBe(false);
       expect(await fs.pathExists(
         path.join(testDir, '.juno_task/prompts/lifecycle/task-implementation.md'))).toBe(true);
       expect(await fs.pathExists(
         path.join(testDir, '.juno_task/prompts/lifecycle/task-test-repair.md'))).toBe(true);
       expect(await fs.pathExists(
-        path.join(testDir, '.juno_task/prompts/lifecycle/merge-semantic-repair.md'))).toBe(true);
+        path.join(testDir, '.juno_task/prompts/lifecycle/merge-semantic-repair.md'))).toBe(false);
       // Seed installation is scoped: the tracked generation (wiki, prompts,
       // manifest) stays untouched while customized policy blocks it.
       expect(await fs.pathExists(path.join(testDir, '.juno_task/wiki'))).toBe(false);
@@ -1005,7 +1005,7 @@ describe('ScriptInstaller', {
 
       expect(updated).toBe(true);
       expect(await fs.pathExists(path.join(testDir, '.juno_task/workflows/yy-task-run.yaml'))).toBe(true);
-      expect(await fs.pathExists(path.join(testDir, '.juno_task/workflows/yy-merge-drive.yaml'))).toBe(true);
+      expect(await fs.pathExists(path.join(testDir, '.juno_task/workflows/yy-merge-drive.yaml'))).toBe(false);
       expect(await fs.pathExists(
         path.join(testDir, '.juno_task/prompts/lifecycle/task-implementation.md'))).toBe(true);
       // The retired customized asset is untouched: retirement belongs to the
@@ -1034,7 +1034,7 @@ describe('ScriptInstaller', {
       // Non-force update reinstalls exactly the missing seeds.
       expect(await ScriptInstaller.autoUpdate(testDir, false)).toBe(true);
       expect(await fs.pathExists(path.join(testDir, '.juno_task/workflows/yy-task-run.yaml'))).toBe(true);
-      expect(await fs.pathExists(path.join(testDir, '.juno_task/workflows/yy-merge-drive.yaml'))).toBe(true);
+      expect(await fs.pathExists(path.join(testDir, '.juno_task/workflows/yy-merge-drive.yaml'))).toBe(false);
       expect(await fs.readFile(
         path.join(testDir, '.juno_task/prompts/lifecycle/task-implementation.md'), 'utf8'),
       ).toBe(promptsBefore);
@@ -1182,7 +1182,7 @@ describe('ScriptInstaller', {
 
       expect(updated).toBe(true);
       expect(await fs.readFile(wikiPath, 'utf8')).toContain(
-        '# Bolt task worktrees',
+        '# Task worktrees and native Git delivery',
       );
       expect(await fs.readFile(scriptPath, 'utf8')).toContain('def main(');
       const backupRoot = path.join(testDir, '.juno_task/managed-conflicts');

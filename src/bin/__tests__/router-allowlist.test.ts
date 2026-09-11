@@ -8,9 +8,9 @@ import {
   type TaskWorkspaceOperation,
 } from '../../cli/commands/task.js';
 import {
-  configureMergeQueueCommand,
-  mergeQueueControlOperation,
-  type MergeQueueOperation,
+  configureMergeCommand,
+  mergeControlOperation,
+  type MergeOperation,
 } from '../../cli/commands/merge.js';
 import { configureEvidenceCommand } from '../../cli/commands/evidence.js';
 
@@ -58,7 +58,7 @@ describe('yylo.sh router allowlist contract', () => {
       'task',
     );
     const mergeOperations = registeredSubcommands(
-      (program) => configureMergeQueueCommand(program, async () => undefined),
+      (program) => configureMergeCommand(program, async () => undefined),
       'merge',
     );
     const evidenceOperations = registeredSubcommands(
@@ -76,7 +76,7 @@ describe('yylo.sh router allowlist contract', () => {
     for (const operation of mergeOperations) {
       expected.set(
         `merge:${operation}`,
-        mergeQueueControlOperation(operation as MergeQueueOperation),
+        mergeControlOperation(operation as MergeOperation),
       );
     }
     for (const operation of evidenceOperations) {

@@ -89,7 +89,7 @@ import { createSkillsCommand } from '../cli/commands/skills.js';
 import { createAuthCommand } from '../cli/commands/auth.js';
 import { configureTaskWorkspaceCommand } from '../cli/commands/task.js';
 import { configureIntegrationCommand } from '../cli/commands/integration.js';
-import { configureMergeQueueCommand } from '../cli/commands/merge.js';
+import { configureMergeCommand } from '../cli/commands/merge.js';
 import { configureWatchCommand } from '../cli/commands/watch.js';
 import { configureEvidenceCommand } from '../cli/commands/evidence.js';
 import { configureKanbanCommand } from '../cli/commands/kanban.js';
@@ -1497,7 +1497,7 @@ function setupTaskLifecycleCommand(program: Command): void {
       .allowUnknownOption(true)
       .option('--task <task-id>', 'Legacy task ID (ignored)')
       .action(() => {
-        console.error('The legacy lifecycle executor was removed. Use `yy task start|status|finish` and `yy merge status|next|resolve`.');
+        console.error('The legacy lifecycle executor was removed. Use `yy task start|status|finish` and `yy merge status|land|project`.');
         process.exitCode = 2;
       });
   }
@@ -2094,7 +2094,7 @@ function configureCommandSurface(program: Command): void {
   configureKanbanCommand(program);
   configureTaskWorkspaceCommand(program);
   configureIntegrationCommand(program);
-  configureMergeQueueCommand(program);
+  configureMergeCommand(program);
   configureWatchCommand(program);
   configureEvidenceCommand(program);
   configureMigrationCommand(program);
