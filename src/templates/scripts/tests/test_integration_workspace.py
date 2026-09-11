@@ -101,6 +101,21 @@ class IntegrationWorkspaceTests(unittest.TestCase):
         self.runtime_inspect_patcher.stop()
         self.temporary.cleanup()
 
+    def test_source_adoption_helpers_execute_real_subprocess_and_git(self) -> None:
+        result = runtime.adoption_run(
+            [sys.executable, "-c", "print('adoption-ok')"], self.root)
+        self.assertEqual(result.stdout.strip(), "adoption-ok")
+        self.assertEqual(runtime.adoption_git(self.repo, "rev-parse", "--git-dir"), ".git")
+        self.assertEqual(
+            runtime.adoption_exact_external(
+                self.root / "external-adoption-receipt.json", self.controller, "receipt"),
+            self.root / "external-adoption-receipt.json",
+        )
+        runtime.adoption_clean(self.owner, "integration owner")
+        (self.owner / "untracked-adoption-input").write_text("drift\n")
+        with self.assertRaisesRegex(runtime.AdoptionError, "requires a clean integration owner"):
+            runtime.adoption_clean(self.owner, "integration owner")
+
     def remote_advance(self, text: str = "remote") -> str:
         clone = self.root / f"clone-{text}"
         git(self.root, "clone", str(self.remote), str(clone))

@@ -2283,7 +2283,7 @@ def adoption_atomic_write(path: Path, payload: dict[str, Any]) -> None:
 
 
 def adoption_run(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    result = subprocess.adoption_run(argv, cwd=cwd, stdin=subprocess.DEVNULL,
+    result = subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if result.returncode:
         detail = (result.stderr or result.stdout).strip()
@@ -2292,26 +2292,26 @@ def adoption_run(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]
 
 
 def adoption_git(root: Path, *args: str) -> str:
-    return adoption_run(["adoption_git", "-C", str(root), *args], root).stdout.strip()
+    return adoption_run(["git", "-C", str(root), *args], root).stdout.strip()
 
 
 def adoption_clean(root: Path, label: str) -> None:
     if adoption_git(root, "status", "--porcelain=v2", "--untracked-files=all"):
-        raise AdoptionError(f"source runtime adoption requires a adoption_clean {label}")
+        raise AdoptionError(f"source runtime adoption requires a clean {label}")
 
 
 def adoption_exact_external(path: Path, controller: Path, label: str) -> Path:
     candidate = Path(os.path.abspath(path.expanduser()))
     if not candidate.is_absolute():
         raise AdoptionError(f"{label} must be an absolute path")
-    common = Path(adoption_git(controller, "rev-parse", "--adoption_git-common-dir")).resolve()
+    common = Path(adoption_git(controller, "rev-parse", "--git-common-dir")).resolve()
     for protected in (controller.resolve(), common):
         try:
             candidate.relative_to(protected)
         except ValueError:
             continue
         raise AdoptionError(f"{label} must be outside the controller and Git administration directory")
-    probe = subprocess.adoption_run(["adoption_git", "-C", str(candidate.parent), "rev-parse", "--show-toplevel"],
+    probe = subprocess.run(["git", "-C", str(candidate.parent), "rev-parse", "--show-toplevel"],
                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL)
     if probe.returncode == 0:
@@ -2369,7 +2369,7 @@ def adoption_replay(receipt_path: Path, controller: Path, repository: Path, targ
     generation = adoption_task_start_admission(controller, repository, receipt["target_sha"])
     if not doctor["healthy"] or not generation["current"]:
         raise AdoptionError("completed source runtime adoption no longer passes runtime admission")
-    return {**receipt, "adoption_replay": "idempotent"}
+    return {**receipt, "replay": "idempotent"}
 
 
 def source_runtime_adopt(args: argparse.Namespace) -> dict[str, Any]:
