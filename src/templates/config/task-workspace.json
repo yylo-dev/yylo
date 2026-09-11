@@ -301,6 +301,7 @@
       "auth",
       "benchmark",
       "branches",
+      "capabilities",
       "cc",
       "clone",
       "completion",

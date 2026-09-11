@@ -1,9 +1,9 @@
-import { spawn } from 'node:child_process';
 import path from 'node:path';
 import fs from 'fs-extra';
 import { Command } from 'commander';
 import { routeControlPlane } from '../../utils/control-plane-router.js';
 import { markTransparentDelegate } from '../../utils/explicit-command.js';
+import { invokeMachineAwareChild, resolveMachineOutput } from '../machine-output.js';
 
 export type KanbanInvoker = (args: string[]) => Promise<void>;
 
@@ -13,17 +13,13 @@ export async function invokeKanban(args: string[]): Promise<void> {
   if (!(await fs.pathExists(wrapper))) {
     throw new Error('Missing canonical controller YYLO Ledger migration wrapper (`kanban.sh`). Run `yy scripts update` from the controller.');
   }
-  const exitCode = await new Promise<number>((resolve, reject) => {
-    const child = spawn('bash', [wrapper, ...args], {
-      cwd: route.controllerRoot,
-      env: route.env,
-      stdio: 'inherit',
-    });
-    child.once('error', reject);
-    child.once('exit', (code, signal) => {
-      if (signal) reject(new Error(`YYLO Ledger command terminated by signal ${signal}`));
-      else resolve(code ?? 1);
-    });
+  const machine = resolveMachineOutput(args);
+  const { exitCode } = await invokeMachineAwareChild({
+    executable: 'bash', args: [wrapper, ...args],
+    cwd: route.controllerRoot,
+    env: route.env,
+    command: `ledger.${args[0] ?? 'help'}`,
+    ...(machine ? { machine } : {}),
   });
   if (exitCode !== 0) process.exitCode = exitCode;
 }

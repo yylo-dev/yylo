@@ -1,9 +1,9 @@
-import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'fs-extra';
 import { Command } from 'commander';
 import { routeControlPlane } from '../../utils/control-plane-router.js';
+import { addMachineOutputOptions, invokeMachineAwareChild, resolveMachineOutput } from '../machine-output.js';
 
 export type IntegrationOperation =
   | 'status' | 'sync' | 'runtime-doctor' | 'runtime-refresh'
@@ -103,17 +103,13 @@ export async function invokeIntegration(
     else if (options.apply) argv.push('--apply', path.resolve(options.apply));
     else throw new Error(`integration ${operation} requires --dry-run or --apply <receipt>`);
   }
-  const exitCode = await new Promise<number>((resolve, reject) => {
-    const child = spawn('python3', argv, {
-      cwd: route.controllerRoot,
-      env: route.env,
-      stdio: 'inherit',
-    });
-    child.once('error', reject);
-    child.once('exit', (code, signal) => {
-      if (signal) reject(new Error(`Integration command terminated by signal ${signal}`));
-      else resolve(code ?? 1);
-    });
+  const machine = resolveMachineOutput(process.argv.slice(2), { jsonFlag: true });
+  const { exitCode } = await invokeMachineAwareChild({
+    executable: 'python3', args: argv,
+    cwd: route.controllerRoot,
+    env: route.env,
+    command: `integration.${operation}`,
+    ...(machine ? { machine } : {}),
   });
   if (exitCode !== 0) process.exitCode = exitCode;
 }
@@ -122,9 +118,9 @@ export function configureIntegrationCommand(
   program: Command,
   invoke: IntegrationInvoker = invokeIntegration,
 ): void {
-  const integration = program
+  const integration = addMachineOutputOptions(program
     .command('integration')
-    .description('Inspect or synchronize the registered integration owner');
+    .description('Inspect or synchronize the registered integration owner'));
   integration
     .command('status')
     .description('Show offline integration drift; fetch only when explicitly requested')
