@@ -282,7 +282,7 @@ route_registered_product_control() {
         evidence:status|evidence:|evidence:-h|evidence:--help) effective_operation=kanban ;;
         evidence:run|evidence:await) effective_operation=orchestration ;;
         integration:status|integration:|integration:-h|integration:--help) effective_operation=kanban ;;
-        integration:sync|integration:runtime-doctor|integration:runtime-refresh|integration:register|integration:repair|integration:push) effective_operation=orchestration ;;
+        integration:sync|integration:runtime-adopt-source|integration:runtime-doctor|integration:runtime-refresh|integration:register|integration:repair|integration:push) effective_operation=orchestration ;;
         *)
             echo "yylo: control-plane routing refused unknown $operation subcommand '$PREBOOTSTRAP_SUBCOMMAND'" >&2
             return 2 ;;
