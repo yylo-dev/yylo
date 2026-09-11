@@ -31,6 +31,7 @@ import {
   formatExplicitInvocationError,
 } from '../utils/explicit-command.js';
 import { migrateLegacyEnvironment } from '../core/identity-migration.js';
+import { writeCurrentMachineError } from '../cli/machine-output.js';
 
 const executableLaunchSurface = (() => {
   const executable = basename(process.argv0);
@@ -96,6 +97,7 @@ import { configureMigrationCommand } from '../cli/commands/migrate.js';
 import { configureWorkspaceCommands } from '../cli/commands/workspace.js';
 import { configureWikiCommand } from '../cli/commands/wiki.js';
 import { configureLoopCommand } from '../cli/commands/loop.js';
+import { configureCapabilitiesCommand } from '../cli/commands/capabilities.js';
 import {
   configureBenchmarkCommand,
   forwardBenchmarkSignal,
@@ -211,6 +213,26 @@ function isConnectionLikeError(err: unknown): boolean {
 /**
  * Global error handler for CLI operations
  */
+function writeSelectedMachineError(error: unknown, exitCode: number): void {
+  if (writeCurrentMachineError(error, exitCode)) return;
+  if (!process.argv.includes('--execution-envelope')) return;
+  process.stdout.write(`${JSON.stringify({
+    schema_version: 'juno_execution_envelope.v1',
+    command: { name: 'managed.run', version: 1 },
+    status: 'failure',
+    session_id: null,
+    provider: null,
+    model: null,
+    juno_version: VERSION,
+    error: {
+      code: 'EXECUTION_FAILED',
+      message: (error instanceof Error ? error.message : String(error)).slice(0, 4096),
+      exit_code: exitCode,
+    },
+    cost: { completeness: 'unavailable', usd: null },
+  })}\n`);
+}
+
 function handleCLIError(error: unknown, verbose: number = 0): void {
   if (error instanceof Error && error.name.startsWith('SessionContinuity')) {
     console.error(chalk.red.bold('\n❌ Branch Registry Error'));
@@ -218,6 +240,7 @@ function handleCLIError(error: unknown, verbose: number = 0): void {
     console.error(chalk.yellow('\n💡 Suggestions:'));
     console.error(chalk.yellow("   • Run ypl 'init' or yylo pi 'init' first to create the main branch"));
     console.error(chalk.yellow('   • Inspect branches with: yylo branches'));
+    writeSelectedMachineError(error, 1);
     process.exit(1);
     return;
   }
@@ -243,6 +266,7 @@ function handleCLIError(error: unknown, verbose: number = 0): void {
       ? (error as any).code
       : EXIT_CODES.UNEXPECTED_ERROR;
 
+    writeSelectedMachineError(error, exitCode);
     process.exit(exitCode);
     return;
   }
@@ -256,6 +280,7 @@ function handleCLIError(error: unknown, verbose: number = 0): void {
     console.error(error.stack);
   }
 
+  writeSelectedMachineError(error, EXIT_CODES.UNEXPECTED_ERROR);
   process.exit(EXIT_CODES.UNEXPECTED_ERROR);
 }
 
@@ -2076,6 +2101,7 @@ function configureCommandSurface(program: Command): void {
   configureWorkspaceCommands(program, VERSION);
   configureWikiCommand(program);
   configureLoopCommand(program);
+  configureCapabilitiesCommand(program);
   configureBenchmarkCommand(program);
   setupCompletion(program);
   setupAliases(program);
@@ -2104,7 +2130,9 @@ async function main(): Promise<void> {
     return;
   }
   if (explicitInvocation.kind === 'unknown-command' || explicitInvocation.kind === 'unknown-option') {
-    console.error(formatExplicitInvocationError(explicitInvocation, process.argv[1] ?? __filename, VERSION));
+    const message = formatExplicitInvocationError(explicitInvocation, process.argv[1] ?? __filename, VERSION);
+    console.error(message);
+    writeSelectedMachineError(new Error(message), 2);
     process.exitCode = 2;
     return;
   }
@@ -2149,7 +2177,7 @@ async function main(): Promise<void> {
   const isReadOnlyLifecycleStatus = isLifecycleCommand && commandArgs[1] === 'status';
   const isReadOnlyTaskStatus = isTaskWorkspaceCommand && commandArgs[1] === 'status';
   const isScriptsDoctor = commandArgs[0] === 'scripts' && commandArgs[1] === 'doctor';
-  const isWorkspaceDiscovery = commandArgs[0] === 'info' || commandArgs[0] === 'where' || (commandArgs[0] === 'doctor' && commandArgs[1] === 'workspace');
+  const isWorkspaceDiscovery = commandArgs[0] === 'info' || commandArgs[0] === 'where' || commandArgs[0] === 'capabilities' || (commandArgs[0] === 'doctor' && commandArgs[1] === 'workspace');
   const isControlPlaneCommand = ['ledger', 'kanban', 'task', 'merge', 'integration'].includes(commandArgs[0] ?? '');
   const isReadOnlyIdentityRequest = isReadOnlyVersionRequest || isReadOnlyLifecycleStatus || isReadOnlyTaskStatus || isMigrationCommand || isScriptsDoctor || isWorkspaceDiscovery || isControlPlaneCommand;
   const isForceUpdate = process.argv.includes('--force-update');
@@ -2442,6 +2470,7 @@ process.on('unhandledRejection', async (reason, promise) => {
   console.error(chalk.red('   This is likely a bug. Please report it.'));
   console.error(chalk.gray('   Promise:'), promise);
   console.error(chalk.gray('   Reason:'), reason);
+  writeSelectedMachineError(reason, EXIT_CODES.UNEXPECTED_ERROR);
   process.exit(EXIT_CODES.UNEXPECTED_ERROR);
 });
 
@@ -2465,6 +2494,7 @@ process.on('uncaughtException', async (error) => {
   console.error(chalk.red('   This is likely a bug. Please report it.'));
   console.error(chalk.gray('   Error:'), error.message);
   console.error(chalk.gray('   Stack:'), error.stack);
+  writeSelectedMachineError(error, EXIT_CODES.UNEXPECTED_ERROR);
   process.exit(EXIT_CODES.UNEXPECTED_ERROR);
 });
 
@@ -2512,6 +2542,7 @@ export { main, handleCLIError };
 const reportFatalError = (error: unknown) => {
   console.error(chalk.red.bold('\n💥 Fatal Error'));
   console.error(chalk.red(`   ${error instanceof Error ? error.message : String(error)}`));
+  writeSelectedMachineError(error, EXIT_CODES.UNEXPECTED_ERROR);
   process.exit(EXIT_CODES.UNEXPECTED_ERROR);
 };
 
