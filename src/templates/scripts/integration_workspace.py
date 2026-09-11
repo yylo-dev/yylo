@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import base64
 import difflib
+import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -13,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -1189,6 +1192,23 @@ class IntegrationError(RuntimeError):
     pass
 
 
+@contextmanager
+def integration_target_lock(repository: Path, target_ref: str):
+    """Serialize integration-owner maintenance; Git CAS serializes delivery itself."""
+    common = Path(git(repository, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    key = hashlib.sha256(f"{common.resolve()}\0{target_ref}".encode()).hexdigest()
+    lock = common / "juno-locks/integration-maintenance" / f"{key}.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("a+b") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN):
+                raise IntegrationError("another integration-maintenance worker owns this target") from exc
+            raise
+        yield
+
+
 def run(argv: list[str], cwd: Path, *, check: bool = True) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(argv, cwd=cwd, text=True, capture_output=True,
                             stdin=subprocess.DEVNULL,
@@ -1639,7 +1659,6 @@ def repair_plan(controller: Path) -> dict[str, Any]:
 
 
 def repair(controller: Path, *, dry_run: bool, apply: Path | None) -> tuple[dict[str, Any], int]:
-    import merge_queue as merge_runtime
     controller = exact_root(controller, "controller")
     policy, task_policy, _ = load_policy(controller)
     repository = task_workspace.product_repository(controller, task_policy)
@@ -1678,7 +1697,7 @@ def repair(controller: Path, *, dry_run: bool, apply: Path | None) -> tuple[dict
     result = {**current, "outcome": "running", "phases": []}
     reference = write_receipt(result_path, result)
     try:
-        with merge_runtime.target_lock(controller, repository, task_policy["target_ref"]):
+        with integration_target_lock(repository, task_policy["target_ref"]):
             locked = repair_plan(controller)
             if locked["plan_sha256"] != current["plan_sha256"]:
                 raise IntegrationError("repair plan identity drifted while acquiring target lock")
@@ -1754,8 +1773,7 @@ def repair(controller: Path, *, dry_run: bool, apply: Path | None) -> tuple[dict
                            "final_readback": final_readback})
             reference = write_receipt(result_path, result)
             return {**result, "receipt": reference}, 0
-    except (IntegrationError, task_workspace.TaskWorkspaceError,
-            merge_runtime.MergeQueueError, OSError) as exc:
+    except (IntegrationError, task_workspace.TaskWorkspaceError, OSError) as exc:
         result.update({"outcome": "failed", "error": str(exc)})
         reference = write_receipt(result_path, result)
         return {**result, "receipt": reference}, 2
@@ -1825,7 +1843,6 @@ def push_plan(controller: Path) -> dict[str, Any]:
 def push(controller: Path, *, dry_run: bool, apply: Path | None,
          _lock_held: bool = False,
          _plan_receipt: dict[str, str] | None = None) -> tuple[dict[str, Any], int]:
-    import merge_queue as merge_runtime
     controller = exact_root(controller, "controller")
     policy, task_policy, policy_path = load_policy(controller)
     repository = task_workspace.product_repository(controller, task_policy)
@@ -1835,7 +1852,7 @@ def push(controller: Path, *, dry_run: bool, apply: Path | None,
         reference = write_receipt(operation_receipt_path(controller, policy, "push-plan"), receipt)
         return {**receipt, "receipt": reference}, 0 if not plan["blockers"] else 2
     if apply is None:
-        with merge_runtime.target_lock(controller, repository, task_policy["target_ref"]):
+        with integration_target_lock(repository, task_policy["target_ref"]):
             plan = push_plan(controller)
             planned = {**plan, "outcome": "planned" if not plan["blockers"] else "refused"}
             plan_reference = write_receipt(
@@ -1985,8 +2002,7 @@ def push(controller: Path, *, dry_run: bool, apply: Path | None,
                 payload.update({"mode": "plan-and-apply", "final_status": "completed",
                                 "outcome_receipt": reference})
             return payload, 0
-        except (IntegrationError, task_workspace.TaskWorkspaceError,
-                merge_runtime.MergeQueueError, OSError) as exc:
+        except (IntegrationError, task_workspace.TaskWorkspaceError, OSError) as exc:
             result.update({"outcome": "failed", "error": str(exc)})
             reference = write_receipt(result_path, result)
             payload = {**result, "receipt": reference}
@@ -2001,12 +2017,11 @@ def push(controller: Path, *, dry_run: bool, apply: Path | None,
 
     if _lock_held:
         return apply_locked()
-    with merge_runtime.target_lock(controller, repository, target_ref):
+    with integration_target_lock(repository, target_ref):
         return apply_locked()
 
 
 def sync(controller: Path) -> tuple[dict[str, Any], int]:
-    import merge_queue as merge_runtime
     controller = exact_root(controller, "controller")
     policy, task_policy, _ = load_policy(controller)
     repository = task_workspace.product_repository(controller, task_policy)
@@ -2018,7 +2033,7 @@ def sync(controller: Path) -> tuple[dict[str, Any], int]:
         "repository": str(repository), "target_ref": target_ref, "phases": []}
     reference = write_receipt(receipt_path, receipt)
     try:
-        with merge_runtime.target_lock(controller, repository, target_ref):
+        with integration_target_lock(repository, target_ref):
             before = status_payload(controller)
             owner = before["integration"]["owner"]
             blockers = [row for row in before["findings"] if row["severity"] == "error"]
@@ -2112,7 +2127,7 @@ def sync(controller: Path) -> tuple[dict[str, Any], int]:
             return {"schema_version": SCHEMA, "operation": "sync", "outcome": "completed",
                     "receipt": reference, "status": after}, 0
     except (IntegrationError, ManagedRuntimeError,
-            task_workspace.TaskWorkspaceError, merge_runtime.MergeQueueError, OSError) as exc:
+            task_workspace.TaskWorkspaceError, OSError) as exc:
         receipt["outcome"] = "failed"; receipt["error"] = str(exc)
         if isinstance(exc, ManagedRuntimeError) and exc.receipt:
             receipt["managed_runtime_receipt"] = exc.receipt
@@ -2129,7 +2144,6 @@ def register(controller: Path, owner_path: Path, *, replace: bool = False,
     Existing identity is evidence, never repair input: partial or differing role,
     routing, and runtime values fail closed instead of being overwritten.
     """
-    import merge_queue as merge_runtime
     controller = exact_root(controller, "controller")
     policy, task_policy, _ = load_policy(controller)
     repository = task_workspace.product_repository(controller, task_policy)
@@ -2196,7 +2210,7 @@ def register(controller: Path, owner_path: Path, *, replace: bool = False,
             if not runtime_path or existing_runtime != str(runtime_path) or existing_version != runtime_version:
                 raise IntegrationError("existing controller runtime identity differs from the invoking package")
 
-        with merge_runtime.target_lock(controller, repository, target_ref):
+        with integration_target_lock(repository, target_ref):
             previous = registered_owner(repository)
             if previous and previous != str(owner) and not replace:
                 raise IntegrationError(
@@ -2238,8 +2252,7 @@ def register(controller: Path, owner_path: Path, *, replace: bool = False,
                    "seeded": seeded}
         reference = write_receipt(receipt_path, receipt)
         return {**receipt, "receipt": reference, "status": status_payload(controller)}, 0
-    except (IntegrationError, task_workspace.TaskWorkspaceError,
-            merge_runtime.MergeQueueError, OSError) as exc:
+    except (IntegrationError, task_workspace.TaskWorkspaceError, OSError) as exc:
         receipt = {"schema_version": SCHEMA, "operation": "register", "outcome": "failed",
                    "owner": str(owner_path.expanduser().resolve()), "error": str(exc)}
         reference = write_receipt(receipt_path, receipt)

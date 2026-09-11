@@ -467,8 +467,12 @@ def task_mutation_eligibility(task_id: str, state: Optional[str], *,
             f"yy task sync {task_id}")
     if state == QUEUED:
         return MutationEligibility(
-            None, False, "task_already_queued", "the fenced target executor must own delivery",
-            "yy merge arbiter run")
+            None, False, "task_already_queued", "native Git delivery owns this task",
+            f"yy merge land {task_id}")
+    if state == "GIT_INTEGRATED":
+        return MutationEligibility(
+            None, False, "git_integrated", "Git succeeded and Ledger projection is pending",
+            f"yy merge project {task_id}")
     return MutationEligibility(
         None, False, "task_state_ineligible", f"lifecycle state must leave {state}",
         f"yy task status {task_id}")
@@ -672,7 +676,7 @@ def plan_resume(facts: ResumeFacts) -> ResumeDecision:
     """
     if facts.owner not in {"task", "target"}:
         raise ValueError(f"unknown resume owner: {facts.owner!r}")
-    command = "yy task run" if facts.owner == "task" else "yy merge arbiter run"
+    command = "yy task run" if facts.owner == "task" else "yy merge status"
     if facts.ambiguous or facts.producer_status == "unknown":
         return ResumeDecision(RESUME_UNKNOWN_OUTCOME, False, command, None,
                               "material_outcome_ambiguity")
