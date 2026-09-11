@@ -58,6 +58,21 @@ describe('integration workspace CLI', () => {
     });
   });
 
+  it('forwards one receipt-bound exact source-runtime adoption transaction', async () => {
+    const invoke = vi.fn(async () => undefined);
+    const program = new Command().exitOverride().configureOutput({ writeOut: () => undefined });
+    configureIntegrationCommand(program, invoke);
+    await program.parseAsync([
+      'node', 'yy', 'integration', 'runtime-adopt-source',
+      '--previous-sha', 'a'.repeat(40), '--target-sha', 'b'.repeat(40),
+      '--install-prefix', '/tmp/runtime-b', '--output', '/tmp/adoption.json',
+    ]);
+    expect(invoke).toHaveBeenCalledWith('runtime-adopt-source', {
+      previousSha: 'a'.repeat(40), targetSha: 'b'.repeat(40),
+      installPrefix: '/tmp/runtime-b', output: '/tmp/adoption.json',
+    });
+  });
+
   it('forwards explicit canonical owner registration', async () => {
     const invoke = vi.fn(async () => undefined);
     const program = new Command().exitOverride().configureOutput({ writeOut: () => undefined });

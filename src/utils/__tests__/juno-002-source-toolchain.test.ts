@@ -99,7 +99,7 @@ describe('Juno 2 shipped guidance', () => {
       expect(guidance).toMatch(/bare `pi`|bare pi/i);
       expect(guidance).toMatch(/provider\/model|provider and model/);
     }
-    expect(agents).toContain('Implementation and repair agents never launch lifecycle-semantic reviewers');
+    expect(agents).toContain('Tests and semantic reviews are explicit project checks outside merge');
     expect(agents).toContain('yy task preflight TASK_ID');
 
     const skillPaths = [

@@ -63,6 +63,7 @@ SEMVER_RE = re.compile(
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\Z"
 )
 RUNTIME_PATH = ".juno_task/scripts/task_workspace.py"
+MANAGED_GENERATION_PATH = ".juno_task/runtime/managed-controller/generation.json"
 TASK_HYDRATE_RECOVERY_SCHEMA = "juno_task_hydrate_recovery.v1"
 # Stable package-router capability. Parser command ordering may evolve without
 # invalidating hydrate recovery selection.
@@ -1787,10 +1788,38 @@ def require_current_runtime(repository: Path, target_sha: str,
         )
     if not generation["current"]:
         if source_repository:
+            previous = None
+            if controller is not None:
+                try:
+                    managed = json.loads((controller / MANAGED_GENERATION_PATH).read_text())
+                    candidate = managed.get("target_sha") if isinstance(managed, dict) else None
+                    previous = candidate if isinstance(candidate, str) and SHA_RE.fullmatch(candidate) else None
+                except (OSError, json.JSONDecodeError):
+                    pass
+            if previous is None:
+                history = run(["git", "-C", str(repository), "rev-list", "--max-count=256",
+                               target_sha, "--", RUNTIME_PATH], repository, check=False)
+                for candidate in history.stdout.splitlines() if history.returncode == 0 else []:
+                    blob = target_blob(repository, candidate, RUNTIME_PATH)
+                    if blob is not None and hashlib.sha256(blob).hexdigest() == generation["running_sha256"]:
+                        previous = candidate
+                        break
+            if previous and controller is not None:
+                prefix = Path.home() / ".local/share/juno/runtimes" / f"source-{target_sha[:12]}"
+                receipt = Path("/tmp") / f"yylo-source-runtime-adoption-{target_sha[:12]}.json"
+                raise TaskWorkspaceError(
+                    "managed task runtime differs from a Juno source target. Complete safe recovery: "
+                    f"`yy integration runtime-adopt-source --previous-sha {previous} "
+                    f"--target-sha {target_sha} --install-prefix {shlex.quote(str(prefix))} "
+                    f"--output {shlex.quote(str(receipt))}`; this one transaction builds and authenticates "
+                    "the exact unpublished artifact, rebinds the clean controller, refreshes managed runtime, "
+                    "runs runtime-doctor, and verifies task-start admission; do not use "
+                    "runtime-install-rebind or runtime-refresh alone"
+                )
             raise TaskWorkspaceError(
-                "managed task runtime differs from a Juno source target; use a controller "
-                "package/runtime matching that target, or atomically update the source package "
-                "template, tracked runtime, and managed inventory if an upgrade is intended"
+                "managed task runtime differs from a Juno source target; recover only with the complete "
+                "`yy integration runtime-adopt-source --help` transaction (the current managed generation "
+                "identity is unavailable), not runtime-install-rebind or runtime-refresh alone"
             )
         target_runtime = target_blob(repository, target_sha, RUNTIME_PATH)
         _, legacy_provenance = _consumer_runtime_provenance(
