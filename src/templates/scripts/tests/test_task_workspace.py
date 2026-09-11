@@ -6664,7 +6664,7 @@ steps:
         git(worktree, "add", "src/feature.txt")
         git(worktree, "commit", "-m", "corrected descendant tip")
         with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
-                                    "yy merge reopen X") as failure:
+                                    "create a new task") as failure:
             task_runtime.finish(self.controller, "X")
         self.assertIn("queued at", failure.exception.args[0])
         state = json.loads((self.controller / ".juno_task/state/tasks.json").read_text())

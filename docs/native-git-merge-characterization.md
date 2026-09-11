@@ -86,6 +86,14 @@ Retained production behavior must be only:
 
 A target move invalidates candidate checks. A projection retry does not repeat Git integration. A conflicting task cannot authorize or block an unrelated task. There is no compatibility execution path for the retired queue after the explicit migration inventory/cutover.
 
+## Replacement result
+
+The one-task replacement retains 302 authored adapter lines, 85 authored TypeScript CLI lines, and 18 lines for the integration-maintenance lock moved out of merge: **405 retained/new production lines total**. Against the frozen 9,041-line denominator, this deletes **8,636 lines (95.52%)** without counting runtime/template twins twice. It is 395 lines below the 800-line cap. The adapter has three public commands (`status`, `land`, `project`), three active delivery states (`QUEUED`, `CONFLICT`, `GIT_INTEGRATED` before terminal `MERGED`), one task-state write after Git, and one separately retriable Ledger write. Merge-owned model calls are zero.
+
+The replacement removed FIFO selection, arbiter/drive/resume journals, reviews, repair, risk routing, validation scheduling/cache, queue-tail authority, target refresh, reopen, reconciliation, supersession, and owner-checkout synchronization from the runtime. Focused real-Git tests cover clean divergent delivery, private conflict X plus unrelated Y, competing expected-old updates, target movement, dirty bytes, already-contained retry, attached-target refusal, and Git-success/Ledger-failure. Historical receipts are not read or deleted.
+
+This is a source-line deletion result, not an elapsed-time claim. Operator interventions, production ready-to-integrated time, and matched project-check overhead remain unknown until observed after activation.
+
 ## Reproduction
 
 ```bash

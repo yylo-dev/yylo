@@ -672,11 +672,11 @@ class ResumeDecisionTables(unittest.TestCase):
                 self.assertFalse(decision.admitted)
                 self.assertEqual(decision.classification, classification)
 
-    def test_target_resume_routes_only_to_existing_arbiter(self) -> None:
+    def test_target_resume_routes_to_native_delivery_status(self) -> None:
         decision = decisions.plan_resume(decisions.ResumeFacts(
             owner="target", producer_status="dead", launch_observed=True,
             explicit_handoff=True, resumable_stage="FINALIZING"))
-        self.assertEqual(decision.owner_command, "yy merge arbiter run")
+        self.assertEqual(decision.owner_command, "yy merge status")
         self.assertEqual(decision.restart_stage, "FINALIZING")
 
 

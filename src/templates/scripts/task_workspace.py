@@ -2892,7 +2892,7 @@ def project_kanban_lifecycle(controller: Path, task_id: str, lifecycle_state: st
             "merge finalization owns the done mutation; run the merge queue recovery",
             {"task_id": task_id, "lifecycle_state": lifecycle_state,
              "board_status": current.get("status"),
-             "recovery_command": "yy merge next"})
+             "recovery_command": f"yy merge project {task_id}"})
     disposition = LIFECYCLE_DISPOSITIONS.get(lifecycle_state)
     continuation = None
     if isinstance(record, dict):
@@ -4969,7 +4969,7 @@ def _finish_once(controller: Path, task_id: str,
                 or queued_ref_sha != queued_record.get("tip_sha")):
             raise TaskWorkspaceError(
                 f"task is queued at {queued_record.get('tip_sha')} but its branch/worktree tip is "
-                f"{queued_head}; use `yy merge reopen {task_id}` for a descendant correction or "
+                f"{queued_head}; create a new task for a descendant correction or "
                 "restore the exact queued tip before retrying finish")
         try:
             queue_sync = ensure_kanban_sync(controller, task_id, queued_record, phase="queued")
@@ -6683,7 +6683,7 @@ def _task_projection(controller: Path, task_id: str, run_dir: Path,
         kind="task-run", run_id=journal["run_id"], task_id=task_id, state=state_name,
         plan=plan, started=lifecycle_runtime.lifecycle_elapsed_started(journal),
         counters=counters, attempts=attempts, blocker=blocker,
-        next_action=(f"yy merge drive --through {task_id}" if state_name == "QUEUED" else
+        next_action=(f"yy merge land {task_id}" if state_name == "QUEUED" else
                     (f"resolve the blocker and resume yy task run {task_id}"
                      if state_name == "NEEDS_DECISION" else
                      # BLOCKED is terminal: replaying yy task run returns this
