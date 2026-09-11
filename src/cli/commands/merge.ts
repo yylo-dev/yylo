@@ -4,6 +4,7 @@ import fs from 'fs-extra';
 import { Command } from 'commander';
 import { routeControlPlane } from '../../utils/control-plane-router.js';
 import { checkpointControllerAfterFinalization } from '../../utils/controller-checkpoint.js';
+import { addMachineOutputOptions, invokeMachineAwareChild, resolveMachineOutput } from '../machine-output.js';
 
 export type MergeQueueOperation = 'status' | 'drive' | 'resume' | 'arbiter-status' | 'arbiter-run' | 'plan' | 'next' | 'resolve' | 'review' | 'reopen' | 'recover-full-suite-failure' | 'recover-repair-predispatch' | 'recover-authority-drift' | 'supersede-lifecycle-journal' | 'reconcile' | 'refresh' | 'withdraw';
 export type MergeQueueInvoker = (
@@ -104,6 +105,19 @@ export async function invokeMergeQueueAtController(
     ? ['arbiter', 'status']
     : operation === 'arbiter-run' ? ['arbiter', 'run'] : [operation];
   const args = [script, ...scriptOperation, ...(taskId ? [taskId] : []), ...extraArgs];
+  const projection = operation === 'plan' ? 'plan'
+    : process.argv.includes('--full') ? 'full'
+      : process.argv.includes('--detail') ? 'detail' : 'default';
+  const machine = resolveMachineOutput(process.argv.slice(2), { jsonFlag: true, defaultProjection: projection });
+  if (machine) {
+    const { exitCode, payload } = await invokeMachineAwareChild({
+      executable: 'python3', args, cwd: controllerRoot, env,
+      command: `merge.${operation}`, machine,
+    });
+    await checkpointMergeQueueAfterFinalization(operation, controllerRoot, exitCode, payload, checkpoint);
+    if (exitCode !== 0) process.exitCode = exitCode;
+    return;
+  }
   const extractor = new TerminalMergeResultExtractor();
   const exitCode = await new Promise<number>((resolve, reject) => {
     const child = spawn('python3', args, { cwd: controllerRoot, env, stdio: ['inherit', 'pipe', 'inherit'] });
@@ -142,7 +156,7 @@ export function configureMergeQueueCommand(
   program: Command,
   invoke: MergeQueueInvoker = invokeMergeQueue,
 ): void {
-  const merge = program.command('merge').description('Observe delivery or explicitly run one fenced target owner');
+  const merge = addMachineOutputOptions(program.command('merge').description('Observe delivery or explicitly run one fenced target owner'));
   merge.command('status')
     .description('Read-only bounded queue state, producer fence, prior evidence, and one eligible action')
     .option('--detail [task-id]', 'Bounded detail for TASK_ID, or the active FIFO attempt')

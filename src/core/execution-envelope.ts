@@ -7,11 +7,13 @@ export const JUNO_EXECUTION_ENVELOPE_VERSION = 'juno_execution_envelope.v1' as c
 
 export const junoExecutionEnvelopeSchema = z.object({
   schema_version: z.literal(JUNO_EXECUTION_ENVELOPE_VERSION),
+  command: z.object({ name: z.literal('managed.run'), version: z.literal(1) }).strict(),
   status: z.enum(['success', 'failure', 'timeout', 'cancelled']),
   session_id: z.string().min(1).nullable(),
   provider: z.string().min(1).nullable(),
   model: z.string().min(1).nullable(),
   juno_version: z.string().min(1),
+  error: z.object({ code: z.string().min(1), message: z.string(), exit_code: z.number().int().positive() }).strict().nullable(),
   cost: z.discriminatedUnion('completeness', [
     z.object({ completeness: z.literal('complete'), usd: z.number().finite().nonnegative() }).strict(),
     z.object({ completeness: z.literal('partial'), usd: z.number().finite().nonnegative() }).strict(),
@@ -54,11 +56,17 @@ export function buildJunoExecutionEnvelope(result: ExecutionResult, junoVersion:
       : result.status === ExecutionStatus.CANCELLED ? 'cancelled' : 'failure';
   return junoExecutionEnvelopeSchema.parse({
     schema_version: JUNO_EXECUTION_ENVELOPE_VERSION,
+    command: { name: 'managed.run', version: 1 },
     status,
     session_id: sessions.size === 1 ? [...sessions][0] : null,
     provider: providers.size === 1 ? [...providers][0] : null,
     model: models.size === 1 ? [...models][0] : null,
     juno_version: junoVersion,
+    error: status === 'success' ? null : {
+      code: `EXECUTION_${status.toUpperCase()}`,
+      message: `Managed execution ended with status ${status}`,
+      exit_code: status === 'cancelled' ? 130 : status === 'timeout' ? 124 : 1,
+    },
     cost,
   });
 }
