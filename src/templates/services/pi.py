@@ -96,7 +96,8 @@ class PiService:
         # OpenAI
         ":luna": "openai-codex/gpt-5.6-luna",
         ":sol": "openai-codex/gpt-5.6-sol",
-        ":gpt": ":sol",
+        ":gpt": "openai-codex/gpt-6-astra",
+        ":astra": "openai-codex/gpt-6-astra",
         ":gpt5.5": "openai-codex/gpt-5.5",
         ":mini": "openai-codex/gpt-5.6-terra",
         ":gpt-5": "openai/gpt-5",
@@ -802,13 +803,13 @@ Examples:
   %(prog)s -p "Audit code" -m :luna --tools read,bash,edit
 
 Model shorthands:
-  :pi, :default    -> :gpt -> openai-codex/gpt-5.6-sol
+  :pi, :default    -> :gpt -> openai-codex/gpt-6-astra
   :sonnet          -> anthropic/claude-sonnet-4-6
   :opus            -> anthropic/claude-opus-4-6
   :haiku           -> anthropic/claude-haiku-4-5-20251001
   :luna            -> openai-codex/gpt-5.6-luna
   :sol             -> openai-codex/gpt-5.6-sol
-  :gpt             -> :sol -> openai-codex/gpt-5.6-sol
+  :gpt, :astra     -> openai-codex/gpt-6-astra
   :gpt5.5          -> openai-codex/gpt-5.5
   :mini            -> openai-codex/gpt-5.6-terra
   :gpt-5           -> openai/gpt-5
@@ -842,7 +843,7 @@ Model shorthands:
             type=str,
             default=os.environ.get("PI_MODEL", self.DEFAULT_MODEL),
             help=(
-                "Model name. Supports shorthands (:pi, :sonnet, :opus, :luna, :sol, :gpt, :gpt5.5, :mini, :gpt-5, :gemini-pro, etc.) "
+                "Model name. Supports shorthands (:pi, :sonnet, :opus, :luna, :sol, :gpt, :astra, :gpt5.5, :mini, :gpt-5, :gemini-pro, etc.) "
                 f"or provider/model format. Default: {self.DEFAULT_MODEL} (env: PI_MODEL)"
             ),
         )

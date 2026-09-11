@@ -1582,7 +1582,8 @@ ${chalk.blue('Model Shorthands:')}
   ${chalk.gray('# OpenAI / OpenAI Codex')}
   :luna                openai-codex/gpt-5.6-luna
   :sol                 openai-codex/gpt-5.6-sol
-  :gpt                 :sol ${chalk.gray('(default)')}
+  :gpt                 openai-codex/gpt-6-astra ${chalk.gray('(default)')}
+  :astra               openai-codex/gpt-6-astra
   :gpt5.5              openai-codex/gpt-5.5
   :mini                openai-codex/gpt-5.6-terra
   :gpt-5               openai/gpt-5
@@ -1616,7 +1617,7 @@ ${chalk.blue('Service-Specific Options:')}
   --live                    Run Pi in interactive TUI mode (auto-exits on non-aborted completion)
 
 ${chalk.blue('Environment Variables:')}
-  PI_MODEL                  Model override (default: :gpt → openai-codex/gpt-5.6-sol)
+  PI_MODEL                  Model override (default: :gpt → openai-codex/gpt-6-astra)
   PI_PROVIDER               Provider override
   PI_PROJECT_PATH           Project directory
   PI_THINKING               Thinking level

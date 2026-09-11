@@ -175,7 +175,8 @@ Every step receives one-based loop metadata through `YYLO_LOOP_ID`,
 | --- | --- |
 | `:luna` | `openai-codex/gpt-5.6-luna` |
 | `:sol` | `openai-codex/gpt-5.6-sol` |
-| `:gpt` | `:sol` (Pi default) |
+| `:gpt` | `openai-codex/gpt-6-astra` (Pi default) |
+| `:astra` | `openai-codex/gpt-6-astra` |
 | `:mini` | `openai-codex/gpt-5.6-terra` |
 | `:sonnet` | `anthropic/claude-sonnet-4-6` |
 | `:opus` | `anthropic/claude-opus-4-6` |
@@ -379,7 +380,7 @@ yy integration sync
 Install canonical packages independently:
 
 ```bash
-python3 -m pip install 'yylo-ledger==0.2.0'
+python3 -m pip install 'yylo-ledger==0.3.0'
 npm install --global '@yylo/benchmark@0.1.1-rc.2'
 
 yylo-ledger --help
@@ -413,7 +414,7 @@ juno-kanban-juno-002 --version
 ./juno-code/scripts/juno-002-source-toolchain.sh status
 ```
 
-`yy ledger` and its labelled `yy kanban` compatibility alias use the exact Ledger compatibility policy `0.2.0`. The isolated source aliases also enforce the legacy controller package compatibility range `juno-kanban >=2.0.5,<3.0.0`. Source selection, controller registration, and data history are separate boundaries:
+`yy ledger` and its labelled `yy kanban` compatibility alias use the exact Ledger compatibility policy `0.3.0`. The isolated source aliases also enforce the legacy controller package compatibility range `juno-kanban >=2.0.5,<3.0.0`. Source selection, controller registration, and data history are separate boundaries:
 
 ```bash
 ./juno-code/scripts/juno-002-source-toolchain.sh register-controller /path/to/controller controller-branch
