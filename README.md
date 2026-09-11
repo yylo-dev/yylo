@@ -98,6 +98,10 @@ list` and `skills status` use only the local install record.
 
 Run `yy --help` for the complete top-level inventory of your installed version; each listed command prints its own usage when invoked with `-h`. The old `lifecycle` command is removed; use typed `task` and `merge` commands.
 
+### Stable machine output
+
+Use `--format json|ndjson --raw` on task, merge, and integration commands, or Ledger's `-f json|ndjson --raw`, for a strict stdout-only data channel. The `capabilities` command publishes command-specific projections in either machine format. See [Machine output contract](docs/machine-output.md) for the versioned envelope and migration policy.
+
 ## Beginner agent workflow
 
 Install the coding agent you intend to use and configure its provider credentials separately. Pi is optional and supports multiple providers:
