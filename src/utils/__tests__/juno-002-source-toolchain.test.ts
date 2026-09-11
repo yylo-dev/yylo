@@ -42,6 +42,20 @@ describe('Juno 2 Kanban compatibility policy', () => {
     );
     expect(result.status === 0).toBe(accepted);
   });
+
+  it.each([
+    ['yylo-ledger 0.3.0', true],
+    ['yylo-ledger 0.2.0', false],
+    ['yylo-ledger 0.3.0rc1', false],
+    ['yylo-ledger 0.4.0', false],
+  ])('validates exact Ledger identity %j', (output, accepted) => {
+    const result = spawnSync(
+      'bash',
+      ['-c', 'source "$1"; yylo_ledger_parse_compatible_version "$2"', 'test', policy, output],
+      { encoding: 'utf8' },
+    );
+    expect(result.status === 0).toBe(accepted);
+  });
 });
 
 describe('Juno 2 shipped guidance', () => {
