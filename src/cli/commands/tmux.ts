@@ -1,5 +1,9 @@
 import { Command } from 'commander';
-import { TmuxWorkspace, type TmuxWorkspaceStatus } from '../../core/tmux-workspace.js';
+import {
+  TmuxCompletionMonitor,
+  TmuxWorkspace,
+  type TmuxWorkspaceStatus,
+} from '../../core/tmux-workspace.js';
 
 function printStatus(status: TmuxWorkspaceStatus, json = false): void {
   if (json) {
@@ -64,6 +68,28 @@ export function configureTmuxCommand(program: Command, factory = () => new TmuxW
     .action((name: string, options: { directory: string; window: string }) =>
       factory().open(name, options.directory, options.window),
     );
+
+  tmux
+    .command('monitor')
+    .description('Monitor foreground process completions until interrupted')
+    .requiredOption('--session <name>', 'Exact tmux session name')
+    .option('--interval <seconds>', 'Polling interval from 0.25 to 60 seconds', '2')
+    .action(async (options: { session: string; interval: string }) => {
+      const seconds = Number(options.interval);
+      const controller = new AbortController();
+      const stop = () => controller.abort();
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+      try {
+        console.log(`monitoring tmux workspace ${TmuxWorkspace.sessionName(options.session)}`);
+        await new TmuxCompletionMonitor(factory(), options.session, seconds * 1000).run(
+          controller.signal,
+        );
+      } finally {
+        process.off('SIGINT', stop);
+        process.off('SIGTERM', stop);
+      }
+    });
 
   tmux
     .command('status')
