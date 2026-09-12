@@ -57,9 +57,11 @@ class RuntimeFixture:
         fake.read_state = lambda _controller: json.loads(json.dumps(self.state))
         fake.write_state = self.write_state
         fake.state_lock = lambda _controller: contextlib.nullcontext()
-        fake.read_kanban_task = lambda _controller, _task: {
-            "status": "in_progress", "agent_response": "", "fields": {}}
+        self.board = {"status": "in_progress", "agent_response": "",
+                      "commit_hash": None, "fields": {}}
+        fake.read_kanban_task = lambda _controller, _task: json.loads(json.dumps(self.board))
         fake.kanban_board_revision = lambda _controller, _task: "a" * 64
+        fake.project_kanban_lifecycle = self.project_kanban_lifecycle
         sys.modules["task_workspace"] = fake
         spec = importlib.util.spec_from_file_location(f"merge_queue_fixture_{id(self)}", RUNTIME)
         self.runtime = importlib.util.module_from_spec(spec)
@@ -68,6 +70,22 @@ class RuntimeFixture:
 
     def write_state(self, _controller: Path, state: dict) -> None:
         self.state = json.loads(json.dumps(state))
+
+    def project_kanban_lifecycle(self, _controller: Path, _task: str, lifecycle_state: str,
+                                 **kwargs: object) -> dict[str, object]:
+        expected = "done" if lifecycle_state == "MERGED" else "in_progress"
+        commit_hash = kwargs.get("commit_hash")
+        if lifecycle_state == "MERGED" and not kwargs.get("allow_done"):
+            raise self.runtime.task_runtime.KanbanSyncError("done projection refused")
+        self.board["status"] = expected
+        self.board["fields"] = {
+            "lifecycle_projection": "juno_lifecycle_kanban_projection.v1",
+            "lifecycle_state": lifecycle_state,
+        }
+        if isinstance(commit_hash, str):
+            self.board["commit_hash"] = commit_hash
+        return {"schema_version": "juno_task_kanban_sync.v1", "outcome": "projected",
+                "board_status": expected, "receipt": {"path": "ledger", "sha256": "a" * 64}}
 
     def branch(self, name: str, *, start: str | None = None) -> Path:
         worktree = self.root / name
@@ -96,7 +114,7 @@ class NativeDeliveryTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.f.close()
 
-    def test_clean_divergent_merge_preserves_both_sides_and_separates_projection(self) -> None:
+    def test_clean_divergent_merge_preserves_both_sides_and_projects_ledger(self) -> None:
         source = self.f.branch("TASK")
         tip = commit(source, "source", "source.txt", "source\n")
         target = self.f.branch("target-side")
@@ -107,8 +125,9 @@ class NativeDeliveryTests(unittest.TestCase):
         result = self.f.runtime.land(self.f.controller, "TASK")
 
         self.assertEqual(result["outcome"], "GIT_INTEGRATED")
-        self.assertEqual(result["ledger"]["status"], "pending")
-        self.assertEqual(self.f.state["tasks"]["TASK"]["state"], "GIT_INTEGRATED")
+        self.assertEqual(result["ledger"]["status"], "complete")
+        self.assertEqual(self.f.state["tasks"]["TASK"]["state"], "MERGED")
+        self.assertEqual(self.f.board["status"], "done")
         tree = command(self.f.repository, "ls-tree", "-r", "--name-only", "target")
         self.assertIn("source.txt", tree)
         self.assertIn("target.txt", tree)
@@ -131,7 +150,7 @@ class NativeDeliveryTests(unittest.TestCase):
         self.assertTrue(Path(conflict["candidate_path"]).is_dir())
         self.assertEqual(landed["outcome"], "GIT_INTEGRATED")
         self.assertEqual(self.f.state["tasks"]["X"]["state"], "CONFLICT")
-        self.assertEqual(self.f.state["tasks"]["Y"]["state"], "GIT_INTEGRATED")
+        self.assertEqual(self.f.state["tasks"]["Y"]["state"], "MERGED")
 
     def test_competing_expected_old_update_rejects_stale_candidate(self) -> None:
         x = self.f.branch("X")
@@ -173,7 +192,7 @@ class NativeDeliveryTests(unittest.TestCase):
         first = self.f.runtime.land(self.f.controller, "TASK")
         second = self.f.runtime.land(self.f.controller, "TASK")
         self.assertEqual(first["outcome"], "GIT_INTEGRATED")
-        self.assertEqual(second["outcome"], "ALREADY_IN_TARGET")
+        self.assertEqual(second["outcome"], "ALREADY_PROJECTED")
         self.assertEqual(command(source, "status", "--porcelain=v1"), before)
         self.assertEqual(dirty.read_text(), "uncommitted\n")
 
@@ -181,19 +200,39 @@ class NativeDeliveryTests(unittest.TestCase):
         source = self.f.branch("TASK")
         tip = commit(source, "source", "source.txt", "source\n")
         self.f.queue("TASK", tip)
-        landed = self.f.runtime.land(self.f.controller, "TASK")
-        target = landed["git"]["integrated_sha"]
-        wrapper = self.f.controller / ".juno_task/scripts/kanban.sh"
-        wrapper.write_text("#!/bin/sh\necho ledger-unavailable >&2\nexit 2\n")
-        wrapper.chmod(0o755)
+        original = self.f.runtime.task_runtime.project_kanban_lifecycle
 
+        def fail_projection(*_args: object, **_kwargs: object) -> dict[str, object]:
+            raise self.f.runtime.task_runtime.KanbanSyncError("ledger-unavailable")
+
+        self.f.runtime.task_runtime.project_kanban_lifecycle = fail_projection
         with self.assertRaisesRegex(self.f.runtime.DeliveryError, "ledger-unavailable"):
-            self.f.runtime.project(self.f.controller, "TASK")
-
-        self.assertEqual(command(self.f.repository, "rev-parse", "target"), target)
+            self.f.runtime.land(self.f.controller, "TASK")
+        target = command(self.f.repository, "rev-parse", "target")
         self.assertEqual(self.f.state["tasks"]["TASK"]["state"], "GIT_INTEGRATED")
         self.assertEqual(self.f.runtime.status(self.f.controller, "TASK")["tasks"][0]["next_command"],
                          "yy merge project TASK")
+        self.f.runtime.task_runtime.project_kanban_lifecycle = original
+        repaired = self.f.runtime.project(self.f.controller, "TASK")
+        self.assertEqual(repaired["ledger"]["status"], "complete")
+        self.assertEqual(command(self.f.repository, "rev-parse", "target"), target)
+
+    def test_project_repairs_stale_merged_board_with_exact_integration_commit(self) -> None:
+        source = self.f.branch("TASK")
+        tip = commit(source, "source", "source.txt", "source\n")
+        self.f.queue("TASK", tip)
+        landed = self.f.runtime.land(self.f.controller, "TASK")
+        integrated = landed["git"]["integrated_sha"]
+        later = self.f.branch("later", start=integrated)
+        later_tip = commit(later, "later", "later.txt", "later\n")
+        self.f.target(later_tip, integrated)
+        self.f.board.update({"status": "in_progress", "commit_hash": None, "fields": {}})
+
+        repaired = self.f.runtime.project(self.f.controller, "TASK")
+
+        self.assertEqual(repaired["git"]["integrated_sha"], integrated)
+        self.assertEqual(self.f.board["commit_hash"], integrated)
+        self.assertEqual(self.f.board["status"], "done")
 
     def test_checked_out_target_is_refused_without_mutation(self) -> None:
         source = self.f.branch("TASK")

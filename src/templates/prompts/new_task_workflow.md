@@ -31,6 +31,6 @@ committed tip, runs configured focused validation, and records the task as
 synchronize controller and product branches. Use `yy task status TASK_ID` for
 bounded read-only observation.
 
-Use `yy merge status TASK_ID` for read-only observation. The target owner runs `yy merge land TASK_ID` for exactly one immutable source, then `yy merge project TASK_ID` to record the already successful Git result separately. A moved target requires recomposition and renewed candidate checks. Preserve private conflict bytes; a conflicting task cannot block an unrelated task.
+Use `yy merge status TASK_ID` for read-only observation. The target owner runs `yy merge land TASK_ID` for exactly one immutable source and automatic Ledger projection; `yy merge project TASK_ID` is the idempotent recovery for projection failure or stale Ledger truth. A moved target requires recomposition and renewed candidate checks. Preserve private conflict bytes; a conflicting task cannot block an unrelated task.
 
 Tests and semantic reviews remain explicit project checks outside merge. The native adapter launches zero models, chooses no reviewer, schedules no suite, and owns no repair or evidence-cache loop. Git ancestry is not a test/review/requirements claim. Integrate release-version changes through this same ordinary task/native-Git lifecycle; package preparation is maintainer-only and release, push, publish, deploy, and cleanup remain separate authorities outside `yy`.

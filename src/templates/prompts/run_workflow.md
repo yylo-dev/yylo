@@ -7,7 +7,7 @@ Choose one public interface by intent:
 - Generic ordered reporting or agent work: `workflow_runner.sh --workflow PATH`.
 - Feature implementation: `yy task start TASK_ID`; before editing or testing follow [task dependency hydration](../wiki/controller/task_dependency_hydration.md) and stop before implementation on failure; implement, test, and commit; run read-only `yy task preflight TASK_ID`; then `yy task finish TASK_ID` on that exact tip.
 - Delivery observation: `yy merge status [TASK_ID]` (read-only).
-- Delivery mutation: `yy merge land TASK_ID`, followed by the separate Ledger projection `yy merge project TASK_ID`.
+- Delivery mutation: `yy merge land TASK_ID` lands Git and projects Ledger status. Use `yy merge project TASK_ID` only for projection recovery.
 
 Generic Workflow Runner remains available, including read-only doctor support
 for historical local-integration artifacts. It must not execute or adapt retired
