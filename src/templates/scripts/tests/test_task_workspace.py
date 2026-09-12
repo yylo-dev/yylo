@@ -8085,6 +8085,116 @@ class FixtureModeContractTests(unittest.TestCase):
                 self.assertFalse(performance_receipt_eligible(valid, invalid))
 
 
+class TerminalStateArchiveTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name) / "controller"
+        self.root.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "controller", str(self.root)], check=True)
+        subprocess.run(["git", "-C", str(self.root), "config", "user.name", "Fixture"], check=True)
+        subprocess.run(["git", "-C", str(self.root), "config", "user.email", "fixture@invalid"], check=True)
+        path = self.root / ".juno_task/state/tasks.json"
+        path.parent.mkdir(parents=True)
+        payload = "x" * 20000
+        tasks = {
+            f"T{number:04d}": {
+                "schema_version": task_runtime.RECORD_SCHEMA,
+                "task_id": f"T{number:04d}",
+                "state": "MERGED" if number % 2 else "WITHDRAWN",
+                "tip_sha": f"{number:040x}",
+                "queue_attempt": {"stdout_tail": payload, "validation": payload},
+            }
+            for number in range(100)
+        }
+        tasks["ACTIVE"] = {"schema_version": task_runtime.RECORD_SCHEMA,
+                           "task_id": "ACTIVE", "state": "WORKING",
+                           "tip_sha": "a" * 40, "validation": []}
+        self.source = {"schema_version": task_runtime.STATE_SCHEMA,
+                       "tasks": tasks, "queues": {"owner": {"task": "ACTIVE"}}}
+        path.write_bytes(task_runtime._canonical_bytes(self.source))
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.root), "commit", "-qm", "fixture"], check=True)
+        self.plan = Path(self.temporary.name) / "plan.json"
+        self.receipt = Path(self.temporary.name) / "apply.json"
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_plan_apply_retrieve_verify_and_rollback(self) -> None:
+        planned = task_runtime.state_archive_plan(
+            self.root, self.plan, task_runtime.STATE_ARCHIVE_COLD_REF)
+        self.assertEqual(planned["summary"]["terminal_counts"],
+                         {"MERGED": 50, "WITHDRAWN": 50})
+        self.assertLess(planned["summary"]["projected_state_bytes"],
+                        len(task_runtime._canonical_bytes(self.source)) // 10)
+        applied = task_runtime.state_archive_apply(
+            self.root, self.plan, self.receipt, authorized=True)
+        self.assertEqual(applied["archived_records"], 100)
+        compacted = task_runtime.read_state(self.root)
+        self.assertEqual(compacted["schema_version"], task_runtime.BOUNDED_STATE_SCHEMA)
+        self.assertEqual(compacted["tasks"]["ACTIVE"], self.source["tasks"]["ACTIVE"])
+        self.assertEqual(compacted["queues"], self.source["queues"])
+        self.assertTrue(all(compacted["tasks"][f"T{number:04d}"]["schema_version"]
+                            == task_runtime.TERMINAL_TOMBSTONE_SCHEMA
+                            for number in range(100)))
+        retrieved = task_runtime.state_archive_get(
+            self.root, "T0001", task_runtime.STATE_ARCHIVE_COLD_REF)
+        self.assertEqual(retrieved["record"], self.source["tasks"]["T0001"])
+        verified = task_runtime.state_archive_verify(self.root, self.plan)
+        self.assertEqual(verified["archived_records"], 100)
+        self.assertEqual(task_runtime.state_archive_apply(
+            self.root, self.plan, self.receipt, authorized=True), applied)
+        rollback = Path(self.temporary.name) / "rollback.json"
+        task_runtime.state_archive_rollback(self.root, self.plan, rollback, authorized=True)
+        self.assertEqual(task_runtime.read_state(self.root), self.source)
+
+    def test_apply_requires_explicit_authority(self) -> None:
+        task_runtime.state_archive_plan(self.root, self.plan, task_runtime.STATE_ARCHIVE_COLD_REF)
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "authorize-state-compaction"):
+            task_runtime.state_archive_apply(
+                self.root, self.plan, self.receipt, authorized=False)
+        self.assertFalse(self.receipt.exists())
+        self.assertFalse(Path(str(self.receipt) + ".intent.json").exists())
+        self.assertFalse(task_runtime.git(
+            self.root, "rev-parse", "--verify", task_runtime.STATE_ARCHIVE_COLD_REF,
+            check=False))
+
+    def test_apply_refuses_writer_lock_contention_and_stale_source(self) -> None:
+        task_runtime.state_archive_plan(self.root, self.plan, task_runtime.STATE_ARCHIVE_COLD_REF)
+        common = Path(task_runtime.git(
+            self.root, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+        with (common / "juno-repository-writer.lock").open("a+b") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "writer lock is busy"):
+                task_runtime.state_archive_apply(
+                    self.root, self.plan, self.receipt, authorized=True)
+        state = task_runtime.read_state(self.root)
+        state["tasks"]["ACTIVE"]["tip_sha"] = "b" * 40
+        task_runtime.write_state(self.root, state)
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "source drifted"):
+            task_runtime.state_archive_apply(
+                self.root, self.plan, self.receipt, authorized=True)
+
+    def test_plan_refuses_dirt_and_write_enforces_hard_limit(self) -> None:
+        (self.root / "untracked").write_text("preserve\n")
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "clean controller"):
+            task_runtime.state_archive_plan(
+                self.root, self.plan, task_runtime.STATE_ARCHIVE_COLD_REF)
+        (self.root / "untracked").unlink()
+        with mock.patch.object(task_runtime, "HOT_STATE_HARD_BYTES", 10):
+            with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "hard limit"):
+                task_runtime.write_state(self.root, self.source)
+
+    def test_bounded_schema_rejects_full_terminal_record(self) -> None:
+        invalid = {"schema_version": task_runtime.BOUNDED_STATE_SCHEMA,
+                   "tasks": {"X": {"schema_version": task_runtime.RECORD_SCHEMA,
+                                     "task_id": "X", "state": "MERGED"}}, "queues": {}}
+        (self.root / ".juno_task/state/tasks.json").write_bytes(
+            task_runtime._canonical_bytes(invalid))
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "non-tombstone"):
+            task_runtime.read_state(self.root)
+
+
 if __name__ == "__main__":
     if len(sys.argv) >= 6 and sys.argv[1] == "--resource-lock-guard-probe":
         _protocol_guard_probe(
