@@ -114,6 +114,10 @@ def persist_task(controller: Path, task_id: str, expected: dict[str, Any],
         state = task_runtime.read_state(controller)
         if state["tasks"].get(task_id) != expected:
             raise DeliveryError("task record changed; result was not overwritten")
+        if (state.get("schema_version") == task_runtime.BOUNDED_STATE_SCHEMA
+                and updated.get("state") in task_runtime.TERMINAL_LIFECYCLE_STATES):
+            updated = task_runtime.archive_terminal_transition(
+                controller, state, task_id, updated)
         state["tasks"][task_id] = updated
         task_runtime.write_state(controller, state)
 

@@ -93,6 +93,34 @@ receipts, queue evidence, or Ledger history. Push, tag, publication, deployment,
 live migration, cleanup and release activation remain external maintainer
 actions.
 
+## Bounded terminal lifecycle state
+
+Full active records and shared ownership remain hot. Complete `MERGED` and
+`WITHDRAWN` records may move to bounded compressed packs on the opt-in
+`refs/juno/cold/task-state` ref only after exact publication and readback; hot
+state retains digest-bound tombstones. The target is 5 MB, warning threshold is
+8 MB, and ordinary writes refuse above 25 MB.
+
+Migration is explicit and one-cut:
+
+```bash
+yy task state-archive-plan --output /external/state-plan.json
+yy task state-archive-apply --plan /external/state-plan.json \
+  --output /external/state-apply.json --authorize-state-compaction
+yy task state-archive-verify --plan /external/state-plan.json
+yy task state-archive-get TASK_ID
+yy task state-archive-rollback --plan /external/state-plan.json \
+  --output /external/state-rollback.json --authorize-state-rollback
+```
+
+Plan and receipts must remain outside the repository. Apply requires a clean,
+unchanged controller and publishes cold evidence before replacing hot records.
+Rollback restores the exact committed preimage and preserves the cold ref.
+Older runtimes refuse the bounded schema; there is no permanent dual writer.
+Existing Git history is not rewritten, so an initial push containing old
+unpublished large blobs may still emit historical GH001 warnings. Subsequent
+checkpoint blobs must remain below the documented bounds.
+
 ## Retirement condition
 
 `legacy-lifecycle` is a finite reader/adapter for already-recorded umbrella

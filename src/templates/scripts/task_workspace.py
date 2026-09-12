@@ -13,8 +13,10 @@ import base64
 import datetime as dt
 import errno
 import fcntl
+import gzip
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import posixpath
@@ -53,6 +55,19 @@ _shared_queue_delta = decisions.shared_queue_delta
 
 CONFIG_SCHEMA = "juno_task_workspace_config.v1"
 STATE_SCHEMA = "juno_task_workspace_state.v1"
+BOUNDED_STATE_SCHEMA = "juno_task_workspace_state.v2"
+TERMINAL_TOMBSTONE_SCHEMA = "juno_task_terminal_tombstone.v1"
+STATE_ARCHIVE_PLAN_SCHEMA = "juno_task_state_archive_plan.v1"
+STATE_ARCHIVE_MANIFEST_SCHEMA = "juno_task_state_archive_manifest.v1"
+STATE_ARCHIVE_RECEIPT_SCHEMA = "juno_task_state_archive_receipt.v1"
+STATE_ARCHIVE_COLD_REF = "refs/juno/cold/task-state"
+TERMINAL_LIFECYCLE_STATES = {"MERGED", "WITHDRAWN"}
+HOT_STATE_TARGET_BYTES = 5 * 1024 * 1024
+HOT_STATE_WARNING_BYTES = 8 * 1024 * 1024
+HOT_STATE_HARD_BYTES = 25 * 1024 * 1024
+COLD_PACK_RAW_TARGET_BYTES = 16 * 1024 * 1024
+COLD_PACK_MAX_BYTES = 25 * 1024 * 1024
+COLD_PACK_EXPANDED_MAX_BYTES = 20 * 1024 * 1024
 RECORD_SCHEMA = "juno_task_workspace_record.v1"
 SHA_RE = re.compile(r"[0-9a-f]{40,64}\Z")
 TASK_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
@@ -963,16 +978,28 @@ def read_state(controller: Path) -> dict[str, Any]:
     if isinstance(value, dict) and set(value) == {"schema_version", "tasks"} and value.get("schema_version") == STATE_SCHEMA:
         value = {**value, "queues": {}}
     if (not isinstance(value, dict) or set(value) != {"schema_version", "tasks", "queues"}
-            or value.get("schema_version") != STATE_SCHEMA
+            or value.get("schema_version") not in {STATE_SCHEMA, BOUNDED_STATE_SCHEMA}
             or not isinstance(value.get("tasks"), dict) or not isinstance(value.get("queues"), dict)):
-        raise TaskWorkspaceError("invalid task workspace state schema")
+        raise TaskWorkspaceError("invalid task workspace state schema; upgrade YYLO before using bounded lifecycle state")
+    if value.get("schema_version") == BOUNDED_STATE_SCHEMA:
+        for task_id, record in value["tasks"].items():
+            if (isinstance(record, dict) and record.get("state") in TERMINAL_LIFECYCLE_STATES
+                    and (record.get("schema_version") != TERMINAL_TOMBSTONE_SCHEMA
+                         or record.get("task_id") != task_id)):
+                raise TaskWorkspaceError("bounded task state contains a non-tombstone terminal record")
     return value
 
 
-def write_state(controller: Path, state: dict[str, Any]) -> None:
+def write_state(controller: Path, state: dict[str, Any], *, allow_compaction: bool = False) -> None:
     path = state_path(controller)
     path.parent.mkdir(parents=True, exist_ok=True)
     data = (json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    if len(data) > HOT_STATE_HARD_BYTES and not allow_compaction:
+        raise TaskWorkspaceError(
+            f"task state would be {len(data)} bytes, above the {HOT_STATE_HARD_BYTES}-byte hard limit; "
+            "run `yy task state-archive-plan --output <external-plan>` and apply the reviewed compaction")
+    if len(data) > HOT_STATE_WARNING_BYTES:
+        print(f"warning: task state is {len(data)} bytes (warning threshold {HOT_STATE_WARNING_BYTES})", file=sys.stderr)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         with os.fdopen(fd, "wb") as handle:
@@ -3314,6 +3341,9 @@ def start(controller: Path, task_id: str, requested_paths: Optional[list[str]] =
                 raise TaskWorkspaceError("umbrella admission changed before mutation")
         existing = state["tasks"].get(task_id)
         if existing:
+            if existing.get("schema_version") == TERMINAL_TOMBSTONE_SCHEMA:
+                raise TaskWorkspaceError(
+                    f"task {task_id} is terminal ({existing.get('state')}); use explicit cold archive lookup for full evidence")
             _require_lease_fence(controller, "start", task_id, lease_token, record=existing)
             receipt = existing.get("creation_receipt", {})
             if receipt.get("requested_paths", []) != requested_paths:
@@ -8139,6 +8169,457 @@ def lease_release(controller: Path, task_id: str, lease_token: Optional[str]) ->
                 "release_receipt": released["fencing"].get("release_receipt")}
 
 
+def _canonical_bytes(value: Any) -> bytes:
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def _exclusive_json(path: Path, value: dict[str, Any]) -> dict[str, str]:
+    data = _canonical_bytes(value)
+    path = path.expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise TaskWorkspaceError(f"output already exists: {path}") from exc
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(data); stream.flush(); os.fsync(stream.fileno())
+    return {"path": str(path), "sha256": hashlib.sha256(data).hexdigest()}
+
+
+def _require_external_archive_output(controller: Path, path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    try:
+        resolved.relative_to(controller.resolve())
+    except ValueError:
+        return resolved
+    raise TaskWorkspaceError("state archive plans and receipts must be outside the repository")
+
+
+def _state_archive_intent(output: Path, payload: dict[str, Any]) -> dict[str, str]:
+    intent = output.with_name(output.name + ".intent.json")
+    data = _canonical_bytes(payload)
+    if intent.exists():
+        if intent.read_bytes() != data:
+            raise TaskWorkspaceError("state archive intent receipt already exists with different bytes")
+        return {"path": str(intent), "sha256": hashlib.sha256(data).hexdigest()}
+    return _exclusive_json(intent, payload)
+
+
+def _state_archive_material(state: dict[str, Any], source_sha256: str,
+                            cold_ref: str, source_identity: Optional[dict[str, Any]] = None
+                            ) -> tuple[dict[str, bytes], dict[str, Any], dict[str, Any]]:
+    if state.get("schema_version") != STATE_SCHEMA:
+        raise TaskWorkspaceError("state archive plan requires the one-cut v1 source schema")
+    terminal: list[tuple[str, dict[str, Any], bytes]] = []
+    for task_id, record in sorted(state["tasks"].items()):
+        if not isinstance(record, dict) or record.get("task_id") != task_id:
+            raise TaskWorkspaceError(f"task state record identity is malformed: {task_id}")
+        if record.get("state") in TERMINAL_LIFECYCLE_STATES:
+            data = _canonical_bytes(record)
+            if len(data) > COLD_PACK_EXPANDED_MAX_BYTES:
+                raise TaskWorkspaceError(f"terminal task record exceeds expanded pack limit: {task_id}")
+            terminal.append((task_id, record, data))
+    if not terminal:
+        raise TaskWorkspaceError("task state has no full terminal records to compact")
+    archive_id = source_sha256[:24]
+    files: dict[str, bytes] = {}
+    entries: dict[str, dict[str, Any]] = {}
+    groups: list[list[tuple[str, dict[str, Any], bytes]]] = []
+    current: list[tuple[str, dict[str, Any], bytes]] = []
+    current_bytes = 0
+    for row in terminal:
+        if current and current_bytes + len(row[2]) > COLD_PACK_RAW_TARGET_BYTES:
+            groups.append(current); current = []; current_bytes = 0
+        current.append(row); current_bytes += len(row[2])
+    if current:
+        groups.append(current)
+    for pack_index, group in enumerate(groups, 1):
+        raw = b"".join(row[2] for row in group)
+        packed = gzip.compress(raw, compresslevel=9, mtime=0)
+        if len(packed) > COLD_PACK_MAX_BYTES:
+            raise TaskWorkspaceError(f"cold pack {pack_index} exceeds {COLD_PACK_MAX_BYTES} bytes")
+        name = f"task-state/{archive_id}/packs/{pack_index:04d}.ndjson.gz"
+        files[name] = packed
+        for line_index, (task_id, record, data) in enumerate(group):
+            entries[task_id] = {
+                "state": record["state"], "pack": name, "line": line_index,
+                "record_bytes": len(data), "record_sha256": hashlib.sha256(data).hexdigest(),
+            }
+    pack_identities = {name: {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+                       for name, data in sorted(files.items())}
+    manifest_body = {
+        "schema_version": STATE_ARCHIVE_MANIFEST_SCHEMA,
+        "archive_id": archive_id, "source_state_sha256": source_sha256,
+        "source_identity": source_identity or {},
+        "terminal_states": sorted(TERMINAL_LIFECYCLE_STATES),
+        "record_count": len(entries), "pack_count": len(groups),
+        "pack_max_bytes": COLD_PACK_MAX_BYTES,
+        "expanded_pack_max_bytes": COLD_PACK_EXPANDED_MAX_BYTES,
+        "packs": pack_identities, "entries": entries,
+    }
+    manifest_bytes = _canonical_bytes(manifest_body)
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    manifest_path = f"task-state/{archive_id}/manifest.json"
+    files[manifest_path] = manifest_bytes
+    tasks: dict[str, Any] = {}
+    for task_id, record in state["tasks"].items():
+        entry = entries.get(task_id)
+        if entry is None:
+            tasks[task_id] = record
+            continue
+        tombstone = {
+            "schema_version": TERMINAL_TOMBSTONE_SCHEMA,
+            "task_id": task_id, "state": record["state"],
+            "tip_sha": record.get("tip_sha"),
+            "archive": {"archive_id": archive_id, "cold_ref": cold_ref,
+                        "manifest_path": manifest_path, "manifest_sha256": manifest_sha256,
+                        "record_sha256": entry["record_sha256"]},
+        }
+        for key in ("integrated_sha", "last_queue_outcome"):
+            if record.get(key) is not None:
+                tombstone[key] = record[key]
+        tasks[task_id] = tombstone
+    compacted = {"schema_version": BOUNDED_STATE_SCHEMA, "tasks": tasks,
+                 "queues": state["queues"]}
+    return files, manifest_body, compacted
+
+
+def _state_archive_controller_dirt(controller: Path) -> str:
+    return git(controller, "status", "--porcelain=v1", "--untracked-files=all", "--", ".",
+               ":(exclude).juno_task/runtime")
+
+
+@contextmanager
+def _state_archive_repository_lock(controller: Path) -> Iterator[None]:
+    common = Path(git(controller, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    path = common / "juno-repository-writer.lock"
+    handle = path.open("a+b")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise TaskWorkspaceError(f"repository writer lock is busy: {path}") from exc
+        yield
+    finally:
+        handle.close()
+
+
+def state_archive_plan(controller: Path, output: Path, cold_ref: str) -> dict[str, Any]:
+    output = _require_external_archive_output(controller, output)
+    if subprocess.run(["git", "check-ref-format", cold_ref], capture_output=True).returncode:
+        raise TaskWorkspaceError("cold archive ref is invalid")
+    if _state_archive_controller_dirt(controller):
+        raise TaskWorkspaceError("state archive planning requires a clean controller")
+    path = state_path(controller)
+    source_head = git(controller, "rev-parse", "HEAD")
+    controller_branch = git(controller, "symbolic-ref", "--quiet", "HEAD")
+    data = path.read_bytes()
+    committed = subprocess.run(["git", "-C", str(controller), "diff", "--quiet", "HEAD", "--",
+                                str(path.relative_to(controller))]).returncode == 0
+    if (not committed or source_head != git(controller, "rev-parse", "HEAD")
+            or controller_branch != git(controller, "symbolic-ref", "--quiet", "HEAD")
+            or _state_archive_controller_dirt(controller)):
+        raise TaskWorkspaceError("state archive planning requires stable committed tasks.json bytes")
+    state = json.loads(data)
+    source_sha256 = hashlib.sha256(data).hexdigest()
+    files, manifest, compacted = _state_archive_material(
+        state, source_sha256, cold_ref,
+        {"controller_branch": controller_branch, "source_head": source_head})
+    compacted_bytes = _canonical_bytes(compacted)
+    reduction_percent = 100 - (len(compacted_bytes) * 100 / len(data))
+    if len(compacted_bytes) > HOT_STATE_TARGET_BYTES or reduction_percent < 90:
+        raise TaskWorkspaceError(
+            f"projected hot state is {len(compacted_bytes)} bytes with {reduction_percent:.2f}% reduction; "
+            f"requires at most {HOT_STATE_TARGET_BYTES} bytes and at least 90% reduction")
+    cold_head = git(controller, "rev-parse", "--verify", cold_ref, check=False) or None
+    plan_body = {
+        "schema_version": STATE_ARCHIVE_PLAN_SCHEMA,
+        "controller": str(controller.resolve()),
+        "controller_branch": controller_branch,
+        "source_head": source_head,
+        "source_state_sha256": source_sha256, "source_state_bytes": len(data),
+        "cold_ref": cold_ref, "expected_cold_head": cold_head,
+        "archive_id": manifest["archive_id"],
+        "manifest_sha256": hashlib.sha256(files[f"task-state/{manifest['archive_id']}/manifest.json"]).hexdigest(),
+        "pack_sha256": {name: hashlib.sha256(value).hexdigest()
+                        for name, value in sorted(files.items()) if name.endswith(".gz")},
+        "terminal_task_ids": sorted(manifest["entries"]),
+        "terminal_counts": {name: sum(1 for entry in manifest["entries"].values()
+                                      if entry["state"] == name)
+                            for name in sorted(TERMINAL_LIFECYCLE_STATES)},
+        "projected_state_sha256": hashlib.sha256(compacted_bytes).hexdigest(),
+        "projected_state_bytes": len(compacted_bytes),
+        "projected_reduction_percent": round(reduction_percent, 4),
+        "minimum_reduction_percent": 90,
+    }
+    plan = {**plan_body, "plan_sha256": stable_sha256(plan_body)}
+    reference = _exclusive_json(output, plan)
+    return {"schema_version": STATE_ARCHIVE_PLAN_SCHEMA, "outcome": "planned",
+            "plan": reference, "summary": {key: plan[key] for key in
+            ("source_state_bytes", "projected_state_bytes", "terminal_counts", "archive_id")}}
+
+
+def _load_state_archive_plan(controller: Path, path: Path) -> dict[str, Any]:
+    try:
+        plan = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise TaskWorkspaceError(f"state archive plan is unreadable: {exc}") from exc
+    body = {key: value for key, value in plan.items() if key != "plan_sha256"}
+    if (plan.get("schema_version") != STATE_ARCHIVE_PLAN_SCHEMA
+            or plan.get("plan_sha256") != stable_sha256(body)
+            or plan.get("controller") != str(controller.resolve())):
+        raise TaskWorkspaceError("state archive plan identity is invalid")
+    return plan
+
+
+def _git_object_publish(controller: Path, files: dict[str, bytes], cold_ref: str,
+                        expected: Optional[str], message: str) -> str:
+    current = git(controller, "rev-parse", "--verify", cold_ref, check=False) or None
+    if current != expected:
+        raise TaskWorkspaceError("cold archive ref drifted from the reviewed plan")
+    with tempfile.TemporaryDirectory(prefix="juno-task-state-index-") as directory:
+        index = Path(directory) / "index"
+        env = {**os.environ, "GIT_INDEX_FILE": str(index)}
+        if current:
+            tree = git(controller, "rev-parse", f"{current}^{{tree}}")
+            subprocess.run(["git", "-C", str(controller), "read-tree", tree], env=env, check=True)
+        else:
+            subprocess.run(["git", "-C", str(controller), "read-tree", "--empty"], env=env, check=True)
+        for name, data in sorted(files.items()):
+            blob = subprocess.run(["git", "-C", str(controller), "hash-object", "-w", "--stdin"],
+                                  input=data, capture_output=True, env=env, check=True).stdout.decode().strip()
+            subprocess.run(["git", "-C", str(controller), "update-index", "--add", "--cacheinfo",
+                            "100644", blob, name], env=env, check=True)
+        tree = subprocess.run(["git", "-C", str(controller), "write-tree"], env=env,
+                              capture_output=True, text=True, check=True).stdout.strip()
+    command = ["git", "-C", str(controller), "commit-tree", tree]
+    if current:
+        command.extend(["-p", current])
+    commit_env = {**os.environ, "GIT_AUTHOR_NAME": "YYLO state archive",
+                  "GIT_AUTHOR_EMAIL": "state-archive@invalid",
+                  "GIT_COMMITTER_NAME": "YYLO state archive",
+                  "GIT_COMMITTER_EMAIL": "state-archive@invalid"}
+    commit = subprocess.run(command, input=message + "\n", text=True, capture_output=True,
+                            env=commit_env, check=True).stdout.strip()
+    update = subprocess.run(["git", "-C", str(controller), "update-ref", cold_ref, commit,
+                             current or ("0" * len(commit))], capture_output=True, text=True)
+    if update.returncode:
+        raise TaskWorkspaceError("cold archive ref CAS failed")
+    return commit
+
+
+def _cold_file(controller: Path, ref: str, name: str) -> bytes:
+    result = subprocess.run(["git", "-C", str(controller), "show", f"{ref}:{name}"],
+                            capture_output=True)
+    if result.returncode:
+        raise TaskWorkspaceError(f"cold archive object is unavailable: {name}")
+    return result.stdout
+
+
+def state_archive_get(controller: Path, task_id: str, cold_ref: str,
+                      manifest_path: Optional[str] = None,
+                      tombstone: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    if not TASK_RE.fullmatch(task_id):
+        raise TaskWorkspaceError("unsafe task id")
+    record = tombstone if tombstone is not None else read_state(controller)["tasks"].get(task_id)
+    if not isinstance(record, dict) or record.get("schema_version") != TERMINAL_TOMBSTONE_SCHEMA:
+        raise TaskWorkspaceError(f"task {task_id} has no cold terminal tombstone")
+    archive = record.get("archive", {})
+    if cold_ref != archive.get("cold_ref"):
+        raise TaskWorkspaceError("cold ref differs from the tombstone")
+    manifest_name = manifest_path or archive.get("manifest_path")
+    manifest_data = _cold_file(controller, cold_ref, str(manifest_name))
+    if hashlib.sha256(manifest_data).hexdigest() != archive.get("manifest_sha256"):
+        raise TaskWorkspaceError("cold archive manifest digest mismatch")
+    manifest = json.loads(manifest_data)
+    if (manifest.get("schema_version") != STATE_ARCHIVE_MANIFEST_SCHEMA
+            or manifest.get("archive_id") != archive.get("archive_id")
+            or manifest.get("record_count") != len(manifest.get("entries", {}))):
+        raise TaskWorkspaceError("cold archive manifest schema is invalid")
+    entry = manifest.get("entries", {}).get(task_id)
+    if not isinstance(entry, dict) or entry.get("record_sha256") != archive.get("record_sha256"):
+        raise TaskWorkspaceError("cold archive entry is missing or mismatched")
+    packed = _cold_file(controller, cold_ref, entry["pack"])
+    pack_identity = manifest.get("packs", {}).get(entry["pack"])
+    if (not isinstance(pack_identity, dict) or pack_identity.get("bytes") != len(packed)
+            or pack_identity.get("sha256") != hashlib.sha256(packed).hexdigest()
+            or len(packed) > COLD_PACK_MAX_BYTES):
+        raise TaskWorkspaceError("cold archive pack identity is invalid")
+    expanded_limit = manifest.get("expanded_pack_max_bytes", COLD_PACK_EXPANDED_MAX_BYTES)
+    if not isinstance(expanded_limit, int) or not 1 <= expanded_limit <= COLD_PACK_EXPANDED_MAX_BYTES:
+        raise TaskWorkspaceError("cold archive expanded limit is invalid")
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(packed), mode="rb") as stream:
+            raw = stream.read(expanded_limit + 1)
+            trailing = stream.read(1)
+    except (OSError, EOFError) as exc:
+        raise TaskWorkspaceError("cold archive pack is malformed") from exc
+    if len(raw) > expanded_limit or trailing:
+        raise TaskWorkspaceError("cold archive pack exceeds expanded limit")
+    lines = raw.splitlines(keepends=True)
+    line = entry.get("line")
+    if not isinstance(line, int) or line < 0 or line >= len(lines):
+        raise TaskWorkspaceError("cold archive line index is invalid")
+    data = lines[line]
+    if hashlib.sha256(data).hexdigest() != entry["record_sha256"]:
+        raise TaskWorkspaceError("cold terminal record digest mismatch")
+    value = json.loads(data)
+    if value.get("task_id") != task_id or value.get("state") != record.get("state"):
+        raise TaskWorkspaceError("cold terminal record identity mismatch")
+    return {"schema_version": STATE_ARCHIVE_RECEIPT_SCHEMA, "outcome": "retrieved",
+            "task_id": task_id, "record": value, "record_sha256": entry["record_sha256"]}
+
+
+def state_archive_apply(controller: Path, plan_path: Path, output: Path,
+                        authorized: bool) -> dict[str, Any]:
+    if not authorized:
+        raise TaskWorkspaceError("state archive apply requires --authorize-state-compaction")
+    output = _require_external_archive_output(controller, output)
+    plan = _load_state_archive_plan(controller, plan_path)
+    if output.exists():
+        existing = json.loads(output.read_text())
+        if (existing.get("schema_version") != STATE_ARCHIVE_RECEIPT_SCHEMA
+                or existing.get("plan_sha256") != plan["plan_sha256"]
+                or existing.get("outcome") not in {"applied", "already_applied"}):
+            raise TaskWorkspaceError("state archive apply receipt already exists with different identity")
+        state_archive_verify(controller, plan_path)
+        return existing
+    intent = _state_archive_intent(output, {
+        "schema_version": STATE_ARCHIVE_RECEIPT_SCHEMA, "operation": "apply-intent",
+        "plan_sha256": plan["plan_sha256"], "source_head": plan["source_head"],
+        "source_state_sha256": plan["source_state_sha256"], "cold_ref": plan["cold_ref"],
+        "expected_cold_head": plan["expected_cold_head"],
+    })
+    with _state_archive_repository_lock(controller), state_lock(controller):
+        if git(controller, "symbolic-ref", "--quiet", "HEAD") != plan["controller_branch"]:
+            raise TaskWorkspaceError("controller branch drifted from the reviewed plan")
+        current_data = state_path(controller).read_bytes()
+        current_sha = hashlib.sha256(current_data).hexdigest()
+        current_cold = git(controller, "rev-parse", "--verify", plan["cold_ref"], check=False) or None
+        if current_sha == plan["projected_state_sha256"]:
+            state_archive_verify(controller, plan_path)
+            receipt = {"schema_version": STATE_ARCHIVE_RECEIPT_SCHEMA,
+                       "outcome": "already_applied", "plan_sha256": plan["plan_sha256"],
+                       "cold_head": current_cold, "hot_state_sha256": current_sha,
+                       "intent": intent}
+            _exclusive_json(output, receipt)
+            return receipt
+        if (git(controller, "rev-parse", "HEAD") != plan["source_head"]
+                or current_sha != plan["source_state_sha256"]):
+            raise TaskWorkspaceError("state archive source drifted from the reviewed plan")
+        if _state_archive_controller_dirt(controller):
+            raise TaskWorkspaceError("state archive apply requires a clean controller")
+        state = json.loads(current_data)
+        files, manifest, compacted = _state_archive_material(
+            state, current_sha, plan["cold_ref"],
+            {"controller_branch": plan["controller_branch"], "source_head": plan["source_head"]})
+        if (hashlib.sha256(files[f"task-state/{manifest['archive_id']}/manifest.json"]).hexdigest()
+                != plan["manifest_sha256"]
+                or {name: hashlib.sha256(value).hexdigest() for name, value in files.items()
+                    if name.endswith(".gz")} != plan["pack_sha256"]):
+            raise TaskWorkspaceError("cold archive material differs from the reviewed plan")
+        observed_cold = git(controller, "rev-parse", "--verify", plan["cold_ref"], check=False) or None
+        if observed_cold != plan["expected_cold_head"]:
+            # Crash recovery: adopt only an already-published exact archive.
+            if not observed_cold or any(
+                    hashlib.sha256(_cold_file(controller, observed_cold, name)).hexdigest()
+                    != hashlib.sha256(data).hexdigest() for name, data in files.items()):
+                raise TaskWorkspaceError("cold archive ref drifted from the reviewed plan")
+            cold_head = observed_cold
+        else:
+            cold_head = _git_object_publish(controller, files, plan["cold_ref"],
+                                            plan["expected_cold_head"],
+                                            f"archive terminal task state {plan['archive_id']}")
+        for task_id in plan["terminal_task_ids"]:
+            # Full readback through the just-published ref before hot replacement.
+            state_archive_get(controller, task_id, plan["cold_ref"],
+                              tombstone=compacted["tasks"][task_id])
+        compacted_data = _canonical_bytes(compacted)
+        if hashlib.sha256(compacted_data).hexdigest() != plan["projected_state_sha256"]:
+            raise TaskWorkspaceError("projected hot state differs from the reviewed plan")
+        write_state(controller, compacted, allow_compaction=True)
+    receipt = {"schema_version": STATE_ARCHIVE_RECEIPT_SCHEMA, "outcome": "applied",
+               "plan_sha256": plan["plan_sha256"], "cold_head": cold_head,
+               "hot_state_sha256": plan["projected_state_sha256"],
+               "hot_state_bytes": plan["projected_state_bytes"],
+               "archived_records": len(plan["terminal_task_ids"]), "intent": intent}
+    _exclusive_json(output, receipt)
+    return receipt
+
+
+def state_archive_verify(controller: Path, plan_path: Path) -> dict[str, Any]:
+    plan = _load_state_archive_plan(controller, plan_path)
+    data = state_path(controller).read_bytes()
+    if hashlib.sha256(data).hexdigest() != plan["projected_state_sha256"]:
+        raise TaskWorkspaceError("hot state does not match the reviewed compacted projection")
+    for task_id in plan["terminal_task_ids"]:
+        state_archive_get(controller, task_id, plan["cold_ref"])
+    return {"schema_version": STATE_ARCHIVE_RECEIPT_SCHEMA, "outcome": "verified",
+            "plan_sha256": plan["plan_sha256"], "hot_state_bytes": len(data),
+            "archived_records": len(plan["terminal_task_ids"])}
+
+
+def state_archive_rollback(controller: Path, plan_path: Path, output: Path,
+                           authorized: bool) -> dict[str, Any]:
+    if not authorized:
+        raise TaskWorkspaceError("state archive rollback requires --authorize-state-rollback")
+    output = _require_external_archive_output(controller, output)
+    plan = _load_state_archive_plan(controller, plan_path)
+    if output.exists():
+        existing = json.loads(output.read_text())
+        if (existing.get("schema_version") != STATE_ARCHIVE_RECEIPT_SCHEMA
+                or existing.get("plan_sha256") != plan["plan_sha256"]
+                or existing.get("outcome") != "rolled_back"
+                or hashlib.sha256(state_path(controller).read_bytes()).hexdigest()
+                   != plan["source_state_sha256"]):
+            raise TaskWorkspaceError("state archive rollback receipt already exists with different identity")
+        return existing
+    intent = _state_archive_intent(output, {
+        "schema_version": STATE_ARCHIVE_RECEIPT_SCHEMA, "operation": "rollback-intent",
+        "plan_sha256": plan["plan_sha256"],
+        "expected_hot_state_sha256": plan["projected_state_sha256"],
+        "restored_state_sha256": plan["source_state_sha256"],
+    })
+    with _state_archive_repository_lock(controller), state_lock(controller):
+        if hashlib.sha256(state_path(controller).read_bytes()).hexdigest() != plan["projected_state_sha256"]:
+            raise TaskWorkspaceError("rollback hot state differs from the exact applied projection")
+        result = subprocess.run(["git", "-C", str(controller), "show",
+                                 f"{plan['source_head']}:{state_path(controller).relative_to(controller)}"],
+                                capture_output=True)
+        if result.returncode or hashlib.sha256(result.stdout).hexdigest() != plan["source_state_sha256"]:
+            raise TaskWorkspaceError("rollback preimage is unavailable or mismatched")
+        restored = json.loads(result.stdout)
+        write_state(controller, restored, allow_compaction=True)
+    receipt = {"schema_version": STATE_ARCHIVE_RECEIPT_SCHEMA, "outcome": "rolled_back",
+               "plan_sha256": plan["plan_sha256"],
+               "restored_state_sha256": plan["source_state_sha256"],
+               "cold_ref_preserved": plan["cold_ref"], "intent": intent}
+    _exclusive_json(output, receipt)
+    return receipt
+
+
+def archive_terminal_transition(controller: Path, state: dict[str, Any], task_id: str,
+                                record: dict[str, Any]) -> dict[str, Any]:
+    """Publish one future terminal record before replacing it with a hot tombstone."""
+    if state.get("schema_version") != BOUNDED_STATE_SCHEMA:
+        raise TaskWorkspaceError("compact lifecycle state must be migrated before a new terminal transition")
+    if record.get("state") not in TERMINAL_LIFECYCLE_STATES or record.get("task_id") != task_id:
+        raise TaskWorkspaceError("terminal archive transition identity is invalid")
+    synthetic = {"schema_version": STATE_SCHEMA, "tasks": {task_id: record}, "queues": {}}
+    source_sha = hashlib.sha256(_canonical_bytes(record)).hexdigest()
+    files, manifest, compacted = _state_archive_material(
+        synthetic, source_sha, STATE_ARCHIVE_COLD_REF,
+        {"controller_branch": git(controller, "symbolic-ref", "--quiet", "HEAD"),
+         "source_head": git(controller, "rev-parse", "HEAD"), "task_id": task_id})
+    expected = git(controller, "rev-parse", "--verify", STATE_ARCHIVE_COLD_REF, check=False) or None
+    _git_object_publish(controller, files, STATE_ARCHIVE_COLD_REF, expected,
+                        f"archive terminal task state {task_id}")
+    tombstone = compacted["tasks"][task_id]
+    # Verify from the published ref before the caller mutates hot state.
+    state_archive_get(controller, task_id, STATE_ARCHIVE_COLD_REF, tombstone=tombstone)
+    return tombstone
+
+
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(description=__doc__)
     value.add_argument("operation", choices=(
@@ -8146,7 +8627,9 @@ def parser() -> argparse.ArgumentParser:
         "checkpoint", "child-checkpoint", "evidence-run", "evidence-status", "evidence-await",
         "recovery-plan", "recovery-authorize", "recovery-apply", "recovery-verify", "runtime-bootstrap",
         "sync", "doctor", "lease-status", "lease-heartbeat", "lease-handoff",
-        "lease-successor", "lease-revoke", "lease-release"))
+        "lease-successor", "lease-revoke", "lease-release",
+        "state-archive-plan", "state-archive-apply", "state-archive-verify",
+        "state-archive-get", "state-archive-rollback"))
     value.add_argument("--task")
     value.add_argument("--run-id", help="exact active task-run identity for receipt-bound recovery")
     value.add_argument("--attempt", type=int,
@@ -8175,6 +8658,10 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--reason", help="operator decision record for lease revoke or handoff")
     value.add_argument("--handoff-receipt", type=Path,
                        help="exact handoff receipt consumed by lease-successor")
+    value.add_argument("--cold-ref", default=STATE_ARCHIVE_COLD_REF,
+                       help="dedicated opt-in Git ref for cold lifecycle records")
+    value.add_argument("--authorize-state-compaction", action="store_true")
+    value.add_argument("--authorize-state-rollback", action="store_true")
     return value
 
 
@@ -8182,7 +8669,32 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         controller = exact_root(args.controller, "controller", physical_identity=False)
-        if args.operation == "runtime-bootstrap":
+        archive_operations = {"state-archive-plan", "state-archive-apply", "state-archive-verify",
+                              "state-archive-get", "state-archive-rollback"}
+        if args.operation in archive_operations:
+            if args.operation == "state-archive-plan":
+                if args.task or args.plan or not args.output:
+                    raise TaskWorkspaceError("state-archive-plan requires only --output")
+                result = state_archive_plan(controller, args.output, args.cold_ref)
+            elif args.operation == "state-archive-apply":
+                if args.task or not args.plan or not args.output:
+                    raise TaskWorkspaceError("state-archive-apply requires --plan and --output")
+                result = state_archive_apply(controller, args.plan, args.output,
+                                             args.authorize_state_compaction)
+            elif args.operation == "state-archive-verify":
+                if args.task or not args.plan or args.output:
+                    raise TaskWorkspaceError("state-archive-verify requires only --plan")
+                result = state_archive_verify(controller, args.plan)
+            elif args.operation == "state-archive-get":
+                if not args.task or args.plan or args.output:
+                    raise TaskWorkspaceError("state-archive-get requires only --task")
+                result = state_archive_get(controller, args.task, args.cold_ref)
+            else:
+                if args.task or not args.plan or not args.output:
+                    raise TaskWorkspaceError("state-archive-rollback requires --plan and --output")
+                result = state_archive_rollback(controller, args.plan, args.output,
+                                                args.authorize_state_rollback)
+        elif args.operation == "runtime-bootstrap":
             if (args.task or args.path or args.umbrella_admission or args.plan or args.output
                     or args.authorization_receipt or args.child or not args.package_version
                     or not args.package_runtime_sha256):
