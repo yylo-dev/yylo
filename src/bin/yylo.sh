@@ -136,7 +136,7 @@ classify_prebootstrap_command() {
         esac
     done
     case "$PREBOOTSTRAP_COMMAND" in
-        -V|--version|info|where|capabilities|benchmark|ledger|kanban|task|merge|integration|evidence) return 0 ;;
+        -V|--version|info|where|capabilities|benchmark|ledger|kanban|task|merge|integration|evidence|tmux) return 0 ;;
         doctor) [ "$PREBOOTSTRAP_SUBCOMMAND" = "workspace" ] && return 0 ;;
     esac
     return 1

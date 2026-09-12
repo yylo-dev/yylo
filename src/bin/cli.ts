@@ -98,6 +98,7 @@ import { configureWorkspaceCommands } from '../cli/commands/workspace.js';
 import { configureWikiCommand } from '../cli/commands/wiki.js';
 import { configureLoopCommand } from '../cli/commands/loop.js';
 import { configureCapabilitiesCommand } from '../cli/commands/capabilities.js';
+import { configureTmuxCommand } from '../cli/commands/tmux.js';
 import {
   configureBenchmarkCommand,
   forwardBenchmarkSignal,
@@ -2102,6 +2103,7 @@ function configureCommandSurface(program: Command): void {
   configureWikiCommand(program);
   configureLoopCommand(program);
   configureCapabilitiesCommand(program);
+  configureTmuxCommand(program);
   configureBenchmarkCommand(program);
   setupCompletion(program);
   setupAliases(program);
@@ -2178,8 +2180,9 @@ async function main(): Promise<void> {
   const isReadOnlyTaskStatus = isTaskWorkspaceCommand && commandArgs[1] === 'status';
   const isScriptsDoctor = commandArgs[0] === 'scripts' && commandArgs[1] === 'doctor';
   const isWorkspaceDiscovery = commandArgs[0] === 'info' || commandArgs[0] === 'where' || commandArgs[0] === 'capabilities' || (commandArgs[0] === 'doctor' && commandArgs[1] === 'workspace');
+  const isTmuxCommand = commandArgs[0] === 'tmux';
   const isControlPlaneCommand = ['ledger', 'kanban', 'task', 'merge', 'integration'].includes(commandArgs[0] ?? '');
-  const isReadOnlyIdentityRequest = isReadOnlyVersionRequest || isReadOnlyLifecycleStatus || isReadOnlyTaskStatus || isMigrationCommand || isScriptsDoctor || isWorkspaceDiscovery || isControlPlaneCommand;
+  const isReadOnlyIdentityRequest = isReadOnlyVersionRequest || isReadOnlyLifecycleStatus || isReadOnlyTaskStatus || isMigrationCommand || isScriptsDoctor || isWorkspaceDiscovery || isTmuxCommand || isControlPlaneCommand;
   const isForceUpdate = process.argv.includes('--force-update');
   const isExplicitProjectAssetUpdate =
     isForceUpdate ||
