@@ -12,7 +12,7 @@ enable-shell-directives: true
 3. Trace only the dependencies and runtime paths needed for the requested goal. Use bounded parallel investigation when independent questions justify it.
 4. Report current behavior, sources of truth, affected components, risks, unknowns, and the smallest useful validation loop.
 5. If the user requested planning, hand the findings to `plan-kanban-tasks`. If implementation was requested, work only in the task worktree returned by `yy task start TASK_ID`.
-6. Write a durable spec only when requested or materially useful, and route it to a controller-admitted location. Do not update root instructions with transient status.
+6. Write a durable operational spec only when requested or materially useful. Draft it externally, preflight the installed `yy ledger artifact` API, capture it as an immutable `report` Artifact Record with provenance/retention, and verify retrieval, digest, and history. If that API is unavailable, stop with the external draft intact; never fall back to product `docs/`, task bodies/responses, new `.juno_task/specs`, or direct controller-store edits. Product `docs/` remains reserved for documentation shipped with the product. Do not update root instructions with transient status.
 
 ## Invocation contract
 
