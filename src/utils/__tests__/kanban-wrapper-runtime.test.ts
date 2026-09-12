@@ -215,7 +215,7 @@ python3 -c 'import os, kanban; print(kanban.RUNTIME + "|" + os.environ["JUNO_TAS
       path.join(venvBin, 'yylo-ledger'),
       `#!/usr/bin/env bash
 if [[ "${'$'}{1:-}" == "--version" ]]; then
-  printf 'yylo-ledger 0.3.0\\n'
+  printf 'yylo-ledger 0.3.1\\n'
   exit 0
 fi
 printf 'yylo-ledger-runtime\\n'
