@@ -17,7 +17,7 @@ afterEach(async () => {
 });
 
 describe('native Git merge CLI', () => {
-  it('exposes only status, one-task land, and separate projection', () => {
+  it('exposes status, auto-projecting land, and explicit projection recovery', () => {
     const program = new Command();
     configureMergeCommand(program, async () => undefined);
     const merge = program.commands.find((command) => command.name() === 'merge');
@@ -27,8 +27,11 @@ describe('native Git merge CLI', () => {
     expect(merge?.description()).toContain('one task');
     expect(merge?.commands.find((command) => command.name() === 'land')?.description())
       .toContain('never runs tests, reviews, or models');
+    expect(merge?.description()).toContain('project lifecycle truth to Ledger');
+    expect(merge?.commands.find((command) => command.name() === 'land')?.description())
+      .toContain('project Ledger status');
     expect(merge?.commands.find((command) => command.name() === 'project')?.description())
-      .toContain('Separately project');
+      .toContain('Retry or repair');
   });
 
   it('routes observation separately from mutations', () => {
