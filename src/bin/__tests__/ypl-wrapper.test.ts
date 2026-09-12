@@ -315,8 +315,11 @@ describe('ypl wrapper', () => {
         cwd: controller, reject: false,
       env: { ...process.env, PATH: `${launcherBin}${path.delimiter}${process.env.PATH ?? ''}` },
       });
-      expect(localController.exitCode).toBe(98);
-      expect(localController.stdout).toBe('');
+      expect(localController.exitCode).toBe(0);
+      expect(JSON.parse(localController.stdout)).toMatchObject({
+        argv0: 'yy', args: ['merge', 'status'], cwd: await fs.realpath(controller),
+        env: { effective: await fs.realpath(controller), asserted: 'controller', enforcement: 'strict' },
+      });
 
       await execa('git', ['config', '--worktree', 'juno.controller.runtimeExecutable', path.join(controller, 'missing-runtime.mjs')], { cwd: controller });
       const invalidRuntime = await execa(path.join(launcherBin, 'yy'), ['merge', 'status'], {
@@ -577,6 +580,45 @@ describe('ypl wrapper', () => {
       });
       expect(result.exitCode).toBe(0);
       expect(await fs.readFile(runtimeMarker, 'utf8')).toBe('orchestration');
+    } finally {
+      await fs.remove(tempDir);
+    }
+  });
+
+  it('uses the selected controller runtime for a fresh public yy merge --help process', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'juno-wrapper-controller-help-'));
+    try {
+      const controller = path.join(tempDir, 'controller');
+      const launcherBin = path.join(tempDir, 'launcher-bin');
+      const packagedScripts = path.join(tempDir, 'templates', 'scripts');
+      await fs.ensureDir(controller);
+      await fs.ensureDir(launcherBin);
+      await fs.ensureDir(packagedScripts);
+      await execa('git', ['init', '-b', 'controller'], { cwd: controller });
+      const runtime = path.join(controller, 'adopted-runtime.mjs');
+      await fs.writeFile(runtime, "process.stdout.write('Commands: status land project\\n')\n");
+      await execa('git', ['config', 'extensions.worktreeConfig', 'true'], { cwd: controller });
+      await execa('git', ['config', '--worktree', 'juno.controller.runtimeExecutable', runtime], {
+        cwd: controller,
+      });
+      await fs.writeFile(
+        path.join(packagedScripts, 'controller_resolver.py'),
+        [
+          'import json',
+          `print(json.dumps({'path': ${JSON.stringify(controller)}, 'current_root': ${JSON.stringify(controller)}, 'role': 'controller', 'expected_branch': 'refs/heads/controller', 'source': 'registration'}))`,
+        ].join('\n'),
+      );
+      await fs.copy(YYLO_SOURCE, path.join(launcherBin, 'yylo'));
+      await fs.chmod(path.join(launcherBin, 'yylo'), 0o755);
+      await fs.symlink('yylo', path.join(launcherBin, 'yy'));
+      await fs.writeFile(path.join(launcherBin, 'cli.mjs'), 'process.exit(98)\n');
+
+      const result = await execa(path.join(launcherBin, 'yy'), ['merge', '--help'], {
+        cwd: controller, reject: false,
+        env: { ...process.env, PATH: `${launcherBin}${path.delimiter}${process.env.PATH ?? ''}` },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('Commands: status land project');
     } finally {
       await fs.remove(tempDir);
     }
