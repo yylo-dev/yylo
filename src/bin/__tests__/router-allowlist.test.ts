@@ -124,10 +124,10 @@ describe('yylo.sh router allowlist contract', () => {
     }
   });
 
-  it('keeps task, merge, and evidence classified before checkout bootstrap', async () => {
+  it('keeps control commands and local tmux utilities classified before checkout bootstrap', async () => {
     const source = await fs.readFile(YYLO_SOURCE, 'utf8');
     expect(source).toMatch(
-      /-V\|--version\|info\|where\|capabilities\|benchmark\|ledger\|kanban\|task\|merge\|integration\|evidence\) return 0/,
+      /-V\|--version\|info\|where\|capabilities\|benchmark\|ledger\|kanban\|task\|merge\|integration\|evidence\|tmux\) return 0/,
     );
     expect(source).toMatch(/case "\$operation" in ledger\|kanban\|task\|merge\|integration\|evidence\) ;; \*\) return 1 ;; esac/);
   });

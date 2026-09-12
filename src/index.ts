@@ -16,6 +16,7 @@ export {
   type MachineResponse,
 } from './cli/machine-output';
 export * from './core/session';
+export * from './core/tmux-workspace';
 // Utility exports (excluding validateConfig to avoid conflicts)
 export * from './utils/environment';
 export {
