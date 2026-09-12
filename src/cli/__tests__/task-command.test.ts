@@ -57,7 +57,8 @@ describe('task workspace CLI', () => {
       'run', 'resume', 'recover-predispatch', 'recover-wall-budget', 'start', 'admission', 'preflight', 'checkpoint',
       'hydrate', 'status', 'finish', 'doctor', 'sync', 'lease-status',
       'lease-heartbeat', 'lease-handoff', 'lease-successor', 'lease-revoke', 'lease-release',
-      'runtime-bootstrap',
+      'state-archive-plan', 'state-archive-apply', 'state-archive-verify', 'state-archive-get',
+      'state-archive-rollback', 'runtime-bootstrap',
     ]);
     expect(task?.helpInformation()).not.toContain('umbrella');
     expect(task?.commands.find((command) => command.name() === 'doctor')
@@ -147,6 +148,26 @@ describe('task workspace CLI', () => {
     expect(taskWorkspaceControlOperation('recovery-apply')).toBe('orchestration');
     expect(taskWorkspaceControlOperation('recover-predispatch')).toBe('orchestration');
     expect(taskWorkspaceControlOperation('recover-wall-budget')).toBe('orchestration');
+    expect(taskWorkspaceControlOperation('state-archive-plan')).toBe('kanban');
+    expect(taskWorkspaceControlOperation('state-archive-get')).toBe('kanban');
+    expect(taskWorkspaceControlOperation('state-archive-apply')).toBe('orchestration');
+    expect(taskWorkspaceControlOperation('state-archive-rollback')).toBe('orchestration');
+  });
+
+  it('forwards explicit state archive operations without inventing a task identity', async () => {
+    const invoke = vi.fn(async () => undefined);
+    const program = new Command().exitOverride().configureOutput({ writeOut: () => undefined });
+    configureTaskWorkspaceCommand(program, invoke);
+    await program.parseAsync(['node', 'yy', 'task', 'state-archive-plan', '--output', '/tmp/plan.json']);
+    expect(invoke).toHaveBeenLastCalledWith('state-archive-plan', '', [],
+      ['--output', '/tmp/plan.json']);
+    await program.parseAsync(['node', 'yy', 'task', 'state-archive-get', 'OLD']);
+    expect(invoke).toHaveBeenLastCalledWith('state-archive-get', 'OLD', [], []);
+    await program.parseAsync(['node', 'yy', 'task', 'state-archive-apply',
+      '--plan', '/tmp/plan.json', '--output', '/tmp/apply.json', '--authorize-state-compaction']);
+    expect(invoke).toHaveBeenLastCalledWith('state-archive-apply', '', [], [
+      '--plan', '/tmp/plan.json', '--output', '/tmp/apply.json', '--authorize-state-compaction',
+    ]);
   });
 
   it('forwards the fencing lease token and lease command arguments exactly', async () => {
