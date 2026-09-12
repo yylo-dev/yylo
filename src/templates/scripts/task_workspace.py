@@ -139,6 +139,10 @@ LIFECYCLE_BOARD_STATUS = {
     "REVIEW_FINDINGS": "in_progress",
     "REVIEW_FINDINGS_EXHAUSTED": "in_progress",
     "MERGING": "in_progress",
+    # Native delivery persists this state after Git succeeds and before the
+    # terminal Ledger projection. It must remain recoverable without repeating
+    # integration when that projection is interrupted or refused.
+    "GIT_INTEGRATED": "in_progress",
     # Withdrawn candidates are not done and not in flight: the disposition
     # fields carry the exact truth while the board returns to an owned,
     # non-terminal tracking status.
