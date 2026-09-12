@@ -6,6 +6,7 @@ export const TMUX_WORKSPACE_SCHEMA = 'yylo.tmux-workspace.v1';
 export const COMPLETION_OPTION = '@yylo_workspace_completion';
 export const UNSEEN_OPTION = '@yylo_workspace_unseen';
 export const LEGACY_UNSEEN_OPTION = '@telegram_tmux_unseen';
+export const MONITOR_OWNER_OPTION = '@yylo_workspace_monitor_owner';
 
 const SESSION = /^[A-Za-z0-9_-]{1,64}$/;
 const WINDOW = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$/;
@@ -332,13 +333,48 @@ export class TmuxWorkspace {
     return match;
   }
 
+  private freshGeneration(): string {
+    return randomBytes(18).toString('base64url');
+  }
+
+  private unsetOptionIfExact(windowId: string, option: string, generation: string): void {
+    const condition = `#{==:#{${option}},${generation}}`;
+    const action = `set-option -wu -t ${windowId} ${option}`;
+    this.invoke(['if-shell', '-F', '-t', windowId, condition, action]);
+  }
+
   markUnread(session: string, target: string): string {
     const window = this.window(session, target);
-    const generation = randomBytes(18).toString('base64url');
+    const generation = this.freshGeneration();
     this.invoke(['set-option', '-w', '-t', window.id, COMPLETION_OPTION, generation]);
     this.invoke(['set-option', '-w', '-t', window.id, UNSEEN_OPTION, generation]);
     if (window.legacyUnseen)
       this.invoke(['set-option', '-wu', '-t', window.id, LEGACY_UNSEEN_OPTION]);
+    return generation;
+  }
+
+  publishCompletion(session: string, paneId: string): string {
+    session = TmuxWorkspace.sessionName(session);
+    if (!PANE_ID.test(paneId))
+      throw new TmuxWorkspaceError('tmux pane is stale or unavailable');
+    const pane = this.panes(session).find((item) => item.paneId === paneId);
+    if (!pane) throw new TmuxWorkspaceError('tmux pane is stale or unavailable');
+    const generation = this.freshGeneration();
+    this.invoke(['set-option', '-w', '-t', pane.windowId, COMPLETION_OPTION, generation]);
+    if (pane.windowActive && pane.attachedClients > 0) {
+      if (pane.canonicalUnseenGeneration)
+        this.unsetOptionIfExact(pane.windowId, UNSEEN_OPTION, pane.canonicalUnseenGeneration);
+      if (pane.legacyUnseenGeneration)
+        this.unsetOptionIfExact(
+          pane.windowId,
+          LEGACY_UNSEEN_OPTION,
+          pane.legacyUnseenGeneration,
+        );
+    } else {
+      this.invoke(['set-option', '-w', '-t', pane.windowId, UNSEEN_OPTION, generation]);
+      if (pane.legacyUnseenGeneration)
+        this.invoke(['set-option', '-wu', '-t', pane.windowId, LEGACY_UNSEEN_OPTION]);
+    }
     return generation;
   }
 
@@ -347,15 +383,144 @@ export class TmuxWorkspace {
     const window = this.window(session, target);
     const pane = this.panes(session).find((item) => item.windowId === window.id);
     if (!pane) throw new TmuxWorkspaceError('tmux window is stale or ambiguous');
-    let cleared = false;
+    let matched = false;
     if (pane.canonicalUnseenGeneration === generation) {
-      this.invoke(['set-option', '-wu', '-t', window.id, UNSEEN_OPTION]);
-      cleared = true;
+      this.unsetOptionIfExact(window.id, UNSEEN_OPTION, generation);
+      matched = true;
     }
     if (pane.legacyUnseenGeneration === generation) {
-      this.invoke(['set-option', '-wu', '-t', window.id, LEGACY_UNSEEN_OPTION]);
-      cleared = true;
+      this.unsetOptionIfExact(window.id, LEGACY_UNSEEN_OPTION, generation);
+      matched = true;
+    }
+    if (!matched) return false;
+    const current = this.panes(session).find((item) => item.windowId === window.id);
+    return Boolean(
+      current &&
+        current.canonicalUnseenGeneration !== generation &&
+        current.legacyUnseenGeneration !== generation,
+    );
+  }
+
+  acknowledgeVisible(session: string): number {
+    const windows = new Map<string, TmuxPaneStatus>();
+    for (const pane of this.panes(session))
+      if (!windows.has(pane.windowId)) windows.set(pane.windowId, pane);
+    let cleared = 0;
+    for (const pane of windows.values()) {
+      if (!pane.windowActive || pane.attachedClients < 1 || !pane.unseenGeneration) continue;
+      if (this.clearUnread(session, pane.windowId, pane.unseenGeneration)) cleared += 1;
     }
     return cleared;
+  }
+
+  monitorOwner(session: string): string | null {
+    session = TmuxWorkspace.sessionName(session);
+    const result = this.runner(
+      ['show-options', '-v', '-t', session, MONITOR_OWNER_OPTION],
+      { timeoutMs: 10_000 },
+    );
+    if (result.error || result.status === null) throw new TmuxWorkspaceError();
+    if (result.status !== 0) return null;
+    const owner = (result.stdout ?? '').trim();
+    if (!GENERATION.test(owner))
+      throw new TmuxWorkspaceError('tmux monitor ownership is malformed');
+    return owner;
+  }
+
+  claimMonitor(session: string): string {
+    session = TmuxWorkspace.sessionName(session);
+    const owner = this.freshGeneration();
+    const condition = `#{==:#{${MONITOR_OWNER_OPTION}},}`;
+    const action = `set-option -t ${session} ${MONITOR_OWNER_OPTION} ${owner}`;
+    this.invoke(['if-shell', '-F', '-t', session, condition, action]);
+    if (this.monitorOwner(session) !== owner)
+      throw new TmuxWorkspaceError('another tmux workspace monitor is active');
+    return owner;
+  }
+
+  ownsMonitor(session: string, owner: string): boolean {
+    owner = TmuxWorkspace.generation(owner);
+    return this.monitorOwner(session) === owner;
+  }
+
+  releaseMonitor(session: string, owner: string): void {
+    session = TmuxWorkspace.sessionName(session);
+    owner = TmuxWorkspace.generation(owner);
+    const condition = `#{==:#{${MONITOR_OWNER_OPTION}},${owner}}`;
+    const action = `set-option -u -t ${session} ${MONITOR_OWNER_OPTION}`;
+    this.invoke(['if-shell', '-F', '-t', session, condition, action]);
+  }
+}
+
+export class TmuxCompletionMonitor {
+  private readonly busy = new Map<string, boolean>();
+  static readonly shells = new Set([
+    'bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'mksh', 'tcsh', 'csh', 'nu', 'elvish', 'xonsh',
+  ]);
+
+  constructor(
+    readonly gateway: TmuxWorkspace,
+    readonly session: string,
+    readonly intervalMs = 2000,
+  ) {
+    TmuxWorkspace.sessionName(session);
+    if (!Number.isFinite(intervalMs) || intervalMs < 250 || intervalMs > 60_000)
+      throw new TmuxWorkspaceError('tmux monitor interval is invalid');
+  }
+
+  static isShell(command: string): boolean {
+    const name = command.split('/').at(-1)?.replace(/^-/, '') ?? '';
+    return this.shells.has(name);
+  }
+
+  pollOnce(owner?: string): void {
+    if (owner && !this.gateway.ownsMonitor(this.session, owner))
+      throw new TmuxWorkspaceError('tmux workspace monitor ownership was lost');
+    const panes = this.gateway.panes(this.session);
+    this.gateway.acknowledgeVisible(this.session);
+    const present = new Set(panes.map((pane) => pane.paneId));
+    for (const pane of panes) {
+      const busy = !TmuxCompletionMonitor.isShell(pane.currentCommand);
+      if (this.busy.get(pane.paneId) === true && !busy)
+        this.gateway.publishCompletion(this.session, pane.paneId);
+      this.busy.set(pane.paneId, busy);
+    }
+    for (const paneId of this.busy.keys())
+      if (!present.has(paneId)) this.busy.delete(paneId);
+  }
+
+  async run(signal: AbortSignal): Promise<void> {
+    const owner = this.gateway.claimMonitor(this.session);
+    try {
+      while (!signal.aborted) {
+        try {
+          this.pollOnce(owner);
+        } catch (error) {
+          if (
+            !this.gateway.hasSession(this.session) ||
+            !this.gateway.ownsMonitor(this.session, owner)
+          )
+            throw error;
+        }
+        if (!signal.aborted)
+          await new Promise<void>((resolve) => {
+            const onAbort = () => {
+              clearTimeout(timer);
+              resolve();
+            };
+            const timer = setTimeout(() => {
+              signal.removeEventListener('abort', onAbort);
+              resolve();
+            }, this.intervalMs);
+            signal.addEventListener('abort', onAbort, { once: true });
+          });
+      }
+    } finally {
+      if (
+        this.gateway.hasSession(this.session) &&
+        this.gateway.ownsMonitor(this.session, owner)
+      )
+        this.gateway.releaseMonitor(this.session, owner);
+    }
   }
 }

@@ -6,7 +6,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   COMPLETION_OPTION,
   LEGACY_UNSEEN_OPTION,
+  MONITOR_OWNER_OPTION,
   TMUX_WORKSPACE_SCHEMA,
+  TmuxCompletionMonitor,
   TmuxWorkspace,
   TmuxWorkspaceError,
   UNSEEN_OPTION,
@@ -17,6 +19,9 @@ import {
 class FakeTmux {
   calls: string[][] = [];
   exists = false;
+  owner = '';
+  commands = new Map<string, string>([['%1', 'bash']]);
+  attached = 0;
   windows = [{ id: '@1', index: 0, name: 'main', completion: '', unseen: '', legacy: '' }];
 
   run = (args: readonly string[], _options: TmuxRunOptions): TmuxRunResult => {
@@ -40,9 +45,9 @@ class FakeTmux {
             '0',
             window.name,
             '1',
-            'bash',
+            this.commands.get(`%${window.index + 1}`) ?? 'bash',
             window.index === 0 ? '1' : '0',
-            '0',
+            String(this.attached),
             window.completion,
             window.unseen,
             window.legacy,
@@ -56,13 +61,31 @@ class FakeTmux {
       this.windows.push({ id: '@2', index: 1, name, completion: '', unseen: '', legacy: '' });
       return { status: 0, stdout: '@2\n' };
     }
+    if (argv[0] === 'show-options' && argv.at(-1) === MONITOR_OWNER_OPTION)
+      return this.owner ? { status: 0, stdout: this.owner + '\n' } : { status: 1, stdout: '' };
+    if (argv[0] === 'if-shell') {
+      const condition = argv[argv.indexOf('-t') + 2] ?? '';
+      const action = argv[argv.indexOf('-t') + 3] ?? '';
+      const match = /^#\{==:#\{(@[^}]+)\},([^}]*)\}$/.exec(condition);
+      if (!match) return { status: 1, stdout: '' };
+      const target = argv[argv.indexOf('-t') + 1];
+      const window = this.windows.find((item) => item.id === target);
+      const current = match[1] === MONITOR_OWNER_OPTION ? this.owner
+        : match[1] === UNSEEN_OPTION ? window?.unseen
+        : match[1] === LEGACY_UNSEEN_OPTION ? window?.legacy : undefined;
+      if (current === match[2]) return this.run(action.split(' '), _options);
+      return { status: 0, stdout: '' };
+    }
     if (argv[0] === 'set-option') {
-      const window = this.windows.find((item) => item.id === argv[argv.indexOf('-t') + 1]);
-      if (!window) return { status: 1, stdout: '' };
       const targetIndex = argv.indexOf('-t');
       const option = argv[targetIndex + 2];
-      const unset = argv.includes('-wu');
+      const unset = argv.includes('-wu') || argv.includes('-u');
       const value = unset ? '' : (argv[targetIndex + 3] ?? '');
+      if (option === MONITOR_OWNER_OPTION) {
+        this.owner = value;return { status: 0, stdout: '' };
+      }
+      const window = this.windows.find((item) => item.id === argv[targetIndex + 1]);
+      if (!window) return { status: 1, stdout: '' };
       if (option === COMPLETION_OPTION) window.completion = value;
       if (option === UNSEEN_OPTION) window.unseen = value;
       if (option === LEGACY_UNSEEN_OPTION) window.legacy = value;
@@ -139,6 +162,49 @@ describe('TmuxWorkspace', () => {
     expect(() => gateway.createSession('new', '/definitely/missing')).toThrow('unavailable');
     fake.run = () => ({ status: 0, stdout: 'malformed\n' });
     expect(() => new TmuxWorkspace(fake.run).status('safe')).toThrow('malformed');
+  });
+});
+
+describe('TmuxCompletionMonitor', () => {
+  it('initializes silently and publishes one background generation on busy-to-shell', () => {
+    const fake = new FakeTmux();fake.exists = true;fake.commands.set('%1', 'node');
+    const gateway = new TmuxWorkspace(fake.run);const monitor = new TmuxCompletionMonitor(gateway, 'safe');
+    monitor.pollOnce();
+    expect(fake.windows[0]).toMatchObject({ completion: '', unseen: '' });
+    fake.commands.set('%1', 'bash');monitor.pollOnce();
+    expect(fake.windows[0]!.completion).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
+    expect(fake.windows[0]!.unseen).toBe(fake.windows[0]!.completion);
+    monitor.pollOnce();
+    expect(fake.calls.filter((call) => call[0] === 'set-option' && call.includes(COMPLETION_OPTION))).toHaveLength(1);
+  });
+
+  it('publishes seen completion for an attached active window and acknowledges old state', () => {
+    const fake = new FakeTmux();fake.exists = true;fake.attached = 1;
+    fake.windows[0]!.unseen = 'abcdefghijklmnop';fake.commands.set('%1', 'node');
+    const gateway = new TmuxWorkspace(fake.run);const monitor = new TmuxCompletionMonitor(gateway, 'safe');
+    monitor.pollOnce();
+    expect(fake.windows[0]!.unseen).toBe('');
+    fake.commands.set('%1', 'bash');monitor.pollOnce();
+    expect(fake.windows[0]!.completion).not.toBe('');expect(fake.windows[0]!.unseen).toBe('');
+  });
+
+  it('fences competing owners and releases only its own token', () => {
+    const fake = new FakeTmux();fake.exists = true;const gateway = new TmuxWorkspace(fake.run);
+    const owner = gateway.claimMonitor('safe');
+    expect(gateway.ownsMonitor('safe', owner)).toBe(true);
+    expect(() => gateway.claimMonitor('safe')).toThrow('another tmux workspace monitor');
+    expect(() => gateway.releaseMonitor('safe', 'differentowner123')).not.toThrow();
+    expect(gateway.ownsMonitor('safe', owner)).toBe(true);
+    gateway.releaseMonitor('safe', owner);expect(gateway.monitorOwner('safe')).toBeNull();
+  });
+
+  it('forgets removed panes without manufacturing completions', () => {
+    const fake = new FakeTmux();fake.exists = true;fake.commands.set('%1', 'node');
+    const gateway = new TmuxWorkspace(fake.run);const monitor = new TmuxCompletionMonitor(gateway, 'safe');
+    monitor.pollOnce();fake.windows.splice(0, 1);monitor.pollOnce();
+    fake.windows.push({ id: '@2', index: 1, name: 'new', completion: '', unseen: '', legacy: '' });
+    fake.commands.set('%2', 'bash');monitor.pollOnce();
+    expect(fake.windows[0]).toMatchObject({ completion: '', unseen: '' });
   });
 });
 
