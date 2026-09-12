@@ -30,6 +30,9 @@ task's workspace.
    work. Merge launches zero models, selects no reviewer, and owns no repair or
    validation loop. Never delegate those checks to delivery.
 4. If blocked, record bounded truthful state and stop without claiming success.
+   Durable diagnostic output belongs in a verified Ledger Artifact Record when
+   the installed API supports it; otherwise preserve an external draft and stop,
+   never fall back to product documentation or direct controller-store edits.
 
 ## 3. Queue and hand off
 
