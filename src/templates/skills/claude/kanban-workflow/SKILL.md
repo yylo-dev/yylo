@@ -2,16 +2,19 @@
 name: kanban-workflow
 description: Comprehensive guide for using YYLO Ledger task management. Covers all commands (create, list, search, get, mark, update, archive, deps, ready, order, merge), dependency management, best practices, and workflow patterns. Use when you need to interact with the YYLO Ledger board.
 argument-hint: "[command or workflow question]"
+enable-shell-directives: true
 ---
 
 ## YYLO Ledger CLI Reference
 
-Use `yy ledger` for all commands. YYLO supports the exact `yylo-ledger 0.3.0` task CLI. `yy kanban` is a labelled compatibility alias for the same controller-routed task runtime.
+Use `yy ledger` for all commands. Ledger 0.3.x exposes both the compatible flat task commands and the native ID-first `record|task|wiki|workflow|artifact` groups. `yy kanban` is a labelled compatibility alias for the same controller-routed task runtime.
 
 ### Supported task contract
 
-- The public Ledger 0.3.0 surface is task-oriented: create, get, update, mark, archive, list/search, dependencies, ordering, history, doctor, compatibility, conversion, rollback, and cold archive operations.
-- Do not advertise `record`, `wiki`, `workflow`, or `artifact` namespaces unless the installed `yy ledger --help` explicitly provides them in a future supported release.
+- Preflight installed `yy ledger --version` and `yy ledger --help`; command help is authoritative for the selected runtime.
+- Use the flat task surface for lifecycle task management. Inspect native group help before use; do not guess arguments from source or another installation.
+- New operational PDRs, contracts, plans, reports, receipts, and evidence belong in typed Artifact Records, not product documentation, task bodies/responses, or new `.juno_task/specs` files.
+- If a required native group is absent, fail closed and request a Ledger upgrade. Never invoke mutable source directly or write Ledger store files by hand.
 - Read current task state before mutation, preserve mutation receipts where offered, and never bypass controller routing or lifecycle state with direct file edits.
 - Normal discovery is hot-only unless an explicit cold-archive command is used.
 
