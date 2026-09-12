@@ -20,7 +20,8 @@ yy task start X -> edit/test/commit -> preflight -> finish -> QUEUED
                                                         |
 yy merge land X -> private native Git candidate -> expected-old update
                                                         |
-                                  Git result -> yy merge project X -> Ledger
+                                  automatic lifecycle projection -> Ledger
+                                  (`yy merge project X` retries projection)
 ```
 
 ## Public commands
@@ -34,7 +35,7 @@ yy task finish TASK_ID
 
 yy merge status [TASK_ID]       # read-only independent task status
 yy merge land TASK_ID           # compose and land one task; no tests/reviews/models
-yy merge project TASK_ID        # retry the separate Ledger projection
+yy merge project TASK_ID        # retry or repair Ledger projection after Git integration
 ```
 
 `task start` freezes the target and runs exact-lock hydration before reporting
@@ -55,8 +56,10 @@ adapter launches zero models, selects no reviewer, schedules no suite, and owns
 no evidence cache. A native Git source already contained in target is ancestry
 evidence only; it is not a claim that tests, review, or requirements passed.
 
-Git success is reported before Ledger projection. A failed `merge project`
-leaves the Git result intact and retryable, never repeats integration, and never
+`merge land` projects Ledger immediately after Git success. If projection fails,
+Git remains integrated and the command reports `merge project` as recovery. A
+failed `merge project` leaves the Git result intact and retryable, never repeats
+integration, and never
 blocks another task's land. Historical queue, review, candidate, and CAS receipts
 remain immutable data; no supported command executes or resumes their retired
 engine.

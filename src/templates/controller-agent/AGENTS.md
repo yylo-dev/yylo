@@ -25,8 +25,8 @@ product code.
    native delivery adapter launches no models, chooses no reviewers, schedules
    no suites, and owns no repair or evidence-cache loop.
 7. Observe one task with `yy merge status TASK_ID`. The target owner runs
-   `yy merge land TASK_ID`, then `yy merge project TASK_ID` to record the Git
-   result separately. Recompose after target movement; preserve private conflicts.
+   `yy merge land TASK_ID`, which automatically records the verified Git result in
+   Ledger. Use `yy merge project TASK_ID` only to retry or repair that projection. Recompose after target movement; preserve private conflicts.
 8. Integration always uses the ordinary task and merge lifecycle. The finite
    `yy migrate legacy-lifecycle` surface is restricted to existing umbrella
    inventory/drain/conversion; live apply requires separate owner authority.

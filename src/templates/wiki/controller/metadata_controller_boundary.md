@@ -209,7 +209,8 @@ feature/X branch + worktree              feature/Y branch + worktree
         v                                     v
 private native-Git candidate -- expected-old update --> product target ref
         |
-        +-- Git result --> yy merge project X --> Ledger
+        +-- automatic lifecycle projection --> Ledger
+            (`yy merge project X` retries projection)
 ```
 
 Run Kanban and task/merge orchestration from the metadata controller. Run agent
@@ -223,8 +224,8 @@ the integration-owner worktree.
 
 The transition is serialized: stop shared servers and require a clean checkout,
 detach the integration owner before the explicit `yy merge land TASK_ID`, read
-its Git result, then run the separate `yy merge project TASK_ID`. Attach the
-exact target only for shared validation/deployment and detach before another
+its Git-and-Ledger result, and run `yy merge project TASK_ID` only if projection
+needs recovery. Attach the exact target only for shared validation/deployment and detach before another
 mutation. Never leave the target ref attached while expecting native expected-old
 delivery to advance it.
 
