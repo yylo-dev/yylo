@@ -126,10 +126,21 @@ def integrated_result(controller: Path, task_id: str, record: dict[str, Any],
                                 "source_sha": source, "target_ref": target_ref,
                                 "integrated_sha": integrated_sha}}
     persist_task(controller, task_id, record, updated)
+    try:
+        transition = task_runtime.project_kanban_lifecycle(
+            controller, task_id, "GIT_INTEGRATED", phase="git-integrated",
+            record=updated)
+    except task_runtime.KanbanSyncError as exc:
+        raise DeliveryError(
+            f"Git is integrated but its Ledger transition failed: {exc}; "
+            f"retry `yy merge project {task_id}`") from exc
+    persisted = {**updated, "kanban_sync": transition}
+    persist_task(controller, task_id, updated, persisted)
+    projected = project(controller, task_id)
     return {"schema_version": SCHEMA, "task_id": task_id, "outcome": outcome,
             "git": {"status": "integrated", "source_sha": source,
                     "target_ref": target_ref, "integrated_sha": integrated_sha},
-            "ledger": {"status": "pending", "next_command": f"yy merge project {task_id}"},
+            "ledger": projected["ledger"], "projection": projected,
             "receipt": receipt}
 
 
@@ -185,10 +196,22 @@ def land(controller: Path, task_id: str, *, candidate_sha: Optional[str] = None,
                         "continue_command": (f"yy merge land {task_id} --candidate <resolved-sha> "
                                              f"--expected-target {observed}")}
             receipt = atomic_json(receipt_path, conflict)
-            persist_task(controller, task_id, record,
-                         {**record, "state": "CONFLICT", "git_delivery": conflict,
-                          "git_delivery_receipt": receipt})
-            return {**conflict, "receipt": receipt}
+            conflicted = {**record, "state": "CONFLICT", "git_delivery": conflict,
+                          "git_delivery_receipt": receipt}
+            persist_task(controller, task_id, record, conflicted)
+            try:
+                transition = task_runtime.project_kanban_lifecycle(
+                    controller, task_id, "CONFLICT", phase="conflict",
+                    record=conflicted)
+            except task_runtime.KanbanSyncError as exc:
+                raise DeliveryError(
+                    f"conflict is preserved but its Ledger transition failed: {exc}; "
+                    f"retry `yy task sync {task_id}`") from exc
+            persist_task(controller, task_id, conflicted,
+                         {**conflicted, "kanban_sync": transition})
+            return {**conflict, "ledger": {"status": "complete",
+                                            "board_status": transition["board_status"]},
+                    "receipt": receipt}
         candidate = ref_sha(candidate_path, "HEAD")
 
     update = git_result(repository, "update-ref", target_ref, candidate, observed)
@@ -210,41 +233,34 @@ def land(controller: Path, task_id: str, *, candidate_sha: Optional[str] = None,
 def project(controller: Path, task_id: str) -> dict[str, Any]:
     _config, repository, target_ref = roots(controller)
     record = task_record(controller, task_id)
-    if record.get("state") == "MERGED":
-        return {"schema_version": SCHEMA, "task_id": task_id, "outcome": "ALREADY_PROJECTED"}
     source = record.get("tip_sha")
+    integrated = record.get("integrated_sha")
     target = ref_sha(repository, target_ref)
-    if record.get("state") != "GIT_INTEGRATED" or not isinstance(source, str) or not is_ancestor(repository, source, target):
+    if (record.get("state") not in {"GIT_INTEGRATED", "MERGED"}
+            or not isinstance(source, str)
+            or not isinstance(integrated, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", integrated)
+            or not is_ancestor(repository, source, integrated)
+            or not is_ancestor(repository, integrated, target)):
         raise DeliveryError("Git integration is not proven; run `yy merge land TASK_ID` first")
-    board = task_runtime.read_kanban_task(controller, task_id)
-    if board.get("status") == "done":
-        if board.get("commit_hash") != target:
-            raise DeliveryError("task is done with a different integration commit")
-    else:
-        revision = task_runtime.kanban_board_revision(controller, task_id)
-        finalization = controller / ".juno_task/runtime/native-merge" / task_id / f"projection-{target}.json"
-        finalization.parent.mkdir(parents=True, exist_ok=True)
-        fd, response_path = tempfile.mkstemp(prefix=".response-", dir=finalization.parent)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(f"Merged into the protected target as {target}.")
-            result = subprocess.run([
-                str(controller / ".juno_task/scripts/kanban.sh"), "-f", "json", "update", task_id,
-                "--status", "done", "--response-file", response_path, "--commit", target,
-                "--field", f"lifecycle_projection={json.dumps(task_runtime.KANBAN_LIFECYCLE_PROJECTION)}",
-                "--field", "lifecycle_state=\"MERGED\"", "--expected-revision", revision,
-                "--receipt-file", str(finalization),
-            ], cwd=controller, text=True, stdin=subprocess.DEVNULL, capture_output=True)
-        finally:
-            Path(response_path).unlink(missing_ok=True)
-        if result.returncode:
-            raise DeliveryError(result.stderr.strip() or "Ledger projection failed; Git remains integrated")
-    updated = {**record, "state": "MERGED", "integrated_sha": target,
+    try:
+        projection = task_runtime.project_kanban_lifecycle(
+            controller, task_id, "MERGED", phase="native-project", record=record,
+            allow_done=True, commit_hash=integrated,
+            response=f"Merged into the protected target as {integrated}.")
+    except task_runtime.KanbanSyncError as exc:
+        raise DeliveryError(f"Ledger projection failed; Git remains integrated: {exc}") from exc
+    updated = {**record, "state": "MERGED", "integrated_sha": integrated,
+               "kanban_sync": projection,
                "git_delivery": {**record.get("git_delivery", {}), "projection": "complete"}}
-    persist_task(controller, task_id, record, updated)
-    return {"schema_version": SCHEMA, "task_id": task_id, "outcome": "PROJECTED",
-            "git": {"status": "integrated", "integrated_sha": target},
-            "ledger": {"status": "complete"}}
+    if updated != record:
+        persist_task(controller, task_id, record, updated)
+    return {"schema_version": SCHEMA, "task_id": task_id,
+            "outcome": ("ALREADY_PROJECTED" if projection.get("outcome") == "verified"
+                        and record.get("state") == "MERGED" else "PROJECTED"),
+            "git": {"status": "integrated", "integrated_sha": integrated},
+            "ledger": {"status": "complete", "board_status": "done",
+                       "receipt": projection.get("receipt")}}
 
 
 def status(controller: Path, task_id: Optional[str] = None) -> dict[str, Any]:

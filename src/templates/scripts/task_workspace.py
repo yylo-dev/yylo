@@ -2884,7 +2884,9 @@ def _kanban_lifecycle_fields(lifecycle_state: str, disposition: Optional[str],
 def project_kanban_lifecycle(controller: Path, task_id: str, lifecycle_state: str, *,
                              phase: Optional[str] = None,
                              record: Optional[dict[str, Any]] = None,
-                             allow_done: bool = False) -> dict[str, Any]:
+                             allow_done: bool = False,
+                             commit_hash: Optional[str] = None,
+                             response: Optional[str] = None) -> dict[str, Any]:
     """Project one lifecycle state onto the canonical board, fail-closed.
 
     Idempotent: an already-projected board returns ``verified`` without a
@@ -2895,6 +2897,9 @@ def project_kanban_lifecycle(controller: Path, task_id: str, lifecycle_state: st
         raise KanbanSyncError(f"lifecycle state has no board projection: {lifecycle_state}",
                               {"task_id": task_id, "lifecycle_state": lifecycle_state})
     board_status = LIFECYCLE_BOARD_STATUS[lifecycle_state]
+    if commit_hash is not None and (board_status != "done" or not re.fullmatch(r"[0-9a-f]{40}", commit_hash)):
+        raise KanbanSyncError("only a verified merged projection may carry an integration commit",
+                              {"task_id": task_id, "lifecycle_state": lifecycle_state})
     if board_status == "done" and not allow_done:
         # Native delivery projection exclusively owns the done mutation; this
         # helper only verifies it after the fact.
@@ -2925,11 +2930,18 @@ def project_kanban_lifecycle(controller: Path, task_id: str, lifecycle_state: st
     current_fields = current.get("fields") if isinstance(current.get("fields"), dict) else {}
     if (current_status == board_status
             and all(current_fields.get(key) == value
-                    for key, value in desired_fields.items())):
+                    for key, value in desired_fields.items())
+            and (commit_hash is None or current.get("commit_hash") == commit_hash)):
         return {"schema_version": KANBAN_SYNC_SCHEMA, "task_id": task_id,
                 "lifecycle_state": lifecycle_state, "outcome": "verified",
                 "board_status": board_status,
                 "board_revision": kanban_board_revision(controller, task_id)}
+    if (current_status == "done" and commit_hash is not None
+            and current.get("commit_hash") not in {None, commit_hash}):
+        raise KanbanSyncError(
+            "canonical Kanban task is done with a different integration commit",
+            {"task_id": task_id, "lifecycle_state": lifecycle_state,
+             "board_status": current_status, "commit_hash": current.get("commit_hash")})
     if current_status in TERMINAL_TASK_STATUSES and board_status not in TERMINAL_TASK_STATUSES:
         # A manual owner change is preserved, never overwritten.
         raise KanbanSyncError(
@@ -2943,7 +2955,8 @@ def project_kanban_lifecycle(controller: Path, task_id: str, lifecycle_state: st
     identity = {"schema_version": KANBAN_SYNC_SCHEMA, "task_id": task_id,
                 "lifecycle_state": lifecycle_state, "phase": phase,
                 "board_status": board_status, "expected_revision": revision,
-                "fields": desired_fields}
+                "fields": desired_fields, "commit_hash": commit_hash,
+                "response": response}
     receipt_path = _kanban_sync_receipt_path(controller, task_id, identity)
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     argv = ["-f", "json", "update", task_id,
@@ -2957,6 +2970,10 @@ def project_kanban_lifecycle(controller: Path, task_id: str, lifecycle_state: st
         argv.append(f"continuation_task_id={json.dumps(continuation)}")
     if current_status != board_status:
         argv += ["--status", board_status]
+    if commit_hash is not None:
+        argv += ["--commit", commit_hash]
+    if response is not None:
+        argv += ["--response", response]
     argv += ["--expected-revision", revision,
              "--receipt-file", str(receipt_path)]
     result = subprocess.run([str(_kanban_wrapper(controller)), *argv], cwd=controller,
@@ -2973,7 +2990,8 @@ def project_kanban_lifecycle(controller: Path, task_id: str, lifecycle_state: st
     readback_fields = readback.get("fields") if isinstance(readback.get("fields"), dict) else {}
     if (readback.get("status") != board_status
             or any(readback_fields.get(key) != value
-                   for key, value in desired_fields.items())):
+                   for key, value in desired_fields.items())
+            or (commit_hash is not None and readback.get("commit_hash") != commit_hash)):
         raise KanbanSyncError("canonical Kanban projection readback mismatched",
                               {"task_id": task_id, "lifecycle_state": lifecycle_state,
                                "board_status": readback.get("status"),
@@ -3166,7 +3184,7 @@ def kanban_sync_doctor(controller: Path, task_id: Optional[str] = None) -> dict[
         selected = [(task_id, records[task_id])]
     rows: list[dict[str, Any]] = []
     drift = 0
-    for current_id, record in selected[:200]:
+    for current_id, record in selected:
         if not isinstance(record, dict):
             continue
         lifecycle_state = record.get("state")
@@ -3182,19 +3200,24 @@ def kanban_sync_doctor(controller: Path, task_id: Optional[str] = None) -> dict[
         except (KanbanSyncError, OSError) as exc:
             board_error = str(exc)[:256]
             reasons.append("kanban_read_failed")
-        if board_error is None:
-            if (expected is not None and expected != "done"
-                    and board_status in PRESTART_TRACKING_STATUSES):
-                reasons.append("active_lifecycle_record_in_backlog_or_todo")
-            if (isinstance(lifecycle_state, str) and lifecycle_state != "MERGED"
-                    and board_status == "done"):
-                reasons.append("board_done_without_merge_truth")
-            if (isinstance(lifecycle_state, str) and lifecycle_state not in {"MERGED", "WITHDRAWN"}
-                    and board_status == "archive"):
-                reasons.append("board_archived_while_lifecycle_active")
-            if (isinstance(lifecycle_state, str)
-                    and board_fields.get("lifecycle_projection") == KANBAN_LIFECYCLE_PROJECTION
-                    and board_fields.get("lifecycle_state") != lifecycle_state):
+        if board_error is None and isinstance(lifecycle_state, str) and expected is not None:
+            if board_status != expected:
+                if expected == "in_progress" and board_status in PRESTART_TRACKING_STATUSES:
+                    reasons.append("active_lifecycle_record_in_backlog_or_todo")
+                elif expected == "done":
+                    reasons.append("merged_lifecycle_not_done_on_board")
+                elif lifecycle_state == "WITHDRAWN":
+                    reasons.append("withdrawn_board_status_mismatch")
+                elif board_status == "done":
+                    reasons.append("board_done_without_merge_truth")
+                elif board_status == "archive":
+                    reasons.append("board_archived_while_lifecycle_active")
+                else:
+                    reasons.append("board_status_mismatch")
+            projection = board_fields.get("lifecycle_projection")
+            if projection != KANBAN_LIFECYCLE_PROJECTION:
+                reasons.append("lifecycle_projection_missing")
+            elif board_fields.get("lifecycle_state") != lifecycle_state:
                 reasons.append("lifecycle_field_stale")
         if isinstance(record.get("kanban_sync"), dict) and record["kanban_sync"].get("status") == "required":
             reasons.append("kanban_sync_required")
@@ -3205,7 +3228,9 @@ def kanban_sync_doctor(controller: Path, task_id: Optional[str] = None) -> dict[
                      "expected_board_status": expected,
                      "agreement": "drift" if reasons else "agree",
                      "reasons": reasons,
-                     "recovery_command": (KANBAN_SYNC_RECOVERY.format(task=current_id)
+                     "recovery_command": ((f"yy merge project {current_id}"
+                                            if lifecycle_state == "MERGED"
+                                            else KANBAN_SYNC_RECOVERY.format(task=current_id))
                                            if reasons else None)})
     return {"schema_version": KANBAN_SYNC_SCHEMA, "task_id": task_id,
             "rows": rows,

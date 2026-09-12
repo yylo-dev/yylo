@@ -47,8 +47,8 @@ Use the installed Juno control plane; do not create another workflow engine.
    run read-only `yy task preflight TASK_ID`, repair closure defects while
    `WORKING`, then run separately authorized `yy task finish TASK_ID`. Observe
    with `yy merge status TASK_ID`; one target owner uses `yy merge land TASK_ID`
-   for native-Git expected-old delivery, then `yy merge project TASK_ID` for the
-   separate Ledger projection. Recompose and renew candidate checks after target
+   for native-Git expected-old delivery and automatic Ledger projection. Use
+   `yy merge project TASK_ID` only to retry or repair projection after Git integrated. Recompose and renew candidate checks after target
    movement, preserve private conflict bytes, and never let one conflict block an
    unrelated task. For integration-owner drift use `yy integration status`, then
    receipt-bound `repair --dry-run/--apply`.
