@@ -6701,6 +6701,23 @@ steps:
         report = task_runtime.kanban_sync_doctor(self.controller, "X")
         self.assertIn("board_done_without_merge_truth", report["rows"][0]["reasons"])
 
+    def test_doctor_treats_projected_withdrawn_todo_as_agreement(self) -> None:
+        task_runtime.start(self.controller, "X")
+        state = task_runtime.read_state(self.controller)
+        withdrawn = {**state["tasks"]["X"], "state": "WITHDRAWN"}
+        task_runtime.project_kanban_lifecycle(self.controller, "X", "WITHDRAWN",
+                                              record=withdrawn)
+        state["tasks"]["X"] = withdrawn
+        task_runtime.write_state(self.controller, state)
+        report = task_runtime.kanban_sync_doctor(self.controller, "X")
+        self.assertEqual(report["rows"][0]["agreement"], "agree")
+
+    def test_doctor_reports_missing_projection_fields_even_when_status_matches(self) -> None:
+        task_runtime.start(self.controller, "X")
+        self.set_board_task("X", status="in_progress", fields={})
+        report = task_runtime.kanban_sync_doctor(self.controller, "X")
+        self.assertIn("lifecycle_projection_missing", report["rows"][0]["reasons"])
+
     def test_dispositions_and_continuation_linkage_without_claiming_done(self) -> None:
         task_runtime.start(self.controller, "X")
         state = json.loads((self.controller / ".juno_task/state/tasks.json").read_text())
@@ -6726,7 +6743,15 @@ steps:
         with self.assertRaisesRegex(task_runtime.KanbanSyncError, "native delivery projection owns the done mutation"):
             task_runtime.ensure_kanban_sync(self.controller, "X", merged)
         self.assertEqual(self.board_task("X")["status"], "in_progress")
-        self.set_board_task("X", status="done", commit_hash=state["tasks"]["X"]["tip_sha"])
+        commit_hash = state["tasks"]["X"]["tip_sha"]
+        projected = task_runtime.project_kanban_lifecycle(
+            self.controller, "X", "MERGED", record=merged, allow_done=True,
+            commit_hash=commit_hash, response=f"Merged as {commit_hash}.")
+        self.assertEqual((projected["outcome"], projected["board_status"]),
+                         ("projected", "done"))
+        board = self.board_task("X")
+        self.assertEqual(board["commit_hash"], commit_hash)
+        self.assertEqual(board["fields"]["lifecycle_state"], "MERGED")
         verified = task_runtime.ensure_kanban_sync(self.controller, "X", merged)
         self.assertEqual((verified["outcome"], verified["board_status"]),
                          ("verified", "done"))
