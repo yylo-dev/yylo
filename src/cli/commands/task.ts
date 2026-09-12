@@ -35,7 +35,12 @@ export type TaskWorkspaceOperation =
   | 'lease-handoff'
   | 'lease-successor'
   | 'lease-revoke'
-  | 'lease-release';
+  | 'lease-release'
+  | 'state-archive-plan'
+  | 'state-archive-apply'
+  | 'state-archive-verify'
+  | 'state-archive-get'
+  | 'state-archive-rollback';
 export type TaskWorkspaceInvoker = (
   operation: TaskWorkspaceOperation,
   taskId: string,
@@ -47,7 +52,8 @@ export type TaskRuntimeBootstrapOptions = { dryRun?: boolean; apply?: string };
 export type TaskRuntimeBootstrapInvoker = (options: TaskRuntimeBootstrapOptions) => Promise<void>;
 
 export function taskWorkspaceControlOperation(operation: TaskWorkspaceOperation): 'kanban' | 'orchestration' {
-  return ['status', 'admission', 'preflight', 'recovery-plan', 'recovery-verify', 'evidence-status', 'doctor', 'lease-status'].includes(operation) ? 'kanban' : 'orchestration';
+  return ['status', 'admission', 'preflight', 'recovery-plan', 'recovery-verify', 'evidence-status', 'doctor', 'lease-status',
+    'state-archive-plan', 'state-archive-verify', 'state-archive-get'].includes(operation) ? 'kanban' : 'orchestration';
 }
 
 export function packagedTaskRuntimeCandidates(): string[] {
@@ -161,7 +167,7 @@ export async function invokeTaskWorkspace(
   const machine = resolveMachineOutput(process.argv.slice(2), { jsonFlag: true });
   const { exitCode } = await invokeMachineAwareChild({
     executable: 'python3',
-    args: [script, operation, '--task', taskId, ...pathArgs, ...admissionArgs],
+    args: [script, operation, ...(taskId ? ['--task', taskId] : []), ...pathArgs, ...admissionArgs],
     cwd: controllerRoot,
     env: taskEnv,
     command: `task.${operation}`,
@@ -317,6 +323,45 @@ export function configureTaskWorkspaceCommand(
     .requiredOption('--lease-token <token>', 'Current fencing lease token')
     .action((taskId: string, options: { leaseToken: string }) => invoke(
       'lease-release', taskId, [], ['--lease-token', options.leaseToken],
+    ));
+  task.command('state-archive-plan')
+    .description('Create a read-only reviewed plan for terminal lifecycle compaction')
+    .requiredOption('--output <file>', 'Fresh external plan path')
+    .option('--cold-ref <ref>', 'Dedicated opt-in cold Git ref')
+    .action((options: { output: string; coldRef?: string }) => invoke(
+      'state-archive-plan', '', [], ['--output', options.output,
+        ...(options.coldRef ? ['--cold-ref', options.coldRef] : [])],
+    ));
+  task.command('state-archive-apply')
+    .description('Apply one exact reviewed terminal lifecycle compaction plan')
+    .requiredOption('--plan <file>', 'Exact reviewed plan')
+    .requiredOption('--output <file>', 'Fresh external receipt path')
+    .requiredOption('--authorize-state-compaction', 'Explicit destructive migration authority')
+    .action((options: { plan: string; output: string }) => invoke(
+      'state-archive-apply', '', [], ['--plan', options.plan, '--output', options.output,
+        '--authorize-state-compaction'],
+    ));
+  task.command('state-archive-verify')
+    .description('Verify compact hot state and every archived terminal record')
+    .requiredOption('--plan <file>', 'Exact applied plan')
+    .action((options: { plan: string }) => invoke(
+      'state-archive-verify', '', [], ['--plan', options.plan],
+    ));
+  task.command('state-archive-get')
+    .description('Explicitly retrieve one digest-verified cold terminal lifecycle record')
+    .argument('<task-id>', 'Canonical YYLO Ledger task ID')
+    .option('--cold-ref <ref>', 'Dedicated opt-in cold Git ref')
+    .action((taskId: string, options: { coldRef?: string }) => invoke(
+      'state-archive-get', taskId, [], options.coldRef ? ['--cold-ref', options.coldRef] : [],
+    ));
+  task.command('state-archive-rollback')
+    .description('Restore the exact pre-compaction hot state while preserving cold evidence')
+    .requiredOption('--plan <file>', 'Exact applied plan')
+    .requiredOption('--output <file>', 'Fresh external receipt path')
+    .requiredOption('--authorize-state-rollback', 'Explicit rollback authority')
+    .action((options: { plan: string; output: string }) => invoke(
+      'state-archive-rollback', '', [], ['--plan', options.plan, '--output', options.output,
+        '--authorize-state-rollback'],
     ));
   task.command('runtime-bootstrap')
     .description('Plan or apply guarded package-bound target task-runtime recovery')
