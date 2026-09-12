@@ -2341,6 +2341,67 @@ def adoption_assert_target(repository: Path, target_ref: str, target_sha: str, o
     adoption_clean(owner, "integration owner")
 
 
+def adoption_owner_preflight(repository: Path, target_ref: str, target_sha: str,
+                             owner: Path) -> dict[str, Any]:
+    """Freeze a clean detached owner's rollback identity without moving it."""
+    if adoption_git(repository, "rev-parse", f"{target_ref}^{{commit}}") != target_sha:
+        raise AdoptionError("source runtime adoption refused because the target ref moved")
+    adoption_clean(owner, "integration owner")
+    symbolic = subprocess.run(
+        ["git", "-C", str(owner), "symbolic-ref", "-q", "HEAD"], cwd=owner,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if symbolic.returncode not in (0, 1):
+        raise AdoptionError(symbolic.stderr.strip() or "could not inspect integration owner HEAD")
+    if symbolic.returncode == 0:
+        raise AdoptionError("source runtime adoption requires a detached integration owner")
+    if (worktree_config(owner, "juno.workspace.role") != "integration-owner"
+            or worktree_config(owner, "juno.workspace.roleAuthority") != AUTHORITY):
+        raise AdoptionError("source runtime adoption requires the registered integration-owner authority")
+    before_head = adoption_git(owner, "rev-parse", "HEAD")
+    before_base = worktree_config(owner, "juno.workspace.roleBase")
+    if before_head != target_sha:
+        adoption_git(repository, "merge-base", "--is-ancestor", before_head, target_sha)
+        if before_base and before_base != before_head:
+            raise AdoptionError("stale integration owner roleBase does not match its clean detached HEAD")
+    return {"head": before_head, "role_base": before_base,
+            "moved": before_head != target_sha}
+
+
+def adoption_prepare_owner(repository: Path, target_ref: str, target_sha: str,
+                           owner: Path, before: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Move only a preflighted clean detached owner to the fixed local target."""
+    before = before or adoption_owner_preflight(repository, target_ref, target_sha, owner)
+    if before["moved"]:
+        adoption_git(owner, "switch", "--detach", target_sha)
+        adoption_git(owner, "submodule", "sync", "--recursive")
+        adoption_git(owner, "submodule", "update", "--init", "--recursive", "--checkout")
+        if before.get("role_base") != target_sha:
+            adoption_git(owner, "config", "--worktree", "juno.workspace.roleBase", target_sha)
+    adoption_assert_target(repository, target_ref, target_sha, owner)
+    return before
+
+
+def adoption_restore_owner(owner: Path, before: dict[str, Any]) -> bool:
+    if not before.get("moved"):
+        return True
+    adoption_clean(owner, "integration owner")
+    adoption_git(owner, "switch", "--detach", before["head"])
+    adoption_git(owner, "submodule", "sync", "--recursive")
+    adoption_git(owner, "submodule", "update", "--init", "--recursive", "--checkout")
+    old_base = before.get("role_base")
+    if old_base:
+        adoption_git(owner, "config", "--worktree", "juno.workspace.roleBase", old_base)
+    else:
+        result = subprocess.run(
+            ["git", "-C", str(owner), "config", "--worktree", "--unset-all",
+             "juno.workspace.roleBase"], cwd=owner, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode not in (0, 5):
+            raise AdoptionError(result.stderr.strip() or "could not restore integration owner roleBase")
+    return (adoption_git(owner, "rev-parse", "HEAD") == before["head"]
+            and worktree_config(owner, "juno.workspace.roleBase") == old_base)
+
+
 def adoption_task_start_admission(controller: Path, repository: Path, target_sha: str) -> dict[str, Any]:
     relative = task_workspace.RUNTIME_PATH
     target = managed_source_bytes(repository, target_sha,
@@ -2353,36 +2414,138 @@ def adoption_task_start_admission(controller: Path, repository: Path, target_sha
             "current": bool(running and running == target)}
 
 
-def adoption_replay(receipt_path: Path, controller: Path, repository: Path, target_ref: str) -> dict[str, Any] | None:
+def adoption_public_launcher_preflight(old_executable: str) -> list[dict[str, str]]:
+    if not Path(old_executable).is_file():
+        raise AdoptionError("currently selected controller executable is missing")
+    launchers: list[dict[str, str]] = []
+    for name in ("yylo", "yy"):
+        found = shutil.which(name)
+        if not found:
+            raise AdoptionError(f"public {name} launcher is unavailable")
+        path = Path(found)
+        if not path.is_symlink():
+            raise AdoptionError(f"public {name} launcher is not an atomically selectable symlink")
+        launchers.append({"name": name, "path": str(path.absolute()),
+                          "before": os.readlink(path), "before_resolved": str(path.resolve())})
+    if len({row["before_resolved"] for row in launchers}) != 1:
+        raise AdoptionError("public yy and yylo launchers do not share one prior runtime identity")
+    return launchers
+
+
+def adoption_public_launchers(old_executable: str, new_executable: Path,
+                              preflight: list[dict[str, str]] | None = None) -> dict[str, Any]:
+    launchers = preflight or adoption_public_launcher_preflight(old_executable)
+    new_launcher = new_executable.resolve().with_name("yylo.sh")
+    if not new_launcher.is_file() or not new_executable.is_file():
+        raise AdoptionError("installed source runtime is missing its public launcher or executable")
+    changed: list[dict[str, str]] = []
+    try:
+        for row in launchers:
+            path = Path(row["path"])
+            if (not path.is_symlink() or os.readlink(path) != row["before"]
+                    or str(path.resolve()) != row["before_resolved"]):
+                raise AdoptionError("public runtime selector changed after preflight")
+            temporary = path.with_name(f".{path.name}.source-adoption-{os.getpid()}")
+            temporary.unlink(missing_ok=True)
+            temporary.symlink_to(new_launcher)
+            os.replace(temporary, path)
+            changed.append(row)
+        if any(Path(row["path"]).resolve() != new_launcher for row in launchers):
+            raise AdoptionError("public runtime selector exact readback failed")
+    except BaseException:
+        for row in reversed(changed):
+            path = Path(row["path"])
+            if path.is_symlink() and path.resolve() == new_launcher:
+                temporary = path.with_name(f".{path.name}.source-adoption-abort-{os.getpid()}")
+                temporary.unlink(missing_ok=True)
+                temporary.symlink_to(row["before"])
+                os.replace(temporary, path)
+        raise
+    return {"executable": str(new_executable.resolve()), "launcher": str(new_launcher),
+            "links": launchers}
+
+
+def adoption_restore_public_launchers(selection: dict[str, Any]) -> bool:
+    selected = Path(selection["launcher"]).resolve()
+    complete = True
+    for row in reversed(selection["links"]):
+        path = Path(row["path"])
+        if not path.is_symlink() or path.resolve() != selected:
+            complete = False
+            continue
+        temporary = path.with_name(f".{path.name}.source-adoption-rollback-{os.getpid()}")
+        temporary.unlink(missing_ok=True)
+        temporary.symlink_to(row["before"])
+        os.replace(temporary, path)
+    return complete and all(Path(row["path"]).is_symlink()
+                            and os.readlink(Path(row["path"])) == row["before"]
+                            for row in selection["links"])
+
+
+def adoption_verify_public_dispatch(selection: dict[str, Any]) -> None:
+    executable = Path(selection.get("executable", ""))
+    launcher = Path(selection.get("launcher", ""))
+    if (not executable.is_file() or not launcher.is_file()
+            or any(not Path(row["path"]).is_symlink()
+                   or Path(row["path"]).resolve() != launcher.resolve()
+                   for row in selection.get("links", []))):
+        raise AdoptionError("completed source runtime adoption public selector drifted")
+    result = adoption_run([str(Path(selection["links"][-1]["path"])), "merge", "--help"],
+                          Path.cwd())
+    help_text = result.stdout + result.stderr
+    native = all(re.search(rf"(?m)^  {name}(?: |$)", help_text)
+                 for name in ("status", "land", "project"))
+    retired = any(re.search(rf"(?m)^  {name}(?: |$)", help_text)
+                  for name in ("arbiter", "drive", "next", "review", "resume"))
+    if not native or retired:
+        raise AdoptionError("fresh public yy merge --help did not select only native merge commands")
+
+
+def adoption_replay(receipt_path: Path, controller: Path, repository: Path, target_ref: str,
+                    previous_sha: str, target_sha: str, prefix: Path) -> dict[str, Any] | None:
     if not receipt_path.exists():
         return None
     receipt = adoption_read_json(receipt_path, "source runtime adoption receipt")
     if (receipt.get("schema_version") != SOURCE_ADOPTION_SCHEMA or receipt.get("operation") != "runtime-adopt-source"
             or receipt.get("outcome") != "completed" or receipt.get("controller") != str(controller)
-            or receipt.get("repository") != str(repository)
-            or adoption_git(repository, "rev-parse", f"{target_ref}^{{commit}}") != receipt.get("target_sha")):
-        raise AdoptionError("prior source runtime adoption receipt is terminal or no longer matches the target")
+            or receipt.get("repository") != str(repository) or receipt.get("target_ref") != target_ref
+            or receipt.get("previous_sha") != previous_sha or receipt.get("target_sha") != target_sha
+            or receipt.get("install_prefix") != str(prefix)
+            or adoption_git(repository, "rev-parse", f"{target_ref}^{{commit}}") != target_sha):
+        raise AdoptionError("prior source runtime adoption receipt conflicts with the exact requested transaction")
     artifact = Path(receipt.get("artifact", {}).get("path", ""))
     if not artifact.is_file() or adoption_digest(artifact) != receipt.get("artifact", {}).get("sha256"):
         raise AdoptionError("completed source runtime adoption artifact identity drifted")
-    doctor = managed_runtime_inspect(controller, repository, receipt["target_sha"])
-    generation = adoption_task_start_admission(controller, repository, receipt["target_sha"])
+    install_receipt = Path(receipt.get("install_receipt", {}).get("path", ""))
+    if (not install_receipt.is_file()
+            or adoption_digest(install_receipt) != receipt.get("install_receipt", {}).get("sha256")):
+        raise AdoptionError("completed source runtime adoption install receipt identity drifted")
+    ownership = prefix / ".juno-source-adoption-owner.json"
+    marker = adoption_read_json(ownership, "source runtime adoption prefix ownership")
+    if (marker.get("receipt") != str(receipt_path) or marker.get("target_sha") != target_sha
+            or marker.get("install_receipt_sha256") != adoption_digest(install_receipt)):
+        raise AdoptionError("completed source runtime adoption prefix ownership drifted")
+    configured = adoption_controller_config(controller, "juno.controller.runtimeExecutable")
+    if configured != receipt.get("dispatch", {}).get("executable"):
+        raise AdoptionError("completed source runtime adoption controller selection drifted")
+    adoption_verify_public_dispatch(receipt.get("dispatch", {}))
+    doctor = managed_runtime_inspect(controller, repository, target_sha)
+    generation = adoption_task_start_admission(controller, repository, target_sha)
     if not doctor["healthy"] or not generation["current"]:
         raise AdoptionError("completed source runtime adoption no longer passes runtime admission")
-    return {**receipt, "replay": "idempotent"}
+    return {**receipt, "replay": "idempotent", "verified": True}
 
 
-def source_runtime_adopt(args: argparse.Namespace) -> dict[str, Any]:
+def _source_runtime_adopt_locked(args: argparse.Namespace, controller: Path,
+                                 policy: dict[str, Any], repository: Path,
+                                 target_ref: str) -> dict[str, Any]:
     started = time.monotonic()
-    controller = exact_root(args.controller, "controller")
-    _, policy, _ = load_policy(controller)
-    repository = task_workspace.product_repository(controller, policy).resolve()
-    target_ref = policy["target_ref"]
     target_sha = managed_exact_commit(repository, args.target_sha, "target generation")
     previous_sha = managed_exact_commit(repository, args.previous_sha, "previous generation")
     output = adoption_exact_external(args.output, controller, "adoption receipt")
     prefix = adoption_exact_external(args.install_prefix, controller, "runtime install prefix")
-    prior = adoption_replay(output, controller, repository, target_ref)
+    prior = adoption_replay(output, controller, repository, target_ref,
+                            previous_sha, target_sha, prefix)
     if prior is not None:
         return prior
     if output.exists() or output.is_symlink():
@@ -2394,7 +2557,7 @@ def source_runtime_adopt(args: argparse.Namespace) -> dict[str, Any]:
     if not owner_value:
         raise AdoptionError("source runtime adoption requires a registered integration owner")
     owner = Path(owner_value).resolve()
-    adoption_assert_target(repository, target_ref, target_sha, owner)
+    adoption_clean(owner, "integration owner")
     adoption_git(repository, "merge-base", "--is-ancestor", previous_sha, target_sha)
     generation_path = controller / MANAGED_GENERATION_PATH
     generation = adoption_read_json(generation_path, "managed runtime generation")
@@ -2411,6 +2574,7 @@ def source_runtime_adopt(args: argparse.Namespace) -> dict[str, Any]:
     old_executable = adoption_controller_config(controller, "juno.controller.runtimeExecutable")
     old_version = adoption_controller_config(controller, "juno.controller.runtimeVersion")
     old_identity = controller / ".juno_task/runtime/identity.json"
+    launcher_before = adoption_public_launcher_preflight(old_executable)
     before = {"controller_head": adoption_git(controller, "rev-parse", "HEAD"),
               "controller_tree": adoption_git(controller, "write-tree"),
               "runtime_executable": old_executable, "runtime_version": old_version,
@@ -2421,8 +2585,15 @@ def source_runtime_adopt(args: argparse.Namespace) -> dict[str, Any]:
     rollback_receipt = output.with_name(f"{output.stem}-rollback.json")
     if any(path.exists() or path.is_symlink() for path in (artifact, install_receipt, rollback_receipt)):
         raise AdoptionError("source runtime adoption sidecar path already exists")
+    # Freeze owner rollback identity only after every output, prefix,
+    # generation, package, controller, launcher, and ancestry preflight passes.
+    owner_before = adoption_owner_preflight(repository, target_ref, target_sha, owner)
     rebound = False
+    prefix_owned = False
+    dispatch: dict[str, Any] | None = None
     try:
+        # Owner movement is the first mutation and remains inside rollback scope.
+        adoption_prepare_owner(repository, target_ref, target_sha, owner, owner_before)
         with tempfile.TemporaryDirectory(prefix="yylo-source-pack-") as temporary:
             adoption_run(["npm", "pack", "--pack-destination", temporary], owner / "juno-code")
             packs = list(Path(temporary).glob("*.tgz"))
@@ -2437,6 +2608,19 @@ def source_runtime_adopt(args: argparse.Namespace) -> dict[str, Any]:
              "--branch", branch, "--runtime-version", version, "--install-prefix", str(prefix),
              "--artifact", str(artifact), "--output", str(install_receipt)], controller)
         rebound = True
+        install = adoption_read_json(install_receipt, "runtime install/rebind receipt")
+        new_executable = Path(install.get("runtime", {}).get("executable", ""))
+        if (install.get("install_prefix") != str(prefix) or not new_executable.is_file()):
+            raise AdoptionError("runtime install receipt does not own the requested fresh prefix")
+        ownership = prefix / ".juno-source-adoption-owner.json"
+        marker = {"schema_version": SOURCE_ADOPTION_SCHEMA, "receipt": str(output),
+                  "target_sha": target_sha,
+                  "install_receipt_sha256": adoption_digest(install_receipt)}
+        with ownership.open("x", encoding="utf-8") as stream:
+            stream.write(adoption_canonical(marker).decode())
+        prefix_owned = True
+        dispatch = adoption_public_launchers(old_executable, new_executable, launcher_before)
+        adoption_verify_public_dispatch(dispatch)
         adoption_assert_target(repository, target_ref, target_sha, owner)
         if os.environ.get("YYLO_SOURCE_ADOPTION_TEST_FAIL_AFTER_REBIND") == "1":
             raise AdoptionError("injected interruption after runtime rebind")
@@ -2447,7 +2631,6 @@ def source_runtime_adopt(args: argparse.Namespace) -> dict[str, Any]:
         admission = adoption_task_start_admission(controller, repository, target_sha)
         if not doctor["healthy"] or not admission["current"]:
             raise AdoptionError("source runtime adoption did not reach task-start admission")
-        install = adoption_read_json(install_receipt, "runtime install/rebind receipt")
         payload = {"schema_version": SOURCE_ADOPTION_SCHEMA, "operation": "runtime-adopt-source",
                    "outcome": "completed", "controller": str(controller),
                    "repository": str(repository), "target_ref": target_ref,
@@ -2458,7 +2641,10 @@ def source_runtime_adopt(args: argparse.Namespace) -> dict[str, Any]:
                    "install_prefix": str(prefix), "install_receipt": {"path": str(install_receipt),
                                 "sha256": adoption_digest(install_receipt)},
                    "refresh_receipt": refresh["receipt"], "doctor": {"healthy": True},
-                   "runtime_generation": admission, "rollback_identity": before,
+                   "runtime_generation": admission, "dispatch": dispatch,
+                   "integration_owner": {"path": str(owner), "before": owner_before,
+                                         "after_head": target_sha},
+                   "rollback_identity": before,
                    "duration_seconds": time.monotonic() - started,
                    "operator_steps": {"before": 5, "after": 2,
                                       "before_flow": "pack, install/rebind, refresh, doctor, task start",
@@ -2467,21 +2653,43 @@ def source_runtime_adopt(args: argparse.Namespace) -> dict[str, Any]:
         adoption_atomic_write(output, payload)
         return payload
     except BaseException as exc:
-        rollback: dict[str, Any] = {"attempted": rebound, "complete": not rebound}
-        if rebound:
-            try:
-                metadata = Path(__file__).with_name("metadata_controller.py")
-                adoption_run([sys.executable, str(metadata), "runtime-rebind", "--root", str(controller),
-                     "--branch", branch, "--runtime", old_executable,
-                     "--runtime-version", old_version, "--output", str(rollback_receipt)], controller)
-                if prefix.exists():
+        rollback: dict[str, Any] = {"attempted": rebound or owner_before["moved"],
+                                     "complete": not rebound and not owner_before["moved"]}
+        try:
+            dispatch_restored = True if dispatch is None else adoption_restore_public_launchers(dispatch)
+            runtime_restored = not rebound
+            receipt_reference = None
+            if rebound:
+                expected_new = dispatch["executable"] if dispatch else str(
+                    prefix / "node_modules/@yylo/cli/dist/bin/cli.mjs")
+                if adoption_controller_config(controller, "juno.controller.runtimeExecutable") == expected_new:
+                    metadata = Path(__file__).with_name("metadata_controller.py")
+                    adoption_run([sys.executable, str(metadata), "runtime-rebind", "--root", str(controller),
+                         "--branch", branch, "--runtime", old_executable,
+                         "--runtime-version", old_version, "--output", str(rollback_receipt)], controller)
+                    runtime_restored = True
+                    receipt_reference = {"path": str(rollback_receipt),
+                                         "sha256": adoption_digest(rollback_receipt)}
+            prefix_removed = not prefix.exists()
+            if prefix_owned:
+                marker = prefix / ".juno-source-adoption-owner.json"
+                owned = marker.is_file() and adoption_read_json(
+                    marker, "source runtime adoption prefix ownership").get("receipt") == str(output)
+                if owned:
                     shutil.rmtree(prefix)
-                rollback.update({"complete": (not prefix.exists()
-                    and adoption_controller_config(controller, "juno.controller.runtimeExecutable") == old_executable
-                    and adoption_controller_config(controller, "juno.controller.runtimeVersion") == old_version),
-                    "receipt": {"path": str(rollback_receipt), "sha256": adoption_digest(rollback_receipt)}})
-            except BaseException as rollback_exc:
-                rollback.update({"complete": False, "error": str(rollback_exc)})
+                prefix_removed = not prefix.exists()
+            owner_restored = adoption_restore_owner(owner, owner_before)
+            rollback.update({"complete": bool(dispatch_restored and runtime_restored
+                                               and prefix_removed and owner_restored
+                                               and adoption_controller_config(controller, "juno.controller.runtimeExecutable") == old_executable
+                                               and adoption_controller_config(controller, "juno.controller.runtimeVersion") == old_version),
+                             "public_dispatch_restored": dispatch_restored,
+                             "prefix_removed_by_owner": prefix_owned and prefix_removed,
+                             "owner_restored": owner_restored})
+            if receipt_reference:
+                rollback["receipt"] = receipt_reference
+        except BaseException as rollback_exc:
+            rollback.update({"complete": False, "error": str(rollback_exc)})
         failure = {"schema_version": SOURCE_ADOPTION_SCHEMA, "operation": "runtime-adopt-source",
                    "outcome": "failed_rolled_back" if rollback["complete"] else "failed_rollback_incomplete",
                    "controller": str(controller), "repository": str(repository),
@@ -2493,6 +2701,18 @@ def source_runtime_adopt(args: argparse.Namespace) -> dict[str, Any]:
         if not output.exists():
             adoption_atomic_write(output, failure)
         raise AdoptionError(f"{exc}; rollback_complete={rollback['complete']}; receipt={output}") from exc
+
+
+def source_runtime_adopt(args: argparse.Namespace) -> dict[str, Any]:
+    controller = exact_root(args.controller, "controller")
+    _, policy, _ = load_policy(controller)
+    repository = task_workspace.product_repository(controller, policy).resolve()
+    target_ref = policy["target_ref"]
+    # One target lock serializes output/prefix preflight with every source
+    # adoption and target mutation, closing receipt and ownership TOCTOU races.
+    with integration_target_lock(repository, target_ref):
+        return _source_runtime_adopt_locked(
+            args, controller, policy, repository, target_ref)
 
 
 def parser() -> argparse.ArgumentParser:
