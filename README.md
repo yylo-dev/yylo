@@ -220,28 +220,6 @@ yy watch await RUN_ID
 
 `RUN_ID` is a placeholder. Status is observation; it does not acquire task, merge, or release authority. Watch evidence includes terminal state and bounded logs rather than requiring terminal-scrollback reconstruction.
 
-## Local tmux workspaces
-
-The `yy tmux` namespace manages a local tmux session independently of YYLO execution sessions and Git workspace topology:
-
-```bash
-yy tmux session create work --directory "$PWD"
-yy tmux session ensure work --directory "$PWD"
-yy tmux window create api-fix --session work --directory "$PWD"
-yy tmux status --session work
-yy tmux unread list --session work
-yy tmux monitor --session work
-yy tmux connect work
-# Equivalent to ensure followed by connect:
-yy tmux open work --directory "$PWD"
-```
-
-Creation is detached and never replaces an existing session. Connection attaches outside tmux and switches the current client inside tmux; it requires an interactive terminal. Session names are shell-safe identifiers, window names are bounded, and working directories must already exist. Add `--json` to creation, status, window, and unread operations for stable machine output.
-
-The foreground monitor initializes silently, records busy-to-shell transitions, and must remain running to observe completions. Supervise it like any other local long-running process. Polling can miss commands that start and finish entirely between samples. Only one cooperative monitor owns a session at a time, and orderly interruption releases ownership without deleting completion state.
-
-Workspace completion state uses the window options `@yylo_workspace_completion` and `@yylo_workspace_unseen`. An explicit clear requires the exact observed generation so stale callers cannot clear a newer marker. Read-only status/list operations never acknowledge state. During migration, status and clear also recognize `@telegram_tmux_unseen`. YYLO does not alter tmux hooks, themes, or status formats.
-
 ## Managed workflows and evidence
 
 Fresh `yy init` installs managed scripts, prompts, and wiki guidance under `.juno_task/`. Update checksum-managed assets with:
