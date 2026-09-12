@@ -52,6 +52,10 @@ class RuntimeFixture:
         fake.TaskWorkspaceError = type("TaskWorkspaceError", (RuntimeError,), {})
         fake.KanbanSyncError = type("KanbanSyncError", (RuntimeError,), {})
         fake.KANBAN_LIFECYCLE_PROJECTION = "juno_lifecycle_kanban_projection.v1"
+        fake.BOUNDED_STATE_SCHEMA = "juno_task_workspace_state.v2"
+        fake.TERMINAL_LIFECYCLE_STATES = {"MERGED", "WITHDRAWN"}
+        fake.archive_terminal_transition = self.archive_terminal_transition
+        self.archived = []
         fake.load_config = lambda _controller: {"target_ref": "refs/heads/target"}
         fake.product_repository = lambda _controller, _config: self.repository
         fake.read_state = lambda _controller: json.loads(json.dumps(self.state))
@@ -68,6 +72,12 @@ class RuntimeFixture:
 
     def write_state(self, _controller: Path, state: dict) -> None:
         self.state = json.loads(json.dumps(state))
+
+    def archive_terminal_transition(self, _controller: Path, _state: dict,
+                                    task_id: str, record: dict) -> dict:
+        self.archived.append(task_id)
+        return {"schema_version": "juno_task_terminal_tombstone.v1",
+                "task_id": task_id, "state": record["state"], "tip_sha": record.get("tip_sha")}
 
     def branch(self, name: str, *, start: str | None = None) -> Path:
         worktree = self.root / name
@@ -95,6 +105,17 @@ class NativeDeliveryTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.f.close()
+
+    def test_bounded_terminal_projection_archives_before_tombstone(self) -> None:
+        self.f.state["schema_version"] = "juno_task_workspace_state.v2"
+        expected = {"task_id": "TASK", "state": "GIT_INTEGRATED", "tip_sha": "a" * 40}
+        self.f.state["tasks"]["TASK"] = expected
+        self.f.runtime.persist_task(
+            self.f.controller, "TASK", expected,
+            {**expected, "state": "MERGED", "integrated_sha": "b" * 40})
+        self.assertEqual(self.f.archived, ["TASK"])
+        self.assertEqual(self.f.state["tasks"]["TASK"]["schema_version"],
+                         "juno_task_terminal_tombstone.v1")
 
     def test_clean_divergent_merge_preserves_both_sides_and_separates_projection(self) -> None:
         source = self.f.branch("TASK")
