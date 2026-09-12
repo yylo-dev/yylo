@@ -1151,9 +1151,16 @@ def inspect(root: Path, policy: dict[str, Any], *, expected_branch: str | None =
                 and digest(task_policy_value) == reviewed_policy_hashes.get("task_workspace")
                 and digest(integration_policy_value) == reviewed_policy_hashes.get("integration_workspace")
                 and digest(risk_policy_value) == reviewed_policy_hashes.get("risk")
-                and tasks_value.get("schema_version") == "juno_task_workspace_state.v1"
+                and tasks_value.get("schema_version") in {
+                    "juno_task_workspace_state.v1", "juno_task_workspace_state.v2"}
                 and isinstance(tasks_value.get("tasks"), dict)
                 and isinstance(tasks_value.get("queues"), dict)
+                and (tasks_value.get("schema_version") != "juno_task_workspace_state.v2"
+                     or all(not isinstance(record, dict)
+                            or record.get("state") not in {"MERGED", "WITHDRAWN"}
+                            or (record.get("schema_version") == "juno_task_terminal_tombstone.v1"
+                                and record.get("task_id") == task_id)
+                            for task_id, record in tasks_value["tasks"].items()))
                 and current_boundary_text == root_boundary_text
             )
         except (BoundaryError, KeyError, TypeError, json.JSONDecodeError):
