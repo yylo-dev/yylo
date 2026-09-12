@@ -6712,6 +6712,19 @@ steps:
         report = task_runtime.kanban_sync_doctor(self.controller, "X")
         self.assertEqual(report["rows"][0]["agreement"], "agree")
 
+    def test_git_integrated_projects_as_recoverable_in_progress(self) -> None:
+        task_runtime.start(self.controller, "X")
+        state = task_runtime.read_state(self.controller)
+        integrated = {**state["tasks"]["X"], "state": "GIT_INTEGRATED",
+                      "integrated_sha": "a" * 40}
+        projected = task_runtime.project_kanban_lifecycle(
+            self.controller, "X", "GIT_INTEGRATED", record=integrated)
+        self.assertEqual((projected["outcome"], projected["board_status"]),
+                         ("updated", "in_progress"))
+        board = self.board_task("X")
+        self.assertEqual(board["status"], "in_progress")
+        self.assertEqual(board["fields"]["lifecycle_state"], "GIT_INTEGRATED")
+
     def test_doctor_reports_missing_projection_fields_even_when_status_matches(self) -> None:
         task_runtime.start(self.controller, "X")
         self.set_board_task("X", status="in_progress", fields={})
