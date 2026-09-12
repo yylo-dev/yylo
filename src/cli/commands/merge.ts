@@ -65,7 +65,7 @@ export function configureMergeCommand(
   invoke: MergeInvoker = invokeMerge,
 ): void {
   const merge = addMachineOutputOptions(program.command('merge')
-    .description('Land one task with native Git, then project its result to Ledger'));
+    .description('Land one task with native Git and atomically project lifecycle truth to Ledger'));
 
   merge.command('status')
     .description('Read-only status for independently landable tasks')
@@ -73,7 +73,7 @@ export function configureMergeCommand(
     .action((taskId?: string) => taskId ? invoke('status', taskId) : invoke('status'));
 
   merge.command('land')
-    .description('Compose and atomically land exactly one task; never runs tests, reviews, or models')
+    .description('Compose and land one task, then project Ledger status; never runs tests, reviews, or models')
     .argument('<task-id>', 'Queued task with one immutable source commit')
     .option('--candidate <sha>', 'Explicit manually resolved candidate commit')
     .option('--expected-target <sha>', 'Target observed when the explicit candidate was composed')
@@ -88,7 +88,7 @@ export function configureMergeCommand(
     });
 
   merge.command('project')
-    .description('Separately project an already integrated Git result to Ledger')
+    .description('Retry or repair Ledger projection for an already integrated Git result')
     .argument('<task-id>', 'Task whose source ancestry is already in the target')
     .action((taskId: string) => invoke('project', taskId));
 }
