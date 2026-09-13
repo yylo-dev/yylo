@@ -7021,8 +7021,10 @@ def _wall_recovery_runtime_identity(controller: Path, plan: dict[str, Any],
             controller, "task-run", plan["task_id"], model_identity=plan.get("model_identity"))
     except lifecycle_runtime.LifecycleContractError as exc:
         raise TaskWorkspaceError("wall-budget recovery runtime/policy identity drifted") from exc
+    # Controller checkpoints change HEAD, not the frozen executable policy.
+    # The execution digest excludes only checkpoint/compiled-plan identity;
+    # prompts, templates, model, budgets and compiler bytes remain exact.
     if (_task_plan_execution_identity(current) != journal.get("execution_identity_sha256")
-            or current.get("controller_commit") != plan.get("controller_commit")
             or current.get("template") != plan.get("template")
             or current.get("budgets") != plan.get("budgets")
             or current.get("runtime_sha256") != plan.get("runtime_sha256")):
