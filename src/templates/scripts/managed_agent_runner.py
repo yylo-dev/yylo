@@ -539,13 +539,44 @@ def metadata_controller_policy_identity(root: Path, branch_ref: str) -> dict[str
             "controller_branch": str(policy["controller_branch"])}
 
 
-def controller_identity(root: Path) -> dict[str, Any]:
+def worker_metadata_identity(root: Path, task_id: str) -> dict[str, str]:
+    """Bind admission-written metadata, never waive executable/config dirt."""
+    if not task_id.isascii() or not task_id.isalnum() or len(task_id) > 64:
+        raise RunnerError("invalid worker task identity")
+    if git(root, "diff", "--cached", "--name-only"):
+        raise RunnerError("staged controller changes refuse worker admission")
+    paths = set(filter(None, (git(root, "diff", "--name-only", "-z") + "\0" +
+                             git(root, "ls-files", "--others", "--exclude-standard", "-z")).split("\0")))
+    prefix = task_id[:2].lower()
+    exact = {".juno_task/state/tasks.json", f".juno_task/tasks/{prefix}/{task_id}.md"}
+    ledger = f".juno_task/ledger/{prefix}/{task_id}/"
+    identities = {}
+    total = 0
+    for relative in sorted(paths):
+        path = root / relative
+        if (relative not in exact and not (relative.startswith(ledger)
+                and relative[len(ledger):].endswith(".ndjson")
+                and "/" not in relative[len(ledger):])):
+            raise RunnerError("unrelated controller changes refuse worker admission")
+        if (not path.is_file() or path.is_symlink()
+                or path.resolve() != path.absolute()):
+            raise RunnerError("worker metadata must be an existing regular file without symlinks")
+        total += path.stat().st_size
+        if total > 25 * 1024 * 1024:
+            raise RunnerError("worker metadata exceeds snapshot budget")
+        identities[relative] = sha(path.read_bytes())
+    return identities
+
+
+def controller_identity(root: Path, *, worker_task_id: str | None = None) -> dict[str, Any]:
     mark: dict[str, Any] = fingerprint(root)
     config = root / ".juno_task/config.json"
     if not config.is_file():
         raise RunnerError("controller is missing its config or is dirty")
     if mark["status"]:
-        raise RunnerError("controller is missing its config or is dirty")
+        if worker_task_id is None:
+            raise RunnerError("controller is missing its config or is dirty")
+        mark["worker_metadata_sha256"] = worker_metadata_identity(root, worker_task_id)
     mark["config_sha256"] = sha(config.read_bytes())
     resolver = root / ".juno_task/scripts/controller_resolver.py"
     if resolver.is_file():
@@ -1237,7 +1268,8 @@ def run(args: argparse.Namespace) -> int:
     }
     out = safe_out_dir(Path(args.out_dir)); metadata = out / "session_metadata"; metadata.mkdir(exist_ok=True)
     controller_root = Path(args.controller_root).resolve()
-    controller_before = controller_identity(controller_root)
+    worker_task_id = args.task_id if args.mode == "worker" else None
+    controller_before = controller_identity(controller_root, worker_task_id=worker_task_id)
     expected_branch = args.controller_branch if args.controller_branch.startswith("refs/") else "refs/heads/" + args.controller_branch
     if controller_before["branch_ref"] != expected_branch:
         raise RunnerError("controller branch identity mismatch")
@@ -1380,7 +1412,7 @@ def run(args: argparse.Namespace) -> int:
             "identity_sha256": sha(canonical(identity).rstrip(b"\n")),
             "response_sha256": sha(response_path.read_bytes()),
         }
-        controller_after = controller_identity(controller_root)
+        controller_after = controller_identity(controller_root, worker_task_id=worker_task_id)
         verify_compatible_config(compatible_config)
         if controller_after != controller_before:
             raise RunnerError("controller mutated during managed launch")
