@@ -5489,6 +5489,11 @@ steps:
             historical_deadline = journal["deadline_unix_ns"]
             historical_events = json.loads(json.dumps(journal["events"]))
 
+            # Ordinary controller checkpoints must not invalidate the frozen
+            # execution policy or consume the no-provider recovery allowance.
+            git(self.controller, "add", ".")
+            git(self.controller, "commit", "--allow-empty", "-m", "metadata checkpoint")
+
             # Every caller-provided identity is exact and refusal is mutation-free.
             refusals = [
                 (2, receipt_sha, deadline, "unsafe wall-budget recovery identity"),
