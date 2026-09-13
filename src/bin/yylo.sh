@@ -298,16 +298,26 @@ route_registered_product_control() {
     role="$(printf '%s\n' "$fields" | sed -n '3p')"
     branch="$(printf '%s\n' "$fields" | sed -n '4p')"
     source="$(printf '%s\n' "$fields" | sed -n '5p')"
-    [ "$controller" != "$invocation" ] || return 1
-    case "$role" in task|integration-owner) ;; *)
-        echo "yylo: control-plane routing refused persisted workspace role '$role'; run yy doctor workspace" >&2
-        return 2 ;;
-    esac
+    if [ "$controller" = "$invocation" ]; then
+        case "$role" in controller) ;; *)
+            echo "yylo: control-plane routing refused persisted workspace role '$role'; run yy doctor workspace" >&2
+            return 2 ;;
+        esac
+    else
+        case "$role" in task|integration-owner) ;; *)
+            echo "yylo: control-plane routing refused persisted workspace role '$role'; run yy doctor workspace" >&2
+            return 2 ;;
+        esac
+    fi
     runtime="$(git -C "$controller" config --worktree --get juno.controller.runtimeExecutable 2>/dev/null || true)"
     if [ -z "$runtime" ] || [ ! -f "$runtime" ]; then
         echo "yylo: registered controller runtime is missing or stale; run yy doctor workspace from '$invocation'" >&2
         return 2
     fi
+    # A selected runtime's own wrapper must continue locally rather than route
+    # back to its adjacent entrypoint forever. Older public launchers, including
+    # a controller-local invocation, delegate to the receipt-bound runtime.
+    [ "$runtime" -ef "$CLI_ENTRYPOINT" ] && return 1
     require_compatible_node || return $?
     local launcher_version runtime_version
     if grep -q 'YYLO_PREFLIGHT_ONLY' "$CLI_ENTRYPOINT" 2>/dev/null; then
@@ -408,9 +418,20 @@ process.stdout.write(JSON.stringify({schema_version:"juno_execution_envelope.v1"
 }
 
 main() {
-    # Help is terminal discovery. Hand it directly to the packaged Commander
-    # surface before lifecycle recording, routing, or project bootstrap.
+    # Control-plane help is runtime discovery, so it must use the controller's
+    # selected executable too. This deliberately happens before lifecycle
+    # recording and preserves terminal help semantics.
     if requests_help "$@"; then
+        if classify_prebootstrap_command "$@"; then
+            ROUTED_COMMAND_STATUS=""
+            route_registered_product_control "$PREBOOTSTRAP_COMMAND" "$@" || {
+                local status=$?
+                [ "$status" -eq 1 ] || return "$status"
+            }
+            if [ -n "$ROUTED_COMMAND_STATUS" ]; then
+                return "$ROUTED_COMMAND_STATUS"
+            fi
+        fi
         require_compatible_node || return $?
         if grep -q 'YYLO_HELP_PREFLIGHT_ONLY' "$CLI_ENTRYPOINT" 2>/dev/null; then
             local help_status=0
