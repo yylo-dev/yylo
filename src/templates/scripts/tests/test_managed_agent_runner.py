@@ -182,6 +182,31 @@ print(json.dumps({'path':str(pathlib.Path.cwd().resolve()),'role':'controller',
         with self.assertRaisesRegex(runner.RunnerError, "controller is missing"):
             runner.controller_identity(self.controller)
 
+    def test_worker_metadata_admission_binds_bytes_without_checkpoint(self):
+        state = self.controller / ".juno_task/state/tasks.json"
+        state.write_text('{"task":"working"}\n')
+        before = runner.controller_identity(self.controller, worker_task_id="TASK")
+        self.assertEqual(before["worker_metadata_sha256"][".juno_task/state/tasks.json"],
+                         runner.sha(state.read_bytes()))
+        self.assertEqual(before, runner.controller_identity(self.controller, worker_task_id="TASK"))
+        state.write_text('{"task":"changed"}\n')
+        self.assertNotEqual(before, runner.controller_identity(self.controller, worker_task_id="TASK"))
+        with self.assertRaises(runner.RunnerError):
+            runner.controller_identity(self.controller)
+
+    def test_worker_metadata_admission_refuses_unrelated_and_staged_changes(self):
+        config = self.controller / ".juno_task/config.json"
+        original = config.read_bytes()
+        config.write_text('{}\n')
+        with self.assertRaisesRegex(runner.RunnerError, "unrelated"):
+            runner.controller_identity(self.controller, worker_task_id="TASK")
+        config.write_bytes(original)
+        state = self.controller / ".juno_task/state/tasks.json"
+        state.write_text('{"task":"working"}\n')
+        git(self.controller, "add", str(state))
+        with self.assertRaisesRegex(runner.RunnerError, "staged"):
+            runner.controller_identity(self.controller, worker_task_id="TASK")
+
     def test_resolver_policy_requires_clean_success(self):
         passed = subprocess.CompletedProcess([], 0, "", "")
         resolved = {"valid": True, "diagnostics": []}
@@ -1018,6 +1043,9 @@ print(json.dumps({'path':str(pathlib.Path.cwd().resolve()),'role':'controller',
         self.assertFalse(marker.exists())
 
     def test_worker_admission_and_changed_path_authority(self):
+        state = self.controller / ".juno_task/state/tasks.json"
+        state.write_text('{"T1":"WORKING"}\n')
+        before_bytes = state.read_bytes()
         common = str((self.candidate / git(self.candidate, "rev-parse", "--git-common-dir")).resolve())
         create = {"task_id":"T1", "worktree":str(self.candidate), "branch_ref":"refs/heads/task", "git_common_dir":common,
                   "expected_paths":["allowed.txt"], "workspace_manifest_identity":"m"}
@@ -1032,6 +1060,9 @@ print(json.dumps({'path':str(pathlib.Path.cwd().resolve()),'role':'controller',
         environment = receipt["environment_contract"]
         self.assertEqual(environment["workspace_role"], "task")
         self.assertIsNone(environment["worker_admission_kind"])
+        self.assertEqual(state.read_bytes(), before_bytes)
+        self.assertEqual(receipt["controller_before"], receipt["controller_after"])
+        self.assertIn("worker_metadata_sha256", receipt["controller_before"])
 
     def test_run_recovers_missing_worker_capture_after_exact_settlement(self):
         common = str((self.candidate / git(
