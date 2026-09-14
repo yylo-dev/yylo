@@ -1,5 +1,43 @@
 # YYLO release notes
 
+## 0.2.3-rc.3
+
+Companion package: `@yylo/benchmark@0.1.1-rc.2`.
+
+Comparison baseline: published `@yylo/cli@0.2.3-rc.2`. This candidate contains
+the integrated CLI changes that landed after rc.2 while retaining the exact,
+already-published Benchmark companion artifact.
+
+### Issues and capabilities to verify
+
+- **Native Git delivery replaces the retired merge queue.** Task state
+  transitions, integration routing, and installed templates now use the
+  Git-native delivery contract and retain compatibility aliases only at the
+  public routing boundary.
+- **Machine output is versioned and deterministic.** CLI execution can emit the
+  public execution envelope, with package and binary tests covering stable
+  machine-readable behavior.
+- **Runtime source adoption is bound and atomic.** Controller generation
+  adoption validates ownership and executes through the registered runtime
+  instead of silently mixing source and installed generations.
+- **Workspace completion monitoring is available.** The CLI includes the
+  integrated tmux workspace commands and completion monitoring behavior.
+- **Ledger 0.3.1 is the exact supported runtime.** Delegation, managed toolchain
+  policy, documentation, and package tests agree on stable `yylo-ledger 0.3.1`
+  and its native Record surfaces.
+- **Managed controller metadata is admission-bound.** Runner updates preserve
+  and verify metadata written during task admission before managed execution.
+
+### Candidate acceptance checklist
+
+- CLI tests, typecheck, build, managed-asset checks, and packed-install smoke
+  pass from the protected integration target on Node 22.
+- The packed CLI artifact is published as `@yylo/cli@0.2.3-rc.3` under `next`;
+  the unchanged Benchmark artifact remains exactly
+  `@yylo/benchmark@0.1.1-rc.2`.
+- Fresh-prefix runtime installation and controller rebind verify the exact npm
+  integrity and installed executable identity.
+
 ## 0.2.3-rc.2 (local candidate)
 
 Companion package: `@yylo/benchmark@0.1.1-rc.2`.
