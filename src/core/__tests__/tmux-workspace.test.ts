@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -115,7 +115,7 @@ describe('TmuxWorkspace', () => {
     const window = gateway.createWindow('safe', 'API fixes', os.tmpdir(), true);
     expect(window.name).toBe('API fixes');
     expect(fake.calls).toContainEqual(
-      expect.arrayContaining(['new-window', '-n', 'API fixes', '-c', os.tmpdir()]),
+      expect.arrayContaining(['new-window', '-n', 'API fixes', '-c', realpathSync(os.tmpdir())]),
     );
     expect(fake.calls).toContainEqual(['select-window', '-t', '@2']);
     expect(() => gateway.createWindow('safe', 'API fixes', os.tmpdir())).toThrow('already exists');
