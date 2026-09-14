@@ -1,0 +1,233 @@
+{
+  "schemaVersion": 1,
+  "packageId": "yylo",
+  "sourceVersion": "0.2.3-rc.2",
+  "evidenceDate": "2026-09-14",
+  "prerequisites": "Node.js 20.10+, npm, Git; install your chosen coding agent and configure provider credentials separately.",
+  "releases": [
+    {
+      "version": "0.2.2",
+      "url": "https://registry.npmjs.org/@yylo/cli/-/cli-0.2.2.tgz",
+      "integrity": "sha512-Lp9efAhOfH/Ni4Axl6RPUNzn4/1Qj/VcTtxEF29lUr8tGiDsb1ZtGw26R8b1nfelOXsOei7IygQo0LUrb6GE3g==",
+      "readmeSha256": "2e827a7b8fd48ce3385b72902692b8748fafaac0050e22adfbbf436c1d73213f"
+    },
+    {
+      "version": "0.2.3-rc.3",
+      "url": "https://registry.npmjs.org/@yylo/cli/-/cli-0.2.3-rc.3.tgz",
+      "integrity": "sha512-6+dF/oqXEeB7UHQQUXMPqiOabdM+OLggk2IdggUiQum3j76UlvxQBzbVv3kmeInviZcmbEyz46ZJorkXXibzgw==",
+      "readmeSha256": "2c245dc6f265ec69987f56efe2bf2368f15aca61794cecfd8007aef7b1552d82"
+    }
+  ],
+  "capabilities": [
+    {
+      "id": "first-run",
+      "title": "First run",
+      "summary": "Run one small, verifiable change with your chosen coding agent.",
+      "details": [
+        "The yy and yylo launchers are equivalent. Initialize a project, inspect local workspace health, then deliberately choose whether to contact a provider.",
+        "Agent invocations can use paid providers. Start with a read-only question; keep prompts in files when they contain shell-sensitive text."
+      ],
+      "commands": [
+        "yy --version\nyy --help\nyy info --json",
+        "yy pi --no-session 'Summarize this repository. Do not edit files.'"
+      ],
+      "boundary": "Provider authentication and model availability belong to the agent, not YYLO.",
+      "sourceFiles": [
+        "README.md"
+      ],
+      "verifiedReleases": [
+        "0.2.2",
+        "0.2.3-rc.3"
+      ],
+      "releaseEvidence": "README sections matching this capability, inspected in the hash-bound published archive."
+    },
+    {
+      "id": "loop",
+      "title": "Bounded command loops",
+      "summary": "Repeat a short sequence without hiding its stop conditions.",
+      "details": [
+        "The outer loop uses -n/--iterations; -i/--max-iterations bounds work inside one agent invocation. Commands remain literal and sequential.",
+        "Reusable YAML can declare iterations, continuity, on_error and ordered run steps. Choose failure behavior deliberately."
+      ],
+      "commands": [
+        "yy loop -n 2 --step 'yy pi \"Implement one verified increment\"' --step 'npm test'"
+      ],
+      "boundary": "Iteration limits do not grant spending, integration or production authority.",
+      "sourceFiles": [
+        "README.md"
+      ],
+      "verifiedReleases": [
+        "0.2.2",
+        "0.2.3-rc.3"
+      ],
+      "releaseEvidence": "README sections matching this capability, inspected in the hash-bound published archive."
+    },
+    {
+      "id": "sessions",
+      "title": "Sessions and models",
+      "summary": "Continue work without reconstructing it from terminal scrollback.",
+      "details": [
+        "Use continue, clone, branches, switch and continuity for explicit session context. Model aliases are agent-specific; inspect installed help rather than assuming the same alias across agents."
+      ],
+      "commands": [
+        "yy pi --help\nyy continue --help\nyy continuity --help"
+      ],
+      "boundary": "Provider sessions and project task state are different sources of truth.",
+      "sourceFiles": [
+        "README.md"
+      ],
+      "verifiedReleases": [
+        "0.2.2",
+        "0.2.3-rc.3"
+      ],
+      "releaseEvidence": "README sections matching this capability, inspected in the hash-bound published archive."
+    },
+    {
+      "id": "watch",
+      "title": "Observe commands and validation",
+      "summary": "Retain bounded command output and exact-input validation evidence.",
+      "details": [
+        "Watch records local command execution; status and await inspect its retained terminal state. Use the ID printed by exec.",
+        "Task evidence commands retain validation against exact inputs. Producing evidence does not finish or merge a task."
+      ],
+      "commands": [
+        "yy watch exec pwd\n# Use the printed run ID\nyy watch status RUN_ID\nyy watch await RUN_ID",
+        "yy evidence run TASK_ID\nyy evidence status TASK_ID"
+      ],
+      "boundary": "Observation does not acquire lifecycle ownership.",
+      "sourceFiles": [
+        "README.md"
+      ],
+      "verifiedReleases": [
+        "0.2.2",
+        "0.2.3-rc.3"
+      ],
+      "releaseEvidence": "README sections matching this capability, inspected in the hash-bound published archive."
+    },
+    {
+      "id": "lifecycle",
+      "title": "Task lifecycle and native Git delivery",
+      "summary": "Start a task worktree, validate a clean commit, then land exactly that task.",
+      "details": [
+        "Run lifecycle commands from the registered metadata controller: the checkout owning task state. Implementation belongs in the feature worktree printed by task start, never the protected integration checkout.",
+        "Start freezes the target and completes configured dependency hydration. Preflight is read-only; finish queues a clean committed candidate. The target owner separately runs land.",
+        "Native merge performs no model calls, reviewer selection or test scheduling. Tests and reviews are explicit project checks. A moved target requires recomposition; preserve conflicts and dirty files.",
+        "Git integration and Ledger projection are separate. Successful land attempts projection automatically; use project only to retry a failed or stale projection, not to repeat integration.",
+        "Stable 0.2.2 uses the earlier merge-queue surface. Do not run the native commands below on that version; inspect installed help or intentionally install the verified prerelease."
+      ],
+      "commands": [
+        "yy task start TASK_ID\n# Enter the returned worktree, implement, test and commit.\n# Return to the controller.\nyy task preflight TASK_ID\nyy task finish TASK_ID\nyy merge status TASK_ID\n# Target owner only:\nyy merge land TASK_ID"
+      ],
+      "boundary": "Push, deployment, package publication and cleanup require separate authorization.",
+      "sourceFiles": [
+        "README.md"
+      ],
+      "verifiedReleases": [
+        "0.2.3-rc.3"
+      ],
+      "releaseEvidence": "README sections matching this capability, inspected in the hash-bound published archive."
+    },
+    {
+      "id": "machine-output",
+      "title": "Versioned machine output",
+      "summary": "Read strict JSON or NDJSON rather than parsing terminal prose.",
+      "details": [
+        "Task, merge and integration commands support --format json|ndjson --raw. Capabilities publishes command-specific projections. Ledger independently supports -f json|ndjson --raw."
+      ],
+      "commands": [
+        "yy capabilities --format json --raw\nyy merge --format json --raw status"
+      ],
+      "boundary": "Consumers must inspect schema and projection versions; stdout data is distinct from diagnostics.",
+      "sourceFiles": [
+        "README.md",
+        "docs/machine-output.md"
+      ],
+      "verifiedReleases": [
+        "0.2.3-rc.3"
+      ],
+      "releaseEvidence": "README sections matching this capability, inspected in the hash-bound published archive."
+    },
+    {
+      "id": "skills",
+      "title": "Install agent skills",
+      "summary": "Install the independent seven-skill package explicitly.",
+      "details": [
+        "YYLO stages acquisition, validates the selected skill tree and copies it to Claude, Codex and Pi locations. Differing or customized local skills are preserved unless replacement is explicitly authorized.",
+        "Install and update use the network; list and status are local reads. There is no silent skill refresh during ordinary product commands."
+      ],
+      "commands": [
+        "yy skills install\nyy skills status"
+      ],
+      "boundary": "Skill instructions are not bundled runtime behavior. Review the selected version before installation.",
+      "sourceFiles": [
+        "README.md"
+      ],
+      "verifiedReleases": [
+        "0.2.3-rc.3"
+      ],
+      "releaseEvidence": "README sections matching this capability, inspected in the hash-bound published archive."
+    },
+    {
+      "id": "tmux",
+      "title": "Tmux workspaces",
+      "summary": "Organize local agent terminals and inspect workspace completion state.",
+      "details": [
+        "The source tree contains session, window, unread and monitor commands. Documentation of their availability is deliberately separate from the package version number.",
+        "Inspect the installed command before use. A source checkout does not prove this surface exists in a published artifact."
+      ],
+      "commands": [
+        "yy tmux --help"
+      ],
+      "boundary": "Source-only evidence: no published capability claim is made for tmux here.",
+      "sourceFiles": [
+        "src/cli/commands/tmux.ts",
+        "src/cli/__tests__/tmux-command.test.ts"
+      ],
+      "verifiedReleases": [],
+      "releaseEvidence": "Source command and tests inspected; no published-artifact verification."
+    },
+    {
+      "id": "scripts",
+      "title": "Managed scripts and workflows",
+      "summary": "Use parallel execution for independent work and workflows for ordered steps.",
+      "details": [
+        "Fresh initialization installs managed scripts. Scripts update preserves customized files and reports conflicts; do not force replacement casually.",
+        "Workflow Runner retains rendered commands, stdout, stderr, responses, session IDs and manifests. Lint and dry-run a reviewed workflow before execution.",
+        "Parallel Runner caps fan-out; dependencies must remain explicit. Its per-item JSON and aggregation files are stronger evidence than terminal scrollback."
+      ],
+      "commands": [
+        "yy scripts update\n./.juno_task/scripts/workflow_runner.sh lint --workflow workflow.yaml\n./.juno_task/scripts/workflow_runner.sh --workflow workflow.yaml --dry-run"
+      ],
+      "boundary": "Workflow storage in Ledger is separate from execution by a runner.",
+      "sourceFiles": [
+        "README.md"
+      ],
+      "verifiedReleases": [
+        "0.2.2",
+        "0.2.3-rc.3"
+      ],
+      "releaseEvidence": "README sections matching this capability, inspected in the hash-bound published archive."
+    },
+    {
+      "id": "delegates",
+      "title": "Independent packages and compatibility",
+      "summary": "Use standalone Ledger and Benchmark, or compatible YYLO delegates.",
+      "details": [
+        "Install all packages independently. Delegation preserves the canonical package command surface; it is not a bundled implementation.",
+        "Exact compatibility policies vary by CLI version. Stable CLI 0.2.2 and latest stable Ledger need not be compatible: use standalone yylo-ledger or a verified compatible CLI prerelease. Check installed diagnostics rather than mixing versions blindly."
+      ],
+      "commands": [
+        "yy ledger --help\nyy benchmark --help\nyy doctor workspace"
+      ],
+      "boundary": "Current CLI source admits Ledger 0.3.1; this does not retroactively change older CLI releases.",
+      "sourceFiles": [
+        "README.md"
+      ],
+      "verifiedReleases": [
+        "0.2.2",
+        "0.2.3-rc.3"
+      ],
+      "releaseEvidence": "README sections matching this capability, inspected in the hash-bound published archive."
+    }
+  ]
+}
