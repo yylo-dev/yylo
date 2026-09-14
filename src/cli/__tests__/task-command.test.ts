@@ -170,6 +170,21 @@ describe('task workspace CLI', () => {
     ]);
   });
 
+  it('documents token-bearing manual recovery separately from managed execution', async () => {
+    const program = new Command().exitOverride();
+    let help = '';
+    program.configureOutput({ writeOut: (text) => { help += text; } });
+    configureTaskWorkspaceCommand(program, async () => undefined);
+    await expect(program.parseAsync(['node', 'yy', 'task', 'lease-successor', '--help']))
+      .rejects.toMatchObject({ code: 'commander.helpDisplayed' });
+    expect(help).toContain('yy task start TASK_ID --lease-token <returned-token>');
+    expect(help).toContain('remains valid after this helper exits');
+    expect(help).toContain('do not repeat successor');
+    expect(help).toContain('yy task run TASK_ID (or resume)');
+    expect(help).toContain('lifecycle blockers and budgets still apply');
+    expect(help).toContain('never include them in logs or task evidence');
+  });
+
   it('forwards the fencing lease token and lease command arguments exactly', async () => {
     const invoke = vi.fn(async () => undefined);
     const program = new Command().exitOverride().configureOutput({ writeOut: () => undefined });
@@ -187,6 +202,8 @@ describe('task workspace CLI', () => {
     ]);
     await program.parseAsync(['node', 'yy', 'task', 'finish', 'T1']);
     expect(invoke).toHaveBeenLastCalledWith('finish', 'T1', [], []);
+    await program.parseAsync(['node', 'yy', 'task', 'finish', 'T1', '--lease-token', 'tok-1']);
+    expect(invoke).toHaveBeenLastCalledWith('finish', 'T1', [], ['--lease-token', 'tok-1']);
     await program.parseAsync(['node', 'yy', 'task', 'lease-heartbeat', 'T1',
       '--lease-token', 'tok-1']);
     expect(invoke).toHaveBeenLastCalledWith('lease-heartbeat', 'T1', [], ['--lease-token', 'tok-1']);
