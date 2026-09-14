@@ -594,6 +594,18 @@ class LeaseAuthorityTables(unittest.TestCase):
         self.assertFalse(stale.admitted)
         self.assertEqual(stale.code, decisions.LEASE_CODE_FENCE_STALE)
 
+    def test_token_authority_is_independent_of_helper_liveness(self) -> None:
+        for status in ("alive", "dead", "unknown"):
+            with self.subTest(status=status):
+                observation = decisions.LeaseObservation(status, "fixture")
+                valid = self.run_authority(self.lease(), "digest-a", observation)
+                self.assertTrue(valid.admitted)
+                self.assertEqual(valid.authority, "token")
+                stale = self.run_authority(self.lease(), "digest-b", observation)
+                self.assertFalse(stale.admitted)
+                self.assertEqual(stale.code, decisions.LEASE_CODE_FENCE_STALE)
+                self.assertIn("--lease-token <returned-token>", stale.message)
+
     def test_same_pid_live_producer_continuity_admits_only_process_leases(self) -> None:
         decision = self.run_authority(
             self.lease(), None, decisions.LeaseObservation("alive", "pid live"), pid=4242)
@@ -611,6 +623,12 @@ class LeaseAuthorityTables(unittest.TestCase):
         self.assertFalse(dead.admitted)
         self.assertEqual(dead.code, decisions.LEASE_CODE_PRODUCER_DEAD)
         self.assertIn("lease-successor", dead.message)
+        self.assertIn("--lease-token <current-token>", dead.message)
+        self.assertIn("--lease-token <returned-token>", dead.message)
+        self.assertIn("do not repeat successor", dead.message)
+        self.assertIn("yy task run T1", dead.message)
+        self.assertIn("yy task resume T1", dead.message)
+        self.assertIn("blockers and budgets still apply", dead.message)
         unknown = self.run_authority(
             self.lease(), None, decisions.LeaseObservation("unknown", "ps failed"))
         self.assertFalse(unknown.admitted)

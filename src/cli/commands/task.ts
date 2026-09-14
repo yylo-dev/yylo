@@ -188,12 +188,12 @@ export function configureTaskWorkspaceCommand(
     .description('Create, inspect, and queue one exact-base feature worktree'));
   task
     .command('run')
-    .description('Execute the controller-owned typed task workflow through QUEUED')
+    .description('Execute the managed workflow through QUEUED; acquires its own fence without --lease-token')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
     .action((taskId: string) => invoke('run', taskId, []));
   task
     .command('resume')
-    .description('Resume through the existing fenced task-run owner from the earliest verified stage')
+    .description('Resume managed task run with its own fence; existing blockers and budgets still apply')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
     .action((taskId: string) => invoke('resume', taskId, []));
   task
@@ -225,6 +225,7 @@ export function configureTaskWorkspaceCommand(
     ]));
   task
     .command('start')
+    .description('Start a hydrated worktree; retain the returned token for later manual gated commands')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
     .option('--path <path>', 'Exact authored file (including one policy-declared new file) or selectable product root; repeat for exact scope', (value, values: string[]) => [...values, value], [])
     .option('--lease-token <token>', 'Current fencing lease token for this gated mutation')
@@ -303,8 +304,9 @@ export function configureTaskWorkspaceCommand(
       ],
     ));
   task.command('lease-successor')
-    .description('Issue the next fencing attempt after proven predecessor termination')
+    .description('Issue one successor token; retry manual gated commands with --lease-token <returned-token>')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
+    .addHelpText('after', '\nThe returned token remains valid after this helper exits until superseded or terminated.\nAt the unchanged clean base: yy task start TASK_ID --lease-token <returned-token>\nUse that token for later manual gated commands, including finish; do not repeat successor.\nFor authorized managed execution instead: yy task run TASK_ID (or resume).\nManaged execution is not read-only recovery; lifecycle blockers and budgets still apply.\nKeep tokens private; never include them in logs or task evidence.\n')
     .option('--handoff-receipt <file>', 'Exact handoff receipt consumed by this successor')
     .action((taskId: string, options: { handoffReceipt?: string }) => invoke(
       'lease-successor', taskId, [],

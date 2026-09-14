@@ -5,8 +5,6 @@ wiki_contract:
   failure_mode_prevented: "Controller edits, stale-worker takeover, FIFO blocking, hidden model review, and unsafe target movement."
   runtime_contract_enforced: "yy task owns feature worktrees; yy merge selects one task, uses native Git composition and expected-old ref update, then projects Ledger separately."
   validation_gate: "python3 .juno_task/scripts/tests/test_task_workspace.py && python3 .juno_task/scripts/tests/test_merge_queue.py"
-  related_sots:
-    - "controller/fenced_task_leases.md"
 ---
 
 # Task worktrees and native Git delivery
@@ -31,7 +29,7 @@ yy task start TASK_ID
 yy task status TASK_ID
 yy task admission TASK_ID
 yy task preflight TASK_ID
-yy task finish TASK_ID
+yy task finish TASK_ID --lease-token <current-token>
 
 yy merge status [TASK_ID]       # read-only independent task status
 yy merge land TASK_ID           # compose and land one task; no tests/reviews/models
@@ -63,6 +61,50 @@ integration, and never
 blocks another task's land. Historical queue, review, candidate, and CAS receipts
 remain immutable data; no supported command executes or resumes their retired
 engine.
+
+## Manual tokens and managed recovery
+
+`start` and `lease-successor` return a `lease_token` once. Store it privately;
+never paste it into task evidence, logs, or shell history. The placeholders below
+mean the exact token from that command's response, not literal argument text.
+
+```text
+yy task start TASK_ID
+# retain its returned token, then implement/test/commit in the returned worktree
+yy task preflight TASK_ID
+yy task finish TASK_ID --lease-token <returned-token>
+```
+
+A helper's exit does not invalidate its token. An ACTIVE attempt's exact current
+token admits manual gated commands even if `lease-status` reports
+`lease_producer_dead`. Status observes without a token; it does not test bearer
+authority. Reuse your current token rather than issuing another successor.
+
+If the token is lost and the controller proves the predecessor ended:
+
+```text
+yy task lease-successor TASK_ID
+# retain the NEW returned token; at the unchanged clean base:
+yy task start TASK_ID --lease-token <returned-token>
+# pass that same token to subsequent gated commands, such as finish
+```
+
+After edits or commits, retry the original gated command with the new token,
+not `start`: start reentry independently requires the unchanged clean base.
+Bare `lease-successor` followed by tokenless `start` is not a supported manual
+sequence. `clean_resume` describes worktree bytes, not hydration/validation
+clearance. Wrong or superseded tokens refuse; expiry alone grants no takeover.
+Live or unknown producers require the current token, an exact holder handoff
+(`lease-successor --handoff-receipt <path>`), or separately authorized operator
+revoke. Never infer that authority from an error's suggested command.
+
+For **authorized managed execution**, use `yy task run TASK_ID` or its alias
+`yy task resume TASK_ID` instead. The continuing managed process acquires a
+receipt-bound successor after proven predecessor death and carries the token
+internally; no user-supplied token is needed. This may launch workers, not just
+repair ownership. Existing terminal-run, hydration, dirty-worktree, identity,
+and budget restrictions still apply; neither command resets budgets or repairs
+unrelated blockers. Do not run standalone successor first for managed execution.
 
 ## Runtime and controller recovery
 
