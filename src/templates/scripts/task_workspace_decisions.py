@@ -734,7 +734,7 @@ def plan_lease_authority(command: str, task_id: str, lease: Any,
        continuity (in-process workers and scenario suites).
 
     Everything else fails closed with one actionable code: a provably dead
-    producer names the successor command; a wrong token is a stale fence; an
+    producer names token-bearing recovery; a wrong token is a stale fence; an
     unrelated live or unprovable producer demands token/handoff/revoke.
     """
     if not isinstance(lease, dict) or lease.get("state") != LEASE_ACTIVE:
@@ -759,14 +759,20 @@ def plan_lease_authority(command: str, task_id: str, lease: Any,
         return _lease_refusal(
             command, task_id, LEASE_CODE_FENCE_STALE,
             f"task {task_id} fencing token is stale for attempt {lease.get('attempt')}; "
-            "obtain the current token from its holder, an explicit handoff, or "
-            f"yy task lease-successor {task_id}")
+            "obtain the current token from its holder; if the predecessor is proven ended, "
+            f"run yy task lease-successor {task_id} once and retry the original gated "
+            "command with --lease-token <returned-token>")
     if observation.status == "dead":
         return _lease_refusal(
             command, task_id, LEASE_CODE_PRODUCER_DEAD,
             f"task {task_id} holds fencing attempt {lease.get('attempt')} whose producer is "
-            f"provably ended ({observation.detail}); obtain a receipt-bound successor with: "
-            f"yy task lease-successor {task_id}")
+            f"provably ended ({observation.detail}); its current token still admits manual "
+            "gated commands: retry with --lease-token <current-token>. If the token is lost, "
+            f"run yy task lease-successor {task_id} once, then retry the original gated "
+            "command with --lease-token <returned-token>; do not repeat successor when "
+            "you have its token. For authorized managed execution instead, "
+            f"yy task run {task_id} (or yy task resume {task_id}) acquires its own fence; "
+            "existing lifecycle blockers and budgets still apply")
     if observation.status == "alive":
         return _lease_refusal(
             command, task_id, LEASE_CODE_PRODUCER_MISMATCH,
@@ -777,8 +783,9 @@ def plan_lease_authority(command: str, task_id: str, lease: Any,
         command, task_id, LEASE_CODE_TOKEN_REQUIRED,
         f"task {task_id} holds fencing attempt {lease.get('attempt')} whose producer cannot be "
         f"proven ended ({observation.detail}); present the current --lease-token, obtain an "
-        f"explicit handoff, or recover with: yy task lease-revoke {task_id} --reason <why> && "
-        f"yy task lease-successor {task_id}")
+        f"explicit handoff, or request operator-authorized yy task lease-revoke {task_id} "
+        f"--reason <why>, then yy task lease-successor {task_id} once and retry the "
+        "original gated command with --lease-token <returned-token>")
 
 
 @dataclass(frozen=True)

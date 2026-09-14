@@ -6840,6 +6840,116 @@ class TaskFencingLeaseTests(TaskWorkspaceFixture):
         self.assertEqual((again["outcome"], self.fencing_record("X")["state"]),
                          ("already_queued", "RELEASED"))
 
+    def test_explicit_tokens_survive_start_and_successor_cli_exit(self) -> None:
+        # Deliberately bypass command()/payload(): they silently cache tokens.
+        def cli(operation: str, token: Optional[str] = None):
+            return run([sys.executable, str(SCRIPT), operation, "--task", "X",
+                        "--controller", str(self.controller),
+                        *(["--lease-token", token] if token else [])],
+                       self.controller, False)
+
+        def snapshot():
+            roots = [self.lease_root("X"), self.controller / task_runtime.TASK_RUN_ROOT]
+            return (task_runtime.read_state(self.controller),
+                    {str(path): path.read_bytes() for root in roots
+                     for path in root.rglob("*") if path.is_file()})
+
+        issued = cli("start")
+        self.assertEqual(issued.returncode, 0, issued.stderr)
+        started = json.loads(issued.stdout)
+        old_token = started["lease_token"]
+        self.assertIn("--lease-token <returned-token>", started["lease_note"])
+        for issuance in (started, None):
+            if issuance is None:
+                before_receipts = snapshot()[1]
+                issued = cli("lease-successor")
+                self.assertEqual(issued.returncode, 0, issued.stderr)
+                issuance = json.loads(issued.stdout)
+                self.assertIn("--lease-token <returned-token>", issuance["note"])
+                self.assertIn("do not repeat successor", issuance["note"])
+                for path, data in before_receipts.items():
+                    self.assertEqual(Path(path).read_bytes(), data)
+            token = issuance["lease_token"]
+            observation = cli("lease-status")
+            self.assertEqual(observation.returncode, 0, observation.stderr)
+            observed = json.loads(observation.stdout)
+            self.assertEqual(observed["producer_observation"]["status"], "dead")
+            self.assertIn("without a token", observed["mutation_authority"]["note"])
+            continued = cli("start", token)
+            self.assertEqual(continued.returncode, 0, continued.stderr)
+            self.assertEqual(json.loads(continued.stdout)["outcome"], "already_started")
+            dirt = self.workspaces / "X/src/private.txt"
+            if issuance is not started:
+                dirt.write_bytes(b"preserve dirty bytes\x00\n")
+            before = snapshot()
+            for bad_token, code in ((None, "lease_producer_dead"),
+                                    ("wrong-token", "lease_fence_stale")):
+                refused = cli("start", bad_token)
+                self.assertEqual(refused.returncode, 2)
+                self.assertIn(code, refused.stderr)
+                self.assertIn("--lease-token <returned-token>", refused.stderr)
+                self.assertNotIn(token, refused.stderr)
+                self.assertEqual(snapshot(), before)
+                if dirt.exists():
+                    self.assertEqual(dirt.read_bytes(), b"preserve dirty bytes\x00\n")
+        # Token authority does not bypass start's independent clean-base check.
+        dirty_start = cli("start", token)
+        self.assertEqual(dirty_start.returncode, 2)
+        self.assertIn("identity drifted", dirty_start.stderr)
+        self.assertEqual(snapshot(), before)
+        self.assertEqual(dirt.read_bytes(), b"preserve dirty bytes\x00\n")
+        git(self.workspaces / "X", "add", "src/private.txt")
+        git(self.workspaces / "X", "commit", "-m", "preserved bytes")
+        before = snapshot()
+        stale = cli("start", old_token)
+        self.assertEqual(stale.returncode, 2)
+        self.assertIn("lease_fence_stale", stale.stderr)
+        self.assertEqual(snapshot(), before)
+        finished = cli("finish", token)
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertEqual(json.loads(finished.stdout)["state"], "QUEUED")
+        self.assertEqual(self.fencing_record("X")["attempt"], 2)
+
+    def test_managed_run_and_resume_own_successor_through_worker_and_finish(self) -> None:
+        self.install_task_run_assets()
+        for task_id in ("X", "Y"):
+            task_runtime.task_file(self.controller, task_id).write_text(
+                f"---\nid: {task_id}\nstatus: todo\n---\n## Goal\nShip one file.\n"
+                "## Acceptance\n- The committed file is validated.\n")
+        git(self.controller, "add", ".juno_task/tasks", ".juno_task/workflows",
+            ".juno_task/prompts/lifecycle")
+        git(self.controller, "commit", "-m", "managed recovery fixtures")
+
+        def implement(_controller, task_id, record, _run_dir, _prompt, **_kwargs):
+            lease = self.fencing_record(task_id)
+            self.assertEqual(lease["attempt"], 2)
+            self.assertEqual(lease["producer"]["pid"], os.getpid())
+            self.assertEqual(task_runtime._observe_producer(lease["producer"]).status, "alive")
+            self.assertIsNone(task_runtime._ensure_run_fence(self.controller, task_id))
+            worktree = Path(record["worktree"])
+            before = git(worktree, "rev-parse", "HEAD")
+            after = self.commit_task(task_id)
+            return {"terminal_state": "completed", "before_sha": before, "after_sha": after,
+                    "receipt": {"path": "fixture", "sha256": "0" * 64}, "session_id": "fixture"}
+
+        for task_id, operation in (("X", "run"), ("Y", "resume")):
+            with self.subTest(operation=operation):
+                self.payload("start", task_id)  # real predecessor subprocess exits
+                LEASE_TOKENS.pop((str(self.controller), task_id), None)
+                output = io.StringIO()
+                with mock.patch.object(task_runtime, "_launch_task_worker", side_effect=implement) as worker, \
+                        contextlib.redirect_stdout(output):
+                    code = task_runtime.main([operation, "--task", task_id,
+                                              "--controller", str(self.controller)])
+                self.assertEqual(code, 0)
+                worker.assert_called_once()
+                result = json.loads(output.getvalue())
+                self.assertEqual(result["state"], "QUEUED")
+                self.assertEqual(result["attempts"]["implementation"], 1)
+                self.assertEqual(self.fencing_record(task_id)["state"], "RELEASED")
+                if operation == "resume":
+                    self.assertEqual(result["resume_owner"], "task-run")
+
     def test_cli_competing_dead_producer_fails_closed_and_recovers_via_successor(self) -> None:
         self.payload("start", "X")
         LEASE_TOKENS.pop((str(self.controller), "X"))
