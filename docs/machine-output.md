@@ -13,9 +13,32 @@ YYLO 0.2.3 introduces the opt-in `yylo.machine-response.v1` envelope for control
 }
 ```
 
-Use `--format json|ndjson`; add `--raw` for compact JSON. Ledger keeps its established short spelling, `-f json|ndjson --raw`. NDJSON emits exactly one bounded envelope per line; a delegated NDJSON payload is represented as an array in `data`. Diagnostics, banners, identity details, warnings, and bootstrap progress are written to stderr. A refusal or failure still exits nonzero and emits a typed `error` in the selected format.
+Use `--format json|ndjson`; add `--raw` for compact JSON. Prefer the long spelling through the managed Ledger facade: the root CLI also uses `-f` for prompt files. The canonical Ledger shell wrapper preserves native `-f` and `--format` options. NDJSON emits exactly one bounded envelope per line; a multi-document delegated NDJSON payload is represented as an array in `data`, while a single document remains that document. Diagnostics, banners, identity details, warnings, and bootstrap progress are written to stderr. A refusal or failure still exits nonzero and emits a typed `error` in the selected format.
 
 Use the `capabilities` command with `--format json --raw` to discover formats and projections instead of copying flags between commands.
+
+## Native Ledger search
+
+Place the format option after the native action, for example:
+
+```sh
+yy ledger record search --scope all --text simpl --projection summary --limit 60 --format json
+```
+
+Ledger owns native Record serialization. The shell adapter preserves the option
+at native command scope rather than moving it to the legacy root parser, whose
+format setting does not select the native Record format. This applies to the
+`record`, `task`, `wiki`, `workflow`, and `artifact` namespaces. Legacy flat task
+commands retain their global-option normalization.
+
+The managed facade retains its public v1 response envelope and strict parser:
+JSON `data` contains Ledger's page object (`records`, `next_cursor`, and native
+page metadata). NDJSON `data` contains records followed by the native `type: page`
+trailer; an empty page is a single trailer object. Pass `next_cursor` unchanged
+with `--cursor` to request the next page. Do not count the trailer as a Record.
+Malformed bytes still fail as `INVALID_CHILD_PAYLOAD`, not as an empty result.
+This fixes argument scope; it does not remove the separate public envelope or
+claim complete elimination of both format decisions.
 
 ## Compatibility
 
