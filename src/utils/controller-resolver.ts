@@ -16,6 +16,7 @@ export type WorkspaceRole = 'controller' | 'controller-retired' | 'task' | 'inte
 export function hasSimpleWorkspaceHint(cwd: string): boolean {
   let directory = path.resolve(cwd);
   while (true) {
+    if (requireExists(path.join(directory, '.yylo-simple-init'))) return true;
     const marker = path.join(directory, '.juno_task/config.json');
     if (requireExists(marker)) {
       try {
