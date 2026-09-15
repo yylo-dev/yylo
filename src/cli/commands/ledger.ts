@@ -4,6 +4,8 @@ import path from 'node:path';
 import { constants as osConstants } from 'node:os';
 import type { Command } from 'commander';
 import packageMetadata from '../../../package.json';
+import { hasSimpleWorkspaceHint, resolveController } from '../../utils/controller-resolver.js';
+import { buildChildProcessEnvironment } from '../../core/child-process-environment.js';
 import { markTransparentDelegate } from '../../utils/explicit-command.js';
 
 // This is intentionally exact and sourced from release metadata: a YYLO
@@ -58,7 +60,7 @@ export function discoverLedgerExecutable(
     }
   }
   throw new LedgerDelegateError(
-    `yylo: cannot find independently installed '${name}' on PATH. ` +
+    `yylo: cannot find independently installed '${name}' on PATH (cwd: ${cwd}). ` +
       `Install a compatible yylo-ledger (${LEDGER_VERSION_RANGE}) and retry.`,
     127,
   );
@@ -133,15 +135,24 @@ async function readVersion(
   });
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
-  child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk));
-  child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk));
+  let bytes = 0;
+  const collect = (chunks: Buffer[], chunk: Buffer) => {
+    bytes += chunk.length;
+    if (bytes > 64 * 1024) child.kill('SIGKILL');
+    else chunks.push(chunk);
+  };
+  child.stdout?.on('data', (chunk: Buffer) => collect(stdout, chunk));
+  child.stderr?.on('data', (chunk: Buffer) => collect(stderr, chunk));
   const result = await waitForChild(child, {
     milliseconds: timeoutMs,
     description: `'${executable} --version'`,
   });
+  if (bytes > 64 * 1024) throw new LedgerDelegateError('Ledger version output exceeded 64 KiB; repair the installed Ledger executable explicitly.', 69);
   const output = Buffer.concat(stdout).toString('utf8').trim();
   const detail = Buffer.concat(stderr).toString('utf8').trim();
-  if (result.signal !== null) terminateWithSignal(result.signal);
+  if (result.signal !== null) {
+    throw new LedgerDelegateError(`Ledger readiness probe terminated by ${result.signal}; repair '${executable}' explicitly and retry.`, 69);
+  }
   if (result.code !== 0) {
     throw new LedgerDelegateError(
       `yylo: '${executable} --version' failed with exit ${result.code ?? 1}` +
@@ -161,15 +172,14 @@ function terminateWithSignal(signal: NodeJS.Signals): never {
   process.exit(128 + number);
 }
 
-export async function invokeLedger(
-  args: readonly string[],
+export async function checkLedgerReadiness(
   options: {
     readonly cwd?: string;
     readonly env?: NodeJS.ProcessEnv;
     readonly executableName?: string;
     readonly versionTimeoutMs?: number;
   } = {},
-): Promise<LedgerDelegateResult> {
+): Promise<string> {
   const cwd = options.cwd ?? process.cwd();
   // The wrapper's preflight marker is scoped to its probe subprocess, so the
   // delegated process can receive an exact copy of the actual caller environment.
@@ -184,14 +194,37 @@ export async function invokeLedger(
   const version = parseVersion(output);
   if (version === undefined || !isCompatibleVersion(version)) {
     throw new LedgerDelegateError(
-      `yylo: incompatible YYLO Ledger version from '${executable}': ` +
+      `yylo: incompatible YYLO Ledger version from '${executable}' (cwd: ${cwd}): ` +
         `${output || 'unknown'} (required ${LEDGER_VERSION_RANGE}). ` +
         `Install a compatible yylo-ledger and retry.`,
       69,
     );
   }
 
-  const child = spawn(executable, [...args], { cwd, env, stdio: 'inherit' });
+  return executable;
+}
+
+export async function invokeLedger(
+  args: readonly string[],
+  options: Parameters<typeof checkLedgerReadiness>[0] = {},
+): Promise<LedgerDelegateResult> {
+  const cwd = options.cwd ?? process.cwd();
+  let env = { ...(options.env ?? process.env) };
+  let delegatedArgs = [...args];
+  if (hasSimpleWorkspaceHint(cwd)) {
+    const resolution = resolveController(cwd, 'kanban', { env });
+    if (!resolution.valid || resolution.role !== 'simple') throw new Error('Invalid Simple Ledger authority.');
+    if (args.some(arg => arg.startsWith('-c') || (arg.startsWith('--c') && '--config'.startsWith(arg.split('=')[0]!)))) {
+      throw new Error('Simple Ledger uses the root-bound config; --config overrides are unsupported.');
+    }
+    env = buildChildProcessEnvironment(env, {
+      JUNO_TASK_ROOT: resolution.path,
+      JUNO_WORKSPACE_ROLE: 'simple',
+    });
+    delegatedArgs = ['--config', path.join(resolution.path, '.juno_task/config.json'), ...args];
+  }
+  const executable = await checkLedgerReadiness({ ...options, cwd, env });
+  const child = spawn(executable, delegatedArgs, { cwd, env, stdio: 'inherit' });
   return waitForChild(child);
 }
 

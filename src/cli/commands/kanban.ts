@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { hasSimpleWorkspaceHint } from '../../utils/controller-resolver.js';
+import { runLedgerDelegate } from './ledger.js';
 import fs from 'fs-extra';
 import { Command } from 'commander';
 import { routeControlPlane } from '../../utils/control-plane-router.js';
@@ -8,6 +10,7 @@ import { invokeMachineAwareChild, resolveMachineOutput } from '../machine-output
 export type KanbanInvoker = (args: string[]) => Promise<void>;
 
 export async function invokeKanban(args: string[]): Promise<void> {
+  if (hasSimpleWorkspaceHint(process.cwd())) return runLedgerDelegate(args);
   const route = routeControlPlane(process.cwd(), 'kanban');
   const wrapper = path.join(route.controllerRoot, '.juno_task', 'scripts', 'kanban.sh');
   if (!(await fs.pathExists(wrapper))) {

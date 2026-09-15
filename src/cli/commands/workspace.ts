@@ -1,7 +1,9 @@
 import { Command } from 'commander';
 import { hasSimpleWorkspaceHint, resolveController } from '../../utils/controller-resolver.js';
 
-function simpleReport(cwd: string | undefined, version: string, json?: boolean, kind?: string): boolean {
+import { checkLedgerReadiness } from './ledger.js';
+
+async function simpleReport(cwd: string | undefined, version: string, json?: boolean, kind?: string): Promise<boolean> {
   const directory = cwd?.trim() || process.cwd();
   if (!hasSimpleWorkspaceHint(directory)) return false;
   const resolution = resolveController(directory, 'diagnostic', { trustedResolver: true });
@@ -11,19 +13,27 @@ function simpleReport(cwd: string | undefined, version: string, json?: boolean, 
     console.log(resolution.path);
     return true;
   }
+  let ledgerCompatibility = 'compatible';
+  let recovery: string | undefined;
+  try { await checkLedgerReadiness({ cwd: directory }); }
+  catch (error) {
+    ledgerCompatibility = 'unavailable';
+    recovery = error instanceof Error ? error.message : String(error);
+  }
   const value = {
     schemaVersion: 'yylo_simple_workspace_diagnostic.v1',
     mode: resolution.workspace_mode, version: resolution.workspace_version,
     root: resolution.path, cwd: resolution.invocation_cwd,
     capabilities: resolution.capabilities,
-    runtime: { cliVersion: version, resolver: 'installed', ledgerCompatibility: 'not-checked', agentStartup: 'not-yet-supported' },
+    runtime: { cliVersion: version, resolver: 'installed', ledgerCompatibility, agentStartup: recovery ? 'blocked' : 'supported', ...(recovery ? { recovery } : {}) },
     managedDelivery: false, concurrency: 'shared-checkout; no project-file isolation',
   };
   console.log(json ? JSON.stringify(value, null, 2) : [
     'Simple workspace (version 1)', `Root: ${value.root}`, `Invocation: ${value.cwd}`,
     `Capabilities: ${value.capabilities?.join(', ')}`,
-    `CLI: ${version}; installed resolver; Ledger compatibility: not checked`,
-    'Agent startup: not yet supported in this staged runtime',
+    `CLI: ${version}; installed resolver; Ledger compatibility: ${ledgerCompatibility}`,
+    `Agent startup: ${value.runtime.agentStartup}`,
+    ...(recovery ? [recovery] : []),
     'Managed task/merge/integration: unsupported; yy task local is bookkeeping only',
     'Concurrent agents share project files without isolation',
   ].join('\n'));
@@ -88,8 +98,8 @@ export function configureWorkspaceCommands(program: Command, version: string): v
     .description('Show normalized, offline workspace topology')
     .option('--json', 'Output the stable machine-readable topology')
     .option('-w, --cwd <path>', 'Invocation directory (default: current directory)')
-    .action((options: { json?: boolean; cwd?: string }) => {
-      if (simpleReport(options.cwd, version, options.json)) return;
+    .action(async (options: { json?: boolean; cwd?: string }) => {
+      if (await simpleReport(options.cwd, version, options.json)) return;
       const value = report(options.cwd, version);
       console.log(options.json ? JSON.stringify(value, null, 2) : humanInfo(value));
     });
@@ -100,12 +110,12 @@ export function configureWorkspaceCommands(program: Command, version: string): v
     .argument('<kind>', 'controller, integration, target, or task')
     .argument('[task-id]', 'Required when kind is task')
     .option('-w, --cwd <path>', 'Invocation directory (default: current directory)')
-    .action((kind: string, taskId: string | undefined, options: { cwd?: string }) => {
+    .action(async (kind: string, taskId: string | undefined, options: { cwd?: string }) => {
       if (!['controller', 'integration', 'target', 'task'].includes(kind))
         throw new Error(`Unknown workspace kind: ${kind}`);
       if (kind === 'task' && !taskId) throw new Error('where task requires TASK_ID.');
       if (kind !== 'task' && taskId) throw new Error(`${kind} does not accept TASK_ID.`);
-      if (simpleReport(options.cwd, version, false, kind)) return;
+      if (await simpleReport(options.cwd, version, false, kind)) return;
       console.log(
         workspaceLocation(
           report(options.cwd, version),
@@ -121,8 +131,8 @@ export function configureWorkspaceCommands(program: Command, version: string): v
     .description('Diagnose registered workspace topology without fetching or changing state')
     .option('--json', 'Output the stable machine-readable topology')
     .option('-w, --cwd <path>', 'Invocation directory (default: current directory)')
-    .action((options: { json?: boolean; cwd?: string }) => {
-      if (simpleReport(options.cwd, version, options.json)) return;
+    .action(async (options: { json?: boolean; cwd?: string }) => {
+      if (await simpleReport(options.cwd, version, options.json)) return;
       const value = report(options.cwd, version);
       console.log(options.json ? JSON.stringify(value, null, 2) : humanInfo(value));
       if (!value.healthy) process.exitCode = 1;

@@ -113,11 +113,28 @@ describe('Simple shared resolver', () => {
     for (const args of [['task', 'status', 'ABC123'], ['merge', 'status'], ['integration', 'status']]) {
       const refused = run(args); expect(refused.status).toBe(2); expect(refused.stderr).toContain('Simple workspace');
     }
+    for (const command of ['ledger', 'kanban', 'pi']) {
+      const dispatched = run([command, '--help']);
+      expect(dispatched.status, dispatched.stderr).toBe(0);
+      expect(JSON.parse(dispatched.stdout)).toEqual([command, '--help']);
+    }
     const mismatch = run(['task', 'local', 'list'], { JUNO_TASK_ROOT: '/unrelated' });
     expect(mismatch.status).toBe(2); expect(mismatch.stderr).toContain('assertion mismatch');
     expect(snapshot()).toEqual(before);
     expect(await fs.pathExists(path.join(root, '.venv_juno'))).toBe(false);
     expect(await fs.pathExists(path.join(root, '.juno_task/scripts'))).toBe(false);
+  });
+
+  it('never sources a copied legacy bootstrap in validated Simple', async () => {
+    const launcher = path.join(root, 'launcher');
+    await fs.copy(wrapperSource, path.join(launcher, 'bin/yylo'));
+    await fs.copy(script, path.join(launcher, 'templates/scripts/controller_resolver.py'));
+    await fs.writeFile(path.join(launcher, 'bin/cli.mjs'), 'console.log("stub-dispatch")');
+    await fs.outputFile(path.join(root, '.juno_task/scripts/bootstrap.sh'), 'echo unsafe > bootstrap-ran; exit 93');
+    const run = spawnSync('bash', [path.join(launcher, 'bin/yylo'), 'pi', '-p', 'local'], { cwd: root, env: process.env, encoding: 'utf8', timeout: 15000 });
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stdout).toContain('stub-dispatch');
+    expect(await fs.pathExists(path.join(root, 'bootstrap-ran'))).toBe(false);
   });
 
   it('emits shell routing without a fabricated managed controller binding', () => {
@@ -127,11 +144,18 @@ describe('Simple shared resolver', () => {
     expect(output).not.toContain('controller_head');
   });
 
-  it('reports Simple diagnostics without managed target or runtime claims', async () => {
+  it('reports installed Simple readiness without provisioning or managed target claims', async () => {
+    const bin = path.join(root, 'bin'); await fs.ensureDir(bin);
+    const ledger = path.join(bin, 'yylo-ledger');
+    await fs.writeFile(ledger, '#!/bin/sh\necho "yylo-ledger 0.3.1"\n', { mode: 0o755 });
+    process.env.PATH = `${bin}:${process.env.PATH}`;
     const output = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const program = new Command(); configureWorkspaceCommands(program, 'test-version');
     await program.parseAsync(['info', '--cwd', root, '--json'], { from: 'user' });
-    expect(JSON.parse(String(output.mock.calls[0][0]))).toMatchObject({ mode: 'simple', root, managedDelivery: false, runtime: { ledgerCompatibility: 'not-checked' } });
+    expect(JSON.parse(String(output.mock.calls[0][0]))).toMatchObject({ mode: 'simple', root, managedDelivery: false, runtime: { ledgerCompatibility: 'compatible', agentStartup: 'supported' } });
+    await fs.writeFile(ledger, '#!/bin/sh\necho "yylo-ledger 9.9.9"\n', { mode: 0o755 });
+    await program.parseAsync(['doctor', 'workspace', '--cwd', root, '--json'], { from: 'user' });
+    expect(JSON.parse(String(output.mock.calls[1][0]))).toMatchObject({ runtime: { ledgerCompatibility: 'unavailable', agentStartup: 'blocked', recovery: expect.stringContaining('Install a compatible') } });
   });
 
   it('local commands forward bounded bookkeeping arguments, never start/finish or checkpoints', async () => {
@@ -146,10 +170,10 @@ describe('Simple shared resolver', () => {
     vi.spyOn(process, 'cwd').mockReturnValue(root); const before = snapshot();
     // Resolver still needs python3 and git; a stub Ledger demonstrates bounded forwarding.
     const bin = path.join(root, 'bin'); await fs.ensureDir(bin);
-    await fs.writeFile(path.join(bin, 'yylo-ledger'), '#!/bin/sh\nprintf "%s\\n" "$@" > "$JUNO_TASK_ROOT/args.txt"\n', { mode: 0o755 });
+    await fs.writeFile(path.join(bin, 'yylo-ledger'), '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "yylo-ledger 0.3.1"; exit 0; fi\nprintf "%s\\n" "$@" > "$JUNO_TASK_ROOT/args.txt"\n', { mode: 0o755 });
     process.env.PATH = `${bin}:${process.env.PATH}`;
     await invokeLocalTaskBookkeeping(['get', 'ABC123']);
-    expect(await fs.readFile(path.join(root, 'args.txt'), 'utf8')).toBe(`-c\n${root}/.juno_task/tasks/config.json\nget\nABC123\n`);
+    expect(await fs.readFile(path.join(root, 'args.txt'), 'utf8')).toBe(`--config\n${root}/.juno_task/config.json\nget\nABC123\n`);
     expect(git('rev-parse', 'HEAD')).toBe(before.head);
     expect(git('ls-files', '--stage')).toBe(before.index);
   });

@@ -37,7 +37,7 @@ describe('workspace mode authority', () => {
     expect(workspaceCapabilities(simple)).toEqual(['diagnostics', 'local-agent', 'ledger', 'local-task-bookkeeping']);
     expect(workspaceCapabilities(managed)).toEqual(['diagnostics', 'ledger', 'managed-task', 'managed-merge', 'managed-integration']);
     expect(Object.isFrozen(workspaceCapabilities(simple))).toBe(true);
-    expect(() => assertWorkspaceStartupSupported(simple)).toThrow(/startup is not supported/);
+    expect(() => assertWorkspaceStartupSupported(simple)).not.toThrow();
     expect(() => assertWorkspaceStartupSupported(managed)).not.toThrow();
     expect(() => assertWorkspaceStartupSupported(undefined)).not.toThrow();
   });
@@ -52,7 +52,7 @@ describe('workspace mode authority', () => {
     }
   });
 
-  it.each([false, true])('refuses Simple startup before project writes (explicit config: %s)', async (explicit) => {
+  it.each([false, true])('refuses unvalidated no-Git Simple startup before project writes (explicit config: %s)', async (explicit) => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'yylo-simple-config-'));
     try {
       await mkdir(path.join(root, '.juno_task'));
@@ -65,7 +65,7 @@ describe('workspace mode authority', () => {
         ...(explicit ? { configFile: file } : {}),
         // CLI preferences must not erase persisted mode authority.
         cliConfig: { controllerWorkspace: managed },
-      })).rejects.toThrow(/Simple workspace.*startup is not supported/);
+      })).rejects.toThrow(/Simple MVP requires a primary Git checkout/);
       expect(await readFile(file, 'utf8')).toBe(bytes);
       expect(await readFile(path.join(root, 'notebook.ipynb'), 'utf8')).toBe('uncommitted notebook');
       expect((await readdir(root)).sort()).toEqual(['.juno_task', 'notebook.ipynb']);
