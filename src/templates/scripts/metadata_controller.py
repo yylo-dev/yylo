@@ -95,6 +95,12 @@ CONTROLLER_SAFE_CONFIG_FIELDS = {
     "mcpServerName", "hookCommandTimeout", "onHourlyLimit", "interactive",
     "headlessMode", "kanbanRegistry", "gitCheckpoint",
 }
+CONTROLLER_PRODUCT_CONFIG_FIELDS = {
+    "workingDirectory", "sessionDirectory", "gitFlow", "autoDependencyUpdate", "hooks", "skipHooks",
+}
+CONTROLLER_PROFILE_CONFIG_FIELDS = CONTROLLER_SAFE_CONFIG_FIELDS | {
+    "agentProfile", "promptMacros", "modelShortcuts", "headlessUi",
+}
 AGENT_MIGRATION_DISPOSITIONS = {"migrate", "transform", "product-only", "secret", "retire"}
 CONFIG_PATH = ".juno_task/config.json"
 SHA_RE = re.compile(r"[0-9a-f]{40,64}\Z")
@@ -1245,6 +1251,48 @@ def config_repair_lock(common: Path) -> Any:
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN); stream.close()
 
 
+def agent_config_correction(value: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+    """One explicit ownership migration; discarded fields remain in the frozen Git parent."""
+    workspace = value.get("controllerWorkspace")
+    if workspace not in (CANONICAL_CONTROLLER_WORKSPACE, RETIRED_CONTROLLER_WORKSPACE, {"mode": "metadata-only"}):
+        raise BoundaryError("agent config repair requires a recognized metadata-controller workspace")
+    known = CONTROLLER_PROFILE_CONFIG_FIELDS | CONTROLLER_PRODUCT_CONFIG_FIELDS | {"controllerWorkspace", "lifecycle"}
+    unknown = sorted(set(value) - known)
+    if unknown:
+        raise BoundaryError("agent config repair requires separate inventory of unknown/secret fields: "
+                            + ", ".join(unknown) + "; inspect `yy migrate inventory --help`; no bytes changed")
+    dispositions = {name: ("transform" if name == "controllerWorkspace" else
+                          "product-only" if name in CONTROLLER_PRODUCT_CONFIG_FIELDS else
+                          "retire" if name == "lifecycle" else "migrate") for name in sorted(value)}
+    after = {name: item for name, item in value.items() if dispositions[name] == "migrate"}
+    after["controllerWorkspace"] = CANONICAL_CONTROLLER_WORKSPACE
+    return after, dispositions
+
+
+def agent_config_runtime(root: Path, branch: str) -> dict[str, Any]:
+    try:
+        registration = require_controller_registration(root, branch)
+        package = package_policy_source(root, registration["runtime_executable"])
+        if registration["runtime_version"] != package["version"]:
+            raise BoundaryError("registered runtime version differs from migration package")
+        return {"registration": registration, "package": package}
+    except BoundaryError as exc:
+        raise BoundaryError("agent config runtime binding is incompatible (separate from config ownership): "
+                            f"{exc}; inspect `yy scripts doctor` and `yy migrate runtime-rebind --help`; "
+                            "no implicit upgrade or rebind") from exc
+
+
+def agent_config_plan(args: argparse.Namespace, policy: dict[str, Any]) -> dict[str, Any]:
+    root = exact_physical_controller(args.root)
+    if (root / CONFIG_PATH).is_symlink():
+        raise BoundaryError("agent config repair refuses a symbolic-link config")
+    return config_repair_plan(argparse.Namespace(
+        root=root, branch=policy["controller_branch"], product_ref=policy["product_ref"],
+        expected_head=git(root, "rev-parse", "HEAD"),
+        expected_product_head=git(root, "rev-parse", policy["product_ref"]),
+        output=args.output, agent_config=True), policy)
+
+
 def config_repair_plan(args: argparse.Namespace, policy: dict[str, Any]) -> dict[str, Any]:
     root = exact_worktree(args.root)
     branch = safe_ref(args.branch, "branch"); product_ref = safe_ref(args.product_ref, "product_ref")
@@ -1257,11 +1305,22 @@ def config_repair_plan(args: argparse.Namespace, policy: dict[str, Any]) -> dict
     head = resolve_commit(root, branch, args.expected_head, "controller ref")
     product_head = resolve_commit(root, product_ref, args.expected_product_head, "product target")
     current, current_value = controller_config(root, head)
-    if (current_value.get("controllerWorkspace") != RETIRED_CONTROLLER_WORKSPACE
-            or "lifecycle" in current_value):
-        raise BoundaryError("config repair is limited to the policy-updated controller with the exact retired workspace pointer")
-    after_value = json.loads(json.dumps(current_value))
-    after_value["controllerWorkspace"] = CANONICAL_CONTROLLER_WORKSPACE
+    agent_config = getattr(args, "agent_config", False)
+    migration: dict[str, Any] = {}
+    if agent_config:
+        after_value, dispositions = agent_config_correction(current_value)
+        if after_value == current_value:
+            raise BoundaryError("controller config already has current ownership; no repair needed")
+        migration = {"agent_config": {"field_dispositions": dispositions,
+                                    "runtime": agent_config_runtime(root, branch)}}
+    else:
+        if (current_value.get("controllerWorkspace") != RETIRED_CONTROLLER_WORKSPACE
+                or "lifecycle" in current_value):
+            raise BoundaryError("config repair is limited to the policy-updated controller with the exact retired workspace pointer")
+        if CONTROLLER_PRODUCT_CONFIG_FIELDS.intersection(current_value):
+            raise BoundaryError("workspace-only repair would retain product-only fields; use `yy migrate controller-config plan --help`")
+        after_value = json.loads(json.dumps(current_value))
+        after_value["controllerWorkspace"] = CANONICAL_CONTROLLER_WORKSPACE
     after = canonical(after_value)
     output = external_config_repair_receipt(args.output, root, Path(common_dir(root)))
     core = {"schema_version": CONFIG_REPAIR_SCHEMA, "operation": "config-repair",
@@ -1276,7 +1335,9 @@ def config_repair_plan(args: argparse.Namespace, policy: dict[str, Any]) -> dict
                              "config_keys_except_controllerWorkspace": "semantically-identical",
                              "branch_identity": "unchanged", "product_ref_mutation": False,
                              "user_work": "clean-worktree-required"},
-            "apply_authorized": False}
+            "apply_authorized": False, **migration}
+    if agent_config:
+        core["preservation"]["config_keys_except_controllerWorkspace"] = "reviewed field dispositions; original config preserved in parent commit"
     payload = {**core, "plan_sha256": digest(core)}
     atomic_receipt(output, payload)
     return payload
@@ -1292,10 +1353,20 @@ def validate_config_repair_plan(plan_path: Path) -> tuple[dict[str, Any], str]:
     before = correction.get("before") if isinstance(correction, dict) else None
     after = correction.get("after") if isinstance(correction, dict) else None
     expected_after = json.loads(json.dumps(before)) if isinstance(before, dict) else None
-    if isinstance(expected_after, dict): expected_after["controllerWorkspace"] = CANONICAL_CONTROLLER_WORKSPACE
+    agent_config = plan.get("agent_config")
+    if agent_config is not None:
+        if not isinstance(before, dict) or not isinstance(agent_config, dict):
+            raise BoundaryError("invalid agent config repair plan")
+        expected_after, dispositions = agent_config_correction(before)
+        if agent_config.get("field_dispositions") != dispositions or not isinstance(agent_config.get("runtime"), dict):
+            raise BoundaryError("agent config repair requires exact derived field dispositions and runtime")
+    elif isinstance(expected_after, dict):
+        if (before.get("controllerWorkspace") != RETIRED_CONTROLLER_WORKSPACE or "lifecycle" in before
+                or CONTROLLER_PRODUCT_CONFIG_FIELDS.intersection(before)):
+            raise BoundaryError("workspace-only repair cannot retain product-only or retired fields")
+        expected_after["controllerWorkspace"] = CANONICAL_CONTROLLER_WORKSPACE
     if (not isinstance(correction, dict) or correction.get("path") != CONFIG_PATH
-            or not isinstance(before, dict) or before.get("controllerWorkspace") != RETIRED_CONTROLLER_WORKSPACE
-            or "lifecycle" in before or after != expected_after
+            or not isinstance(before, dict) or after != expected_after
             or correction.get("after_sha256") != bytes_digest(canonical(after))):
         raise BoundaryError("config repair correction is not the exact derived workspace-only replacement")
     return plan, plan_hash
@@ -1304,6 +1375,12 @@ def validate_config_repair_plan(plan_path: Path) -> tuple[dict[str, Any], str]:
 def config_repair_state(root: Path, plan: dict[str, Any], plan_hash: str, policy: dict[str, Any]) -> tuple[str, str]:
     if common_dir(root) != plan["git_common_dir"] or digest(policy) != plan["policy_sha256"]:
         raise BoundaryError("config repair repository or reviewed policy changed after planning")
+    if "agent_config" in plan:
+        exact_physical_controller(root)
+        if (root / CONFIG_PATH).is_symlink():
+            raise BoundaryError("agent config repair refuses a symbolic-link config")
+        if agent_config_runtime(root, plan["branch"]) != plan["agent_config"]["runtime"]:
+            raise BoundaryError("agent config runtime binding changed after planning; inspect `yy scripts doctor`")
     if git(root, "symbolic-ref", "-q", "HEAD", check=False) != plan["branch"]:
         raise BoundaryError("config repair controller branch changed after planning")
     if git(root, "status", "--porcelain=v2", "--untracked-files=all", check=False):
@@ -2909,6 +2986,13 @@ def main() -> None:
     product = sub.add_parser("verify-product"); product.add_argument("--root", type=Path, required=True)
     product.add_argument("--product-ref", required=True); product.add_argument("--expected-head", required=True)
     product.add_argument("--output", type=Path, required=True)
+    agent_plan = sub.add_parser("agent-config-plan")
+    agent_plan.add_argument("--root", type=Path, required=True)
+    agent_plan.add_argument("--output", type=Path, required=True)
+    agent_apply = sub.add_parser("agent-config-apply")
+    agent_apply.add_argument("--plan", type=Path, required=True)
+    agent_apply.add_argument("--output", type=Path, required=True)
+    agent_apply.add_argument("--authorize-config-repair", dest="authorize", action="store_true")
     repair_plan = sub.add_parser("config-repair-plan")
     repair_plan.add_argument("--root", type=Path, required=True); repair_plan.add_argument("--branch", required=True)
     repair_plan.add_argument("--expected-head", required=True); repair_plan.add_argument("--product-ref", required=True)
@@ -2944,6 +3028,12 @@ def main() -> None:
     args = parser.parse_args()
     if args.command in {"metadata-policy-plan", "metadata-policy-apply"}:
         policy = {}
+    elif args.command in {"agent-config-plan", "agent-config-apply"}:
+        if args.policy is not None:
+            raise BoundaryError("agent config migration uses the registered controller's own policy")
+        root = (args.root if args.command == "agent-config-plan" else
+                Path(validate_config_repair_plan(args.plan)[0]["controller"]))
+        policy = load_policy(exact_physical_controller(root) / POLICY_PATH)
     elif args.command == "migration-plan" and args.policy_bundle is not None and args.policy is None:
         policy = metadata_policy_from_bundle(args.policy_bundle)
     elif args.command in {"prepare", "cutover-plan", "rollback-plan"} and args.policy is None:
@@ -2968,6 +3058,8 @@ def main() -> None:
                    **product_boundary(args.root, args.product_ref, args.expected_head, policy)}
         atomic_receipt(args.output, payload)
         if not payload["passed"]: raise BoundaryError("product tree still contains controller-private paths")
+    elif args.command == "agent-config-plan": payload = agent_config_plan(args, policy)
+    elif args.command == "agent-config-apply": payload = config_repair_apply(args, policy)
     elif args.command == "config-repair-plan": payload = config_repair_plan(args, policy)
     elif args.command == "config-repair-apply": payload = config_repair_apply(args, policy)
     elif args.command == "metadata-policy-plan": payload = policy_migration_plan(args)

@@ -115,6 +115,20 @@ describe('migration CLI', () => {
       '--output', '/receipts/rebind.json', '--artifact', '/releases/yylo-2.1.3-rc.0.33.tgz']);
   });
 
+  it('routes controller config ownership plans and explicitly authorized applies', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    const program = new Command();
+    configureMigrationCommand(program, invoke);
+    await program.parseAsync(['node', 'yy', 'migrate', 'controller-config', 'plan',
+      '--root', '/controller', '--output', '/external/plan.json']);
+    expect(invoke).toHaveBeenCalledWith(['agent-config-plan', '--root', '/controller',
+      '--output', '/external/plan.json']);
+    await program.parseAsync(['node', 'yy', 'migrate', 'controller-config', 'apply',
+      '--plan', '/external/plan.json', '--output', '/external/apply.json', '--authorize-config-repair']);
+    expect(invoke).toHaveBeenCalledWith(['agent-config-apply', '--plan', '/external/plan.json',
+      '--output', '/external/apply.json', '--authorize-config-repair']);
+  });
+
   it('routes receipt-bound metadata-policy plan and explicitly authorized apply', async () => {
     const invoke = vi.fn(async () => undefined);
     const planProgram = new Command().exitOverride(); configureMigrationCommand(planProgram, invoke);

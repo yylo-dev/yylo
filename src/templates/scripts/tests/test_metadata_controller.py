@@ -1165,6 +1165,106 @@ class MetadataControllerTest(unittest.TestCase):
         self.assertFalse(prefix.exists())
         self.assertEqual(command("git", "status", "--porcelain", cwd=self.new_controller), "")
 
+    def agent_config_fixture(self) -> tuple[Path, dict[str, object]]:
+        self.prepare()
+        root = self.new_controller
+        command("git", "config", "--worktree", "juno.workspace.role", "controller", cwd=root)
+        command("git", "config", "--local", "juno.controller.path", str(root), cwd=root)
+        command("git", "config", "--local", "juno.controller.branch", self.policy["controller_branch"], cwd=root)
+        entrypoint = self.policy_test_runtime_entrypoint()
+        package = mc.package_policy_source(root, str(entrypoint))
+        command("git", "config", "--worktree", "juno.controller.runtimeVersion", package["version"], cwd=root)
+        command("git", "config", "--worktree", "juno.controller.runtimeExecutable", str(entrypoint), cwd=root)
+        value = {"controllerWorkspace": {"mode": "metadata-only"},
+                 "workingDirectory": str(root), "sessionDirectory": "/legacy/product",
+                 "hooks": {"START_RUN": {"commands": ["touch forbidden"]}},
+                 "lifecycle": {"enabled": True}, "defaultMaxIterations": 9,
+                 "agentProfile": {"version": 1, "promptAssetRoot": ".juno_task/prompts"},
+                 "promptMacros": {"global": {"test": "preserved preference"}}}
+        write(root / mc.CONFIG_PATH, json.dumps(value))
+        command("git", "add", mc.CONFIG_PATH, cwd=root)
+        command("git", "commit", "-m", "legacy retained product config", cwd=root)
+        return root, value
+
+    def test_agent_config_plan_apply_preserves_preferences_parent_and_product(self) -> None:
+        root, before = self.agent_config_fixture()
+        head = command("git", "rev-parse", "HEAD", cwd=root)
+        original = (root / mc.CONFIG_PATH).read_bytes()
+        plan_path = self.temp / "agent-config-plan.json"
+        plan = mc.agent_config_plan(argparse.Namespace(root=root, output=plan_path), self.policy)
+        self.assertEqual((root / mc.CONFIG_PATH).read_bytes(), original)
+        self.assertEqual(plan["agent_config"]["field_dispositions"]["workingDirectory"], "product-only")
+        args = argparse.Namespace(plan=plan_path, output=self.temp / "agent-config-apply.json", authorize=True)
+        applied = mc.config_repair_apply(args, self.policy)
+        after = json.loads((root / mc.CONFIG_PATH).read_bytes())
+        for field in ("agentProfile", "promptMacros", "defaultMaxIterations"):
+            self.assertEqual(after[field], before[field])
+        self.assertFalse(mc.CONTROLLER_PRODUCT_CONFIG_FIELDS.intersection(after))
+        self.assertNotIn("lifecycle", after)
+        self.assertEqual(after["controllerWorkspace"], mc.CANONICAL_CONTROLLER_WORKSPACE)
+        self.assertEqual(command("git", "show", f"{head}:{mc.CONFIG_PATH}", cwd=root), original.decode())
+        self.assertEqual(command("git", "rev-parse", self.policy["product_ref"], cwd=root), self.product_head)
+        self.assertEqual(command("git", "status", "--porcelain", cwd=root), "")
+        self.assertEqual(mc.config_repair_apply(args, self.policy)["new_head"], applied["new_head"])
+
+    def test_agent_config_refuses_dirty_stale_unauthorized_and_runtime_drift(self) -> None:
+        root, before = self.agent_config_fixture()
+        plan_path = self.temp / "agent-plan.json"
+        args = argparse.Namespace(root=root, output=plan_path)
+        original = (root / mc.CONFIG_PATH).read_bytes()
+        write(root / "notebook.ipynb", "preserve dirty notebook")
+        with self.assertRaisesRegex(mc.BoundaryError, "clean controller"):
+            mc.agent_config_plan(args, self.policy)
+        self.assertEqual((root / "notebook.ipynb").read_text(), "preserve dirty notebook")
+        command("git", "add", "notebook.ipynb", cwd=root)
+        command("git", "commit", "-m", "fixture owner preserves notebook", cwd=root)
+        mc.agent_config_plan(args, self.policy)
+        apply = argparse.Namespace(plan=plan_path, output=self.temp / "apply.json", authorize=False)
+        with self.assertRaisesRegex(mc.BoundaryError, "authorize-config-repair"):
+            mc.config_repair_apply(apply, self.policy)
+        apply.authorize = True
+        command("git", "config", "--worktree", "juno.controller.runtimeVersion", "0.0.0-mismatch", cwd=root)
+        with self.assertRaisesRegex(mc.BoundaryError, "runtime binding is incompatible"):
+            mc.config_repair_apply(apply, self.policy)
+        self.assertEqual((root / mc.CONFIG_PATH).read_bytes(), original)
+        package = mc.package_policy_source(root, str(self.policy_test_runtime_entrypoint()))
+        command("git", "config", "--worktree", "juno.controller.runtimeVersion", package["version"], cwd=root)
+        before["defaultMaxIterations"] = 7
+        write(root / mc.CONFIG_PATH, json.dumps(before))
+        with self.assertRaisesRegex(mc.BoundaryError, "clean controller"):
+            mc.config_repair_apply(apply, self.policy)
+        command("git", "add", mc.CONFIG_PATH, cwd=root)
+        command("git", "commit", "-m", "stale preimage", cwd=root)
+        with self.assertRaisesRegex(mc.BoundaryError, "neither the frozen"):
+            mc.config_repair_apply(apply, self.policy)
+        self.assertEqual(json.loads((root / mc.CONFIG_PATH).read_bytes()), before)
+
+    def test_agent_config_unknown_secret_and_forged_dispositions_refuse(self) -> None:
+        root, value = self.agent_config_fixture()
+        for field in ("unknown", "envFilePath", "envFileCopied"):
+            with self.assertRaisesRegex(mc.BoundaryError, "unknown/secret fields"):
+                mc.agent_config_correction({**value, field: "DO_NOT_PRINT_VALUE"})
+        plan_path = self.temp / "agent-plan.json"
+        plan = mc.agent_config_plan(argparse.Namespace(root=root, output=plan_path), self.policy)
+        plan["agent_config"]["field_dispositions"]["workingDirectory"] = "migrate"
+        plan.pop("plan_sha256")
+        plan["plan_sha256"] = mc.digest(plan)
+        plan_path.write_bytes(mc.canonical(plan))
+        with self.assertRaisesRegex(mc.BoundaryError, "exact derived field dispositions"):
+            mc.validate_config_repair_plan(plan_path)
+
+    def test_workspace_only_repair_cannot_produce_rejected_product_config(self) -> None:
+        self.prepare()
+        root = self.new_controller
+        write(root / mc.CONFIG_PATH, json.dumps({"controllerWorkspace": mc.RETIRED_CONTROLLER_WORKSPACE,
+                                                "workingDirectory": str(root)}))
+        command("git", "add", mc.CONFIG_PATH, cwd=root)
+        command("git", "commit", "-m", "retired pointer with product field", cwd=root)
+        with self.assertRaisesRegex(mc.BoundaryError, "would retain product-only fields"):
+            mc.config_repair_plan(argparse.Namespace(root=root, branch=self.policy["controller_branch"],
+                product_ref=self.policy["product_ref"], expected_head=command("git", "rev-parse", "HEAD", cwd=root),
+                expected_product_head=self.product_head, output=self.temp / "old-repair.json"), self.policy)
+
     def policy_test_runtime_entrypoint(self) -> Path:
         source_entrypoint = Path(__file__).resolve().parents[3] / "bin/cli.ts"
         if source_entrypoint.is_file():
