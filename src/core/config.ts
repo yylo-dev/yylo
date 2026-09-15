@@ -18,7 +18,7 @@ import type { JunoTaskConfig, PromptMacroConfig } from '../types/index';
 import { getDefaultHooks } from '../templates/default-hooks.js';
 import { SUBAGENT_DEFAULT_MODELS } from './subagent-models.js';
 import { migrateLegacyEnvironment } from './identity-migration.js';
-import { resolveController } from '../utils/controller-resolver.js';
+import { resolveController, type WorkspaceRole } from '../utils/controller-resolver.js';
 import { WorkspaceModeSchema, assertWorkspaceStartupSupported } from './workspace-mode.js';
 
 /**
@@ -242,7 +242,7 @@ export const METADATA_CONTROLLER_CONFIG_FIELD_OWNERSHIP = {
 
 export function selectAgentProfileHooks(
   profile: JunoTaskConfig['agentProfile'] | undefined,
-  role: 'controller' | 'controller-retired' | 'task' | 'integration-owner' | 'unregistered',
+  role: WorkspaceRole,
 ): JunoTaskConfig['hooks'] | undefined {
   if (!profile?.roleHooks) return undefined;
   if (role === 'controller') return profile.roleHooks.controller;
@@ -1628,7 +1628,7 @@ export async function loadConfig(
   const { baseDir = process.cwd(), configFile, cliConfig } = options;
   const invocationDir = path.resolve(baseDir);
   let profileDir = invocationDir;
-  let invocationRole: 'controller' | 'controller-retired' | 'task' | 'integration-owner' | 'unregistered' = 'unregistered';
+  let invocationRole: WorkspaceRole = 'unregistered';
   if (!configFile) {
     try {
       const resolution = resolveController(invocationDir, 'diagnostic');

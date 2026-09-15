@@ -51,8 +51,8 @@ export type TaskWorkspaceCheckpointer = typeof checkpointControllerAfterFinaliza
 export type TaskRuntimeBootstrapOptions = { dryRun?: boolean; apply?: string };
 export type TaskRuntimeBootstrapInvoker = (options: TaskRuntimeBootstrapOptions) => Promise<void>;
 
-export function taskWorkspaceControlOperation(operation: TaskWorkspaceOperation): 'kanban' | 'orchestration' {
-  return ['status', 'admission', 'preflight', 'recovery-plan', 'recovery-verify', 'evidence-status', 'doctor', 'lease-status',
+export function taskWorkspaceControlOperation(operation: TaskWorkspaceOperation | 'local'): 'kanban' | 'orchestration' {
+  return ['local', 'status', 'admission', 'preflight', 'recovery-plan', 'recovery-verify', 'evidence-status', 'doctor', 'lease-status',
     'state-archive-plan', 'state-archive-verify', 'state-archive-get'].includes(operation) ? 'kanban' : 'orchestration';
 }
 
@@ -178,14 +178,52 @@ export async function invokeTaskWorkspace(
   if (exitCode !== 0) process.exitCode = exitCode;
 }
 
+export async function invokeLocalTaskBookkeeping(args: string[]): Promise<void> {
+  const route = routeControlPlane(process.cwd(), 'kanban', undefined, 'local-task-bookkeeping');
+  if (route.invocationRole !== 'simple') {
+    throw new Error('yy task local is only for Simple workspaces; use yy ledger or the managed task lifecycle here.');
+  }
+  try {
+    const { exitCode } = await invokeMachineAwareChild({
+      executable: 'yylo-ledger',
+      args: ['-c', path.join(route.controllerRoot, '.juno_task/tasks/config.json'), ...args],
+      cwd: route.controllerRoot,
+      env: route.env,
+      command: `task.local.${args[0]}`,
+    });
+    if (exitCode !== 0) process.exitCode = exitCode;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error('Compatible YYLO Ledger executable is missing from PATH. Install the compatible Ledger runtime explicitly, then retry; no packages were installed.');
+    }
+    throw error;
+  }
+}
+
 export function configureTaskWorkspaceCommand(
   program: Command,
   invoke: TaskWorkspaceInvoker = invokeTaskWorkspace,
   invokeBootstrap: TaskRuntimeBootstrapInvoker = invokeTaskRuntimeBootstrap,
+  invokeLocal: (args: string[]) => Promise<void> = invokeLocalTaskBookkeeping,
 ): void {
   const task = addMachineOutputOptions(program
     .command('task')
-    .description('Create, inspect, and queue one exact-base feature worktree'));
+    .description('Managed feature worktrees, or explicit Simple local bookkeeping'));
+  const local = task.command('local').description('Simple Ledger bookkeeping only; no commits, isolation or delivery receipts');
+  local.command('list').description('List local Ledger tasks')
+    .action(() => invokeLocal(['list']));
+  local.command('get <task-id>').description('Read one local Ledger task')
+    .action((id: string) => {
+      if (!/^[A-Za-z0-9]{6}$/.test(id)) throw new Error('Expected a six-character Ledger task ID.');
+      return invokeLocal(['get', id]);
+    });
+  local.command('mark <status> <task-id>').description('Update Ledger bookkeeping, not managed delivery')
+    .requiredOption('--response <text>', 'Reason for the bookkeeping change')
+    .action((status: string, id: string, options: { response: string }) => {
+      if (!['backlog', 'todo', 'in_progress', 'done'].includes(status)) throw new Error('Unsupported Ledger task status.');
+      if (!/^[A-Za-z0-9]{6}$/.test(id)) throw new Error('Expected a six-character Ledger task ID.');
+      return invokeLocal(['mark', status, '--id', id, '--response', options.response]);
+    });
   task
     .command('run')
     .description('Execute the managed workflow through QUEUED; acquires its own fence without --lease-token')
