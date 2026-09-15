@@ -328,6 +328,41 @@ describe('Configuration Module', () => {
       );
     });
 
+    it.each(['project', 'explicit', 'profile'])(
+      'identifies every rejected field and source without rewriting the %s input', async (source) => {
+        const configPath = source === 'explicit'
+          ? path.join(tempDir, 'explicit.json')
+          : path.join(tempDir, '.juno_task', 'config.json');
+        await fs.ensureDir(path.dirname(configPath));
+        const before = JSON.stringify({
+          controllerWorkspace: { mode: 'metadata-only', policy: '.juno_task/config/metadata-controller.json' },
+          workingDirectory: tempDir,
+          hooks: { START_RUN: 'private hook payload must not appear in the diagnostic' },
+          skipHooks: false,
+          lifecycle: {},
+          agentProfile: { version: 1, promptAssetRoot: '.juno_task/prompts' },
+        }, null, 2) + '\n';
+        await fs.writeFile(configPath, before);
+        const loading = source === 'profile'
+          ? loadConfig({ baseDir: tempDir })
+          : source === 'explicit'
+            ? new ConfigLoader(tempDir).fromFile(configPath)
+            : new ConfigLoader(tempDir).fromProjectConfig();
+        const error = await loading.then(() => undefined, (failure: Error) => failure);
+        expect(error).toBeInstanceOf(Error);
+        expect(error!.message).toContain(configPath);
+        for (const field of ['workingDirectory', 'hooks', 'skipHooks', 'lifecycle']) {
+          expect(error!.message).toContain(field);
+        }
+        expect(error!.message).toContain('validated invocation context');
+        expect(error!.message).toContain('yy migrate inventory --help');
+        expect(error!.message).toContain('Runtime receipt compatibility is a separate gate');
+        expect(error!.message).not.toContain('private hook payload');
+        expect(await fs.readFile(configPath, 'utf8')).toBe(before);
+        expect(await fs.pathExists(path.join(tempDir, '.env.yylo'))).toBe(false);
+      },
+    );
+
     it('should accept an enabled cross-project Kanban alias allowlist', () => {
       const config = validateConfig({
         ...DEFAULT_CONFIG,

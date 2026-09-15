@@ -250,19 +250,26 @@ export function selectAgentProfileHooks(
   return undefined;
 }
 
-function validateMetadataControllerSource(config: Partial<JunoTaskConfig>): void {
+function validateMetadataControllerSource(config: Partial<JunoTaskConfig>, sourcePath: string): void {
   const raw = config as Record<string, unknown>;
   const workspace = raw.controllerWorkspace as Record<string, unknown> | undefined;
   if (workspace?.mode !== 'metadata-only') return;
-  for (const field of METADATA_CONTROLLER_CONFIG_FIELD_OWNERSHIP.productOnly) {
-    if (Object.prototype.hasOwnProperty.call(raw, field)) {
-      throw new Error(`Metadata-controller configuration field ${field} is product-only and cannot be activated in the controller`);
-    }
-  }
-  for (const field of METADATA_CONTROLLER_CONFIG_FIELD_OWNERSHIP.retired) {
-    if (Object.prototype.hasOwnProperty.call(raw, field)) {
-      throw new Error(`Metadata-controller configuration field ${field} is retired`);
-    }
+  const rejected = [
+    ...METADATA_CONTROLLER_CONFIG_FIELD_OWNERSHIP.productOnly
+      .filter((field) => Object.prototype.hasOwnProperty.call(raw, field))
+      .map((field) => `${field} is product-only`),
+    ...METADATA_CONTROLLER_CONFIG_FIELD_OWNERSHIP.retired
+      .filter((field) => Object.prototype.hasOwnProperty.call(raw, field))
+      .map((field) => `${field} is retired`),
+  ];
+  if (rejected.length) {
+    throw new Error(
+      `Metadata-controller configuration ${JSON.stringify(path.resolve(sourcePath))}: ${rejected.join('; ')}. `
+      + 'Product execution settings cannot be activated in a metadata-only controller; cwd comes from validated invocation context. '
+      + 'No configuration was rewritten. Inspect this file and run `yy migrate inventory --help` for the supported read-only inventory step before a reviewed migration. '
+      + 'Do not delete fields blindly or upgrade the runtime to bypass this ownership check. '
+      + 'Runtime receipt compatibility is a separate gate; inspect it with `yy scripts doctor --help`.',
+    );
   }
 }
 
@@ -734,8 +741,9 @@ async function resolvePromptMacroDictionary(
 async function resolvePromptMacroFileEntries(
   config: Partial<JunoTaskConfig>,
   baseDir: string,
+  sourcePath: string,
 ): Promise<Partial<JunoTaskConfig>> {
-  validateMetadataControllerSource(config);
+  validateMetadataControllerSource(config, sourcePath);
   const profile = config.agentProfile;
   const promptAssetBaseDir = profile
     ? path.resolve(baseDir, profile.promptAssetRoot)
@@ -846,12 +854,12 @@ async function loadConfigFromFile(
   switch (format) {
     case 'json':
       if (path.basename(filePath) === 'package.json') {
-        return resolvePromptMacroFileEntries(await loadPackageJsonConfig(resolvedPath), macroPathBaseDir);
+        return resolvePromptMacroFileEntries(await loadPackageJsonConfig(resolvedPath), macroPathBaseDir, resolvedPath);
       }
-      return resolvePromptMacroFileEntries(await loadJsonConfig(resolvedPath), macroPathBaseDir);
+      return resolvePromptMacroFileEntries(await loadJsonConfig(resolvedPath), macroPathBaseDir, resolvedPath);
 
     case 'yaml':
-      return resolvePromptMacroFileEntries(await loadYamlConfig(resolvedPath), macroPathBaseDir);
+      return resolvePromptMacroFileEntries(await loadYamlConfig(resolvedPath), macroPathBaseDir, resolvedPath);
 
     case 'toml':
       // TOML support would require additional dependency
@@ -1283,7 +1291,7 @@ async function readMetadataAgentProfile(baseDir: string): Promise<
   const raw = await fs.readJson(configPath) as Record<string, unknown>;
   const workspace = raw.controllerWorkspace as Record<string, unknown> | undefined;
   if (workspace?.mode !== 'metadata-only') return undefined;
-  validateMetadataControllerSource(raw as Partial<JunoTaskConfig>);
+  validateMetadataControllerSource(raw as Partial<JunoTaskConfig>, configPath);
   const parsed = AgentProfileSchema.parse(raw.agentProfile);
   return { metadata: true, profile: parsed as JunoTaskConfig['agentProfile'] };
 }
