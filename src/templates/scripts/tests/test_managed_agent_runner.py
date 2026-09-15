@@ -32,7 +32,12 @@ class ManagedAgentRunnerTests(unittest.TestCase):
                   "envFilePath":".env.yylo", "promptMacros":{"global":{"reflect":{"path":".juno_task/prompts/reflect.md"}},"local":{}}}
         (self.controller / ".juno_task/config.json").write_text(json.dumps(config) + "\n")
         (self.controller / ".juno_task/state").mkdir()
-        (self.controller / ".juno_task/state/tasks.json").write_text("{}\n")
+        (self.controller / ".juno_task/state/tasks.json").write_text(
+            json.dumps({"tasks": {"TASK": {"state": "WORKING"}, "T1": {"state": "WORKING"}}}) + "\n")
+        for task in ("TASK", "T1"):
+            task_path = self.controller / f".juno_task/tasks/{task[:2].lower()}/{task}.md"
+            task_path.parent.mkdir(parents=True, exist_ok=True)
+            task_path.write_text("task requirements\n")
         subprocess.run(["git", "-C", str(self.controller), "add", "."], check=True)
         subprocess.run(["git", "-C", str(self.controller), "-c", "user.name=T", "-c", "user.email=t@t", "commit", "-m", "controller"], check=True, stdout=subprocess.DEVNULL)
         self.candidate = self.tmp / "candidate"; self.candidate.mkdir()
@@ -105,6 +110,18 @@ if binding:
 payload={'session_id':'session-one' if tool_id=='managed_agent_runner' else 'session-'+tool_id,'result':review_result}
 if 'typed-' in prompt:
  payload['terminal_outcome']={'schema_version':'juno_managed_agent_terminal_result.v1','state':prompt.split('typed-',1)[1].split()[0]}
+if 'controller-action:' in prompt:
+ action=json.loads(prompt.split('controller-action:',1)[1].splitlines()[0])
+ root=pathlib.Path(action['root'])
+ if action['kind'] in ('unrelated', 'takeover'):
+  path=root/'.juno_task/state/tasks.json'; state=json.loads(path.read_text())
+  state['tasks']['OTHER' if action['kind']=='unrelated' else 'T1']={'state':'WORKING','attempt':2}
+  path.write_text(json.dumps(state)+'\\n')
+ else:
+  path=root/'.juno_task/config.json'; config=json.loads(path.read_text())
+  config['changed']=True; path.write_text(json.dumps(config)+'\\n')
+ subprocess.run(['git','-C',str(root),'add','.juno_task'],check=True)
+ subprocess.run(['git','-C',str(root),'-c','user.name=T','-c','user.email=t@t','commit','-m','checkpoint'],check=True,stdout=subprocess.DEVNULL)
 if 'semantic-fail' in prompt: payload['is_error']=True
 if 'empty' in prompt: payload['result']=''
 if settled_recovery:
@@ -162,14 +179,10 @@ print(json.dumps({'path':str(pathlib.Path.cwd().resolve()),'role':'controller',
         return config_path, policy_path
 
     def legacy_policy_bytes(self):
-        policy = json.loads((RUNNER.parents[1] / "config/metadata-controller.json").read_text())
-        policy["controller_branch"] = runner.LEGACY_METADATA_CONTROLLER_BRANCH
-        policy["product_ref"] = runner.LEGACY_METADATA_PRODUCT_REF
-        policy["runtime"]["ignored_roots"] = [
-            ".juno_task/runtime", ".juno_task/scripts", ".venv_juno", ".env.yylo"]
-        data = (json.dumps(policy, indent=2, ensure_ascii=False) + "\n").encode()
-        self.assertEqual(data, runner.LEGACY_METADATA_POLICY)
-        self.assertEqual(hashlib.sha256(data).hexdigest(), runner.LEGACY_METADATA_POLICY_SHA256)
+        # Current policy evolves independently of this exact historical fixture.
+        data = runner.LEGACY_METADATA_POLICY
+        self.assertEqual(hashlib.sha256(data).hexdigest(),
+                         "ad2c1214fe89c67bd8d3e9646d939c4199b585c1d5ccbffdaf1ef87c43236693")
         return data
 
     def test_controller_identity_refuses_every_dirty_controller(self):
@@ -184,28 +197,131 @@ print(json.dumps({'path':str(pathlib.Path.cwd().resolve()),'role':'controller',
 
     def test_worker_metadata_admission_binds_bytes_without_checkpoint(self):
         state = self.controller / ".juno_task/state/tasks.json"
-        state.write_text('{"task":"working"}\n')
+        state.write_text('{"tasks":{"TASK":{"state":"WORKING"}}}\n')
         before = runner.controller_identity(self.controller, worker_task_id="TASK")
-        self.assertEqual(before["worker_metadata_sha256"][".juno_task/state/tasks.json"],
-                         runner.sha(state.read_bytes()))
+        self.assertEqual(before["worker_metadata_sha256"]["task_state"],
+                         runner.sha(runner.canonical({"state": "WORKING"})))
         self.assertEqual(before, runner.controller_identity(self.controller, worker_task_id="TASK"))
-        state.write_text('{"task":"changed"}\n')
+        state.write_text('{"tasks":{"TASK":{"state":"WITHDRAWN"}}}\n')
         self.assertNotEqual(before, runner.controller_identity(self.controller, worker_task_id="TASK"))
         with self.assertRaises(runner.RunnerError):
             runner.controller_identity(self.controller)
 
-    def test_worker_metadata_admission_refuses_unrelated_and_staged_changes(self):
+    def test_worker_metadata_admission_refuses_non_metadata_dirt(self):
         config = self.controller / ".juno_task/config.json"
         original = config.read_bytes()
         config.write_text('{}\n')
-        with self.assertRaisesRegex(runner.RunnerError, "unrelated"):
+        with self.assertRaisesRegex(runner.RunnerError, "non-metadata"):
             runner.controller_identity(self.controller, worker_task_id="TASK")
         config.write_bytes(original)
         state = self.controller / ".juno_task/state/tasks.json"
-        state.write_text('{"task":"working"}\n')
+        state.write_text('{"tasks":{"TASK":{"state":"WORKING"}}}\n')
+        before = runner.controller_identity(self.controller, worker_task_id="TASK")
         git(self.controller, "add", str(state))
-        with self.assertRaisesRegex(runner.RunnerError, "staged"):
+        self.assertEqual(before, runner.controller_identity(self.controller, worker_task_id="TASK"))
+        config.write_text('{}\n')
+        git(self.controller, "add", str(config))
+        with self.assertRaisesRegex(runner.RunnerError, "non-metadata"):
             runner.controller_identity(self.controller, worker_task_id="TASK")
+
+    def test_worker_identity_ignores_unrelated_rows_and_admission_checkpoint(self):
+        state_path = self.controller / ".juno_task/state/tasks.json"
+        state = json.loads(state_path.read_text())
+        state["tasks"]["TASK"]["attempt"] = 1  # admission before launch, still dirty
+        state_path.write_text(json.dumps(state))
+        before = runner.controller_identity(self.controller, worker_task_id="TASK")
+        head = git(self.controller, "rev-parse", "HEAD")
+        state["tasks"]["OTHER"] = {"state": "WORKING"}
+        state_path.write_text(json.dumps(state))
+        for relative in ("tasks/ot/OTHER.md", "ledger/ot/OTHER/000001.ndjson",
+                         "task-scopes/ot/OTHER.json"):
+            path = self.controller / ".juno_task" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("unrelated\n")
+        self.assertEqual(before, runner.controller_identity(self.controller, worker_task_id="TASK"))
+        git(self.controller, "add", ".juno_task")
+        self.assertEqual(before, runner.controller_identity(self.controller, worker_task_id="TASK"))
+        git(self.controller, "-c", "user.name=T", "-c", "user.email=t@t", "commit", "-m", "checkpoint")
+        self.assertNotEqual(head, git(self.controller, "rev-parse", "HEAD"))
+        self.assertEqual(before, runner.controller_identity(self.controller, worker_task_id="TASK"))
+
+    def test_worker_identity_binds_own_requirements_scope_registration_and_branch(self):
+        before = runner.controller_identity(self.controller, worker_task_id="TASK")
+        task = self.controller / ".juno_task/tasks/ta/TASK.md"
+        task.write_text("changed requirements\n")
+        self.assertNotEqual(before, runner.controller_identity(self.controller, worker_task_id="TASK"))
+        task.write_text("task requirements\n")
+        scope = self.controller / ".juno_task/task-scopes/ta/TASK.json"
+        scope.parent.mkdir(parents=True)
+        scope.write_text('{"paths":["new"]}\n')
+        self.assertNotEqual(before, runner.controller_identity(self.controller, worker_task_id="TASK"))
+        scope.unlink()
+        git(self.controller, "config", "juno.controller.path", "/different")
+        self.assertNotEqual(before, runner.controller_identity(self.controller, worker_task_id="TASK"))
+        git(self.controller, "config", "--unset", "juno.controller.path")
+        git(self.controller, "branch", "-m", "other-controller")
+        self.assertNotEqual(before, runner.controller_identity(self.controller, worker_task_id="TASK"))
+
+    def test_worker_identity_refuses_missing_malformed_and_symlinked_task_state(self):
+        state = self.controller / ".juno_task/state/tasks.json"
+        for text in ('{', '{}', '{"tasks":[]}', '{"tasks":{"TASK":null}}',
+                     '{"tasks":{"TASK":{"unexpected":true}}}'):
+            with self.subTest(text=text), self.assertRaises(runner.RunnerError):
+                state.write_text(text)
+                runner.controller_identity(self.controller, worker_task_id="TASK")
+        state.unlink()
+        with self.assertRaises(runner.RunnerError):
+            runner.controller_identity(self.controller, worker_task_id="TASK")
+        state.symlink_to(self.env_target)
+        with self.assertRaises(runner.RunnerError):
+            runner.controller_identity(self.controller, worker_task_id="TASK")
+
+    def test_worker_identity_retains_state_budget_and_binds_missing_task(self):
+        before = runner.controller_identity(self.controller, worker_task_id="TASK")
+        state = self.controller / ".juno_task/state/tasks.json"
+        value = json.loads(state.read_text())
+        value["tasks"]["OTHER"] = {"padding": "x" * runner.CAPTURE_LIMIT}
+        state.write_text(json.dumps(value))
+        self.assertEqual(before, runner.controller_identity(self.controller, worker_task_id="TASK"))
+        task = self.controller / ".juno_task/tasks/ta/TASK.md"
+        task.unlink()
+        with self.assertRaisesRegex(runner.RunnerError, "missing"):
+            runner.controller_identity(self.controller, worker_task_id="TASK")
+        task.write_text("task requirements\n")
+        with state.open("wb") as stream:
+            stream.truncate(25 * 1024 * 1024 + 1)
+        with self.assertRaisesRegex(runner.RunnerError, "unbounded"):
+            runner.controller_identity(self.controller, worker_task_id="TASK")
+
+    def test_worker_identity_binds_committed_and_ignored_runtime_inputs(self):
+        self.install_metadata_controller_contract()
+        before = runner.controller_identity(self.controller, worker_task_id="TASK")
+        for relative in (".juno_task/config.json", ".juno_task/prompts/reflect.md",
+                         ".juno_task/config/metadata-controller.json",
+                         ".juno_task/scripts/controller_resolver.py"):
+            path = self.controller / relative
+            data = path.read_bytes()
+            path.write_bytes(data + b"\n")
+            with self.subTest(relative=relative), self.assertRaises(runner.RunnerError):
+                runner.controller_identity(self.controller, worker_task_id="TASK")
+            git(self.controller, "add", relative)
+            git(self.controller, "-c", "user.name=T", "-c", "user.email=t@t", "commit", "-m", "input change")
+            self.assertNotEqual(before, runner.controller_identity(self.controller, worker_task_id="TASK"))
+            path.write_bytes(data)
+            git(self.controller, "add", relative)
+            git(self.controller, "-c", "user.name=T", "-c", "user.email=t@t", "commit", "-m", "restore fixture")
+        ignore = self.controller / ".git/info/exclude"
+        ignore.write_text("ignored.txt\n.juno_task/scripts/ignored.py\n.pi/skills/\n")
+        script = self.controller / ".juno_task/scripts/ignored.py"
+        script.write_text("original\n")
+        before = runner.controller_identity(self.controller, worker_task_id="TASK")
+        script.write_text("changed\n")
+        self.assertNotEqual(before, runner.controller_identity(self.controller, worker_task_id="TASK"))
+        script.write_text("original\n")
+        skill = self.controller / ".pi/skills/test/SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("new instruction\n")
+        self.assertNotEqual(before, runner.controller_identity(self.controller, worker_task_id="TASK"))
 
     def test_resolver_policy_requires_clean_success(self):
         passed = subprocess.CompletedProcess([], 0, "", "")
@@ -1044,7 +1160,7 @@ print(json.dumps({'path':str(pathlib.Path.cwd().resolve()),'role':'controller',
 
     def test_worker_admission_and_changed_path_authority(self):
         state = self.controller / ".juno_task/state/tasks.json"
-        state.write_text('{"T1":"WORKING"}\n')
+        state.write_text('{"tasks":{"T1":{"state":"WORKING"}}}\n')
         before_bytes = state.read_bytes()
         common = str((self.candidate / git(self.candidate, "rev-parse", "--git-common-dir")).resolve())
         create = {"task_id":"T1", "worktree":str(self.candidate), "branch_ref":"refs/heads/task", "git_common_dir":common,
@@ -1063,6 +1179,67 @@ print(json.dumps({'path':str(pathlib.Path.cwd().resolve()),'role':'controller',
         self.assertEqual(state.read_bytes(), before_bytes)
         self.assertEqual(receipt["controller_before"], receipt["controller_after"])
         self.assertIn("worker_metadata_sha256", receipt["controller_before"])
+
+    def worker_command(self, out):
+        common = str((self.candidate / git(self.candidate, "rev-parse", "--git-common-dir")).resolve())
+        values = {"create": {"task_id": "T1", "worktree": str(self.candidate),
+                            "branch_ref": "refs/heads/task", "git_common_dir": common,
+                            "expected_paths": ["allowed.txt"]},
+                  "verify": {"passed": True, "task_id": "T1"},
+                  "edit": {"passed": True, "task_id": "T1"}}
+        paths = []
+        for name, value in values.items():
+            path = self.tmp / f"worker-{name}.json"
+            path.write_text(json.dumps(value)); paths.append(str(path))
+        return [sys.executable, str(RUNNER), "run", "--mode", "worker",
+                "--controller-root", str(self.controller), "--controller-branch", "controller",
+                "--agent-root", str(self.candidate), "--prompt-file", str(self.prompt),
+                "--out-dir", str(out), "--task-id", "T1", "--create-receipt", paths[0],
+                "--verify-receipt", paths[1], "--edit-preflight-receipt", paths[2],
+                "--require-terminal-result", "--external-side-effects", "forbidden",
+                "--lifecycle-hooks", "disabled"]
+
+    def test_worker_run_preserves_producer_outcome_across_controller_changes(self):
+        state = self.controller / ".juno_task/state/tasks.json"
+        original_state = state.read_bytes()
+        for kind in ("unrelated", "takeover", "config"):
+            with self.subTest(kind=kind):
+                state.write_bytes(original_state)
+                self.prompt.write_text("typed-incomplete\ncontroller-action:" + json.dumps(
+                    {"root": str(self.controller), "kind": kind}) + "\n")
+                out = self.tmp / ("concurrent-" + kind)
+                result = subprocess.run(self.worker_command(out), env=self.env(), capture_output=True, text=True)
+                receipt = json.loads((out / "receipt.json").read_text())
+                self.assertEqual(receipt["producer_terminal_result"]["state"], "incomplete")
+                if kind == "unrelated":
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(receipt["semantic_outcome"], "incomplete")
+                    self.assertEqual(receipt["controller_guard"]["outcome"], "passed")
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(receipt["state"], "failed")
+                    self.assertEqual(receipt["controller_guard"]["outcome"], "refused")
+                    self.assertIn("worker_metadata_sha256", receipt["controller_guard"]["changed_keys"])
+                    self.assertLessEqual(len(receipt["controller_guard"]["changed_keys"]), 16)
+                self.assertNotIn("not-for-receipts", json.dumps(receipt))
+
+    def test_worker_run_still_refuses_unadmitted_output(self):
+        fake = self.bin / "yy"
+        fake.write_text(fake.read_text().replace("payload={'session_id':", """
+root=pathlib.Path(os.environ['TASK_ROOT'])
+(root/'unadmitted.txt').write_text('wrong path')
+subprocess.run(['git','-C',str(root),'add','.'],check=True)
+subprocess.run(['git','-C',str(root),'-c','user.name=T','-c','user.email=t@t','commit','-m','wrong'],check=True,stdout=subprocess.DEVNULL)
+payload={'session_id':"""))
+        self.prompt.write_text("typed-completed\n")
+        out = self.tmp / "unadmitted"
+        result = subprocess.run(self.worker_command(out), env=self.env(), capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        receipt = json.loads((out / "receipt.json").read_text())
+        self.assertIn("changed-path", receipt["failure"])
+        self.assertEqual(receipt["controller_guard"]["outcome"], "passed")
+        self.assertEqual(receipt["producer_terminal_result"]["state"], "completed")
+        self.assertEqual(receipt["semantic_outcome"], "failed")
 
     def test_run_recovers_missing_worker_capture_after_exact_settlement(self):
         common = str((self.candidate / git(
