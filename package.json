@@ -61,6 +61,8 @@
     "test:task-workspace:seeded": "node scripts/test-task-workspace.mjs --mode seeded",
     "test:task-workspace:hermetic": "node scripts/test-task-workspace.mjs --mode hermetic",
     "test:task-workspace:complete": "node scripts/test-task-workspace.mjs --mode complete",
+    "test:simple": "npm test -- src/utils/__tests__/simple-init.test.ts src/utils/__tests__/simple-workspace-routing.test.ts src/core/__tests__/simple-startup.test.ts src/core/__tests__/session-simple.test.ts",
+    "test:simple-package": "node scripts/verify-simple-package.mjs",
     "test:managed-assets": "node scripts/verify-managed-assets.mjs",
     "test:skill-contracts": "node scripts/verify-skill-argument-contracts.mjs",
     "test:template-bytecode-package": "node scripts/verify-template-bytecode-cleanup.mjs",
