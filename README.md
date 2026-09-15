@@ -290,21 +290,21 @@ Git; `merge project` separately records an already successful Git result.
 yy task start TASK_ID
 # Change directory to the worktree printed by start.
 # Read its AGENTS.md/CLAUDE.md, implement, run focused tests, and commit.
-yy task preflight TASK_ID
 yy task finish TASK_ID
 yy merge status TASK_ID
 yy merge land TASK_ID
 yy merge project TASK_ID
 ```
 
-The guarded admission order is `yy task preflight ID -> yy task finish ID`.
-Delivery remains a separate one-task operation.
+The ordinary path is clean commit -> `yy task finish TASK_ID`.
+Optional read-only `yy task preflight TASK_ID` diagnoses admission before finish;
+it is not a prerequisite. Delivery remains a separate one-task operation.
 
 Safety invariants:
 
 1. `task start` freezes the protected target SHA, creates a dedicated branch/worktree, and completes configured dependency hydration before reporting `WORKING`.
 2. Product edits and focused tests occur only in that task worktree. Controller metadata and integration-owner product bytes are separate authorities.
-3. `preflight` is read-only and catches closure defects before expensive gates. `finish` requires a clean committed tip and queues it; it does not merge.
+3. `preflight` is optional and read-only. `finish` independently enforces scope, dirty-byte, runtime, hydration, requirements, ownership, and selected-validation checks, requires a clean committed tip, and queues it; it does not merge.
 4. Tests and semantic reviews are explicit project checks outside merge. Merge launches no models, chooses no reviewers, schedules no suites, and maintains no validation cache.
 5. `merge land` selects one immutable task source, composes in a private detached candidate, and uses Git expected-old ref protection. A moved target requires recomposition and renewed candidate checks.
 6. A conflict remains private to its task and cannot block an unrelated task. Preserve conflicts and unrelated dirty bytes; do not reset, stash, force, rebase, squash, or clean to bypass them.

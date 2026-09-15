@@ -72,8 +72,11 @@ try {
     const instruction = readFileSync(path.join(installed, relative), 'utf8');
     assert.doesNotMatch(instruction, /release[-_ ]train|sealed release epoch/iu,
       `packed retired release-train instruction: ${relative}`);
+    assert.match(instruction, /Optional read-only `yy task preflight TASK_ID`/u,
+      `preflight must be optional: ${relative}`);
+    assert.match(instruction, /not a prerequisite/u);
+    assert.doesNotMatch(instruction, /preflighted tip|preflight TASK_ID\n/u);
     if (relative.includes('/controller-agent/')) continue;
-    assert.match(instruction, /yy task preflight TASK_ID/u, `missing task preflight: ${relative}`);
     assert.match(instruction, /\.\.\/wiki\/controller\/task_dependency_hydration\.md/u,
       `stale controller wiki link: ${relative}`);
     assert.doesNotMatch(instruction, /\.\.\/wiki\/task_dependency_hydration\.md/u,
@@ -86,7 +89,7 @@ try {
   assert.match(migrationInstruction, /yy task preflight CANARY_X/u);
   assert.match(migrationInstruction, /yy task preflight CANARY_Y/u);
   assert.match(readFileSync(path.join(installed, 'README.md'), 'utf8'),
-    /yy task preflight ID -> yy task finish ID/u);
+    /clean commit -> `yy task finish TASK_ID`/u);
 
   const selections = {
     task_workspace: [

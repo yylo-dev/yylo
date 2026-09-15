@@ -360,6 +360,13 @@ describe('ManagedProjectAssets', {
     const freshLoader = new ConfigLoader(projectDir);
     await freshLoader.fromProjectConfig();
     const dictionary = getPromptMacroDictionary(freshLoader.merge());
+    for (const name of ['life_cycle', 'clean_worktree', 'new_task_workflow', 'run_workflow']) {
+      expect(dictionary[name], name).toContain('Optional read-only `yy task preflight TASK_ID`');
+      expect(dictionary[name], name).toContain('not a prerequisite');
+      expect(dictionary[name], name).toContain('yy task finish TASK_ID');
+      expect(dictionary[name], name).not.toMatch(/preflighted (?:tip|closure)|^yy task preflight TASK_ID$/m);
+    }
+    expect(dictionary.life_cycle).toContain('revision: 9');
     expect(dictionary.life_cycle).toContain('juno.life_cycle.v1');
     expect(dictionary.life_cycle).toContain('yy watch exec -- COMMAND');
     expect(dictionary.life_cycle).toContain('yy watch status|await');
@@ -488,7 +495,9 @@ describe('ManagedProjectAssets', {
         path.join(process.cwd(), 'src/templates/controller-agent', relative),
         'utf8',
       );
-      expect(controllerInstruction, relative).toContain('yy task preflight TASK_ID');
+      expect(controllerInstruction, relative).toContain('Optional read-only `yy task preflight TASK_ID`');
+      expect(controllerInstruction, relative).toContain('not a prerequisite');
+      expect(controllerInstruction, relative).toContain('independently enforces admission and validation');
       expect(controllerInstruction, relative).toContain('yy merge land TASK_ID');
       expect(controllerInstruction, relative).toContain('yy merge project TASK_ID');
       expect(controllerInstruction, relative).toContain('launches no models');

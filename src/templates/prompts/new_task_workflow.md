@@ -12,20 +12,17 @@ The project-owned task-workspace policy supplies the full product target ref, al
 
 Implement and commit only inside the returned product worktree. Immediately after start and before editing or testing, follow the exact-lock, validation-cwd-aware hydration contract in [task dependency hydration](../wiki/controller/task_dependency_hydration.md). Stop before implementation if provisioning or its clean-tree check fails. The controller keeps Kanban and task artifacts; those files are never copied into product worktrees. Other tasks may start from the same target in their own worktrees while this task is active.
 
-When implementation is clean and committed, run the read-only closure check:
-
-```text
-yy task preflight TASK_ID
-```
-
-Repair any reported admission, generated-output, runtime, or closure defect while
-the task is still `WORKING`. Then run:
+When implementation is clean and committed, run:
 
 ```text
 yy task finish TASK_ID
 ```
 
-Finish repeats the preflighted closure, validates the exact task identity and
+Optional read-only `yy task preflight TASK_ID` diagnoses admission before finish;
+it is not a prerequisite. Repair any reported admission, generated-output,
+runtime, or closure defect while the task is still `WORKING`.
+
+Finish independently enforces closure, validates the exact task identity and
 committed tip, runs configured focused validation, and records the task as
 `QUEUED`. It does not launch review, merge, release, push, deploy, clean up, or
 synchronize controller and product branches. Use `yy task status TASK_ID` for

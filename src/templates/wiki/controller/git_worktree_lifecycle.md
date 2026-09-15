@@ -14,7 +14,7 @@ worktrees. Delivery selects one immutable task source; there is no FIFO queue
 drive, target arbiter, merge-owned test/review/model loop, or automatic repair.
 
 ```text
-yy task start X -> edit/test/commit -> preflight -> finish -> QUEUED
+yy task start X -> edit/test/commit -> finish -> QUEUED
                                                         |
 yy merge land X -> private native Git candidate -> expected-old update
                                                         |
@@ -28,7 +28,7 @@ yy merge land X -> private native Git candidate -> expected-old update
 yy task start TASK_ID
 yy task status TASK_ID
 yy task admission TASK_ID
-yy task preflight TASK_ID
+yy task preflight TASK_ID       # optional read-only admission diagnostic
 yy task finish TASK_ID --lease-token <current-token>
 
 yy merge status [TASK_ID]       # read-only independent task status
@@ -39,8 +39,9 @@ yy merge project TASK_ID        # retry or repair Ledger projection after Git in
 `task start` freezes the target and runs exact-lock hydration before reporting
 `WORKING`. In the returned worktree, follow
 [task dependency hydration](task_dependency_hydration.md) before editing or
-testing and stop before implementation on failure. `preflight` is read-only;
-`finish` admits the clean immutable source after configured task validation.
+testing and stop before implementation on failure. `preflight` is optional and
+read-only, not a prerequisite. `finish` independently enforces admission and
+configured task validation of the clean immutable source.
 
 `merge land` resolves only the selected task. It composes in a private detached
 candidate and updates an unchecked-out target with Git expected-old protection.
@@ -71,7 +72,6 @@ mean the exact token from that command's response, not literal argument text.
 ```text
 yy task start TASK_ID
 # retain its returned token, then implement/test/commit in the returned worktree
-yy task preflight TASK_ID
 yy task finish TASK_ID --lease-token <returned-token>
 ```
 
