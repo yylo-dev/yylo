@@ -54,7 +54,7 @@ describe('task workspace CLI', () => {
     configureTaskWorkspaceCommand(program, async () => undefined);
     const task = program.commands.find((command) => command.name() === 'task');
     expect(task?.commands.map((command) => command.name())).toEqual([
-      'run', 'resume', 'recover-predispatch', 'recover-wall-budget', 'start', 'admission', 'preflight', 'checkpoint',
+      'local', 'run', 'resume', 'recover-predispatch', 'recover-wall-budget', 'start', 'admission', 'preflight', 'checkpoint',
       'hydrate', 'status', 'finish', 'doctor', 'sync', 'lease-status',
       'lease-heartbeat', 'lease-handoff', 'lease-successor', 'lease-revoke', 'lease-release',
       'state-archive-plan', 'state-archive-apply', 'state-archive-verify', 'state-archive-get',

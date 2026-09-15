@@ -74,10 +74,88 @@ def fail(message: str, result: dict[str, object]) -> None:
     raise ResolverError(message, result)
 
 
-def resolve(cwd: Path, operation: str) -> dict[str, object]:
+def resolve_simple(cwd: Path, root: Path, has_git: bool, operation: str) -> Optional[dict[str, object]]:
+    """Recognize explicit Simple authority before inherited controller routing."""
+    marker = root / ".juno_task/config.json"
+    result: dict[str, object] = {
+        "path": str(root), "current_root": str(root), "invocation_cwd": str(cwd),
+        "resolver": "installed", "source": "workspace-config", "role": "simple",
+        "expected_branch": None, "actual_branch": None, "enforcement": "strict",
+        "operation": operation, "valid": True, "diagnostics": [],
+        "workspace_mode": "simple", "workspace_version": 1,
+        "capabilities": ["diagnostics", "local-agent", "ledger", "local-task-bookkeeping"],
+    }
+    # A Simple marker below/above this Git root must not cross a project boundary.
+    for directory in (cwd, *cwd.parents):
+        if directory == root:
+            continue
+        other = directory / ".juno_task/config.json"
+        if other.is_file():
+            try:
+                document = json.loads(other.read_text(encoding="utf-8"))
+                mode = document.get("controllerWorkspace", {}) if isinstance(document, dict) else {}
+                if isinstance(mode, dict) and mode.get("mode") == "simple":
+                    fail(f"nested Simple/Git roots are unsupported: {other}; invoke from its primary project", result)
+            except (OSError, ValueError):
+                pass
+    if not marker.exists():
+        return None
+    try:
+        raw = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        fail(f"invalid workspace configuration {marker}: {exc}", result)
+    if not isinstance(raw, dict):
+        fail(f"workspace configuration must be an object: {marker}", result)
+    workspace = raw.get("controllerWorkspace")
+    if "controllerWorkspace" not in raw:
+        return None
+    if not isinstance(workspace, dict):
+        fail(f"invalid controllerWorkspace in {marker}", result)
+    # Retain legacy managed/sparse diagnostics in the managed resolver.
+    if workspace.get("mode") == "metadata-only":
+        if workspace != {"mode": "metadata-only", "policy": ".juno_task/config/metadata-controller.json"}:
+            fail(f"invalid metadata-only workspace configuration: {marker}", result)
+        return None
+    if "mode" not in workspace and workspace.get("enabled") is True:
+        return None
+    if workspace != {"mode": "simple", "version": 1} or type(workspace.get("version")) is not int:
+        fail(f"unknown or contradictory workspace mode/version in {marker}; refusing fallback", result)
+    if not has_git or not is_primary_worktree(root):
+        fail("Simple MVP requires a primary Git checkout; no-Git and linked worktrees are unsupported", result)
+    if marker.is_symlink() or marker.resolve().parent != root / ".juno_task" or (root / ".juno_task").is_symlink():
+        fail("Simple workspace configuration must be local, not symlinked", result)
+    registration = git(root, "config", "--local", "--get-regexp", r"^juno\.(controller|workspace)\.")
+    role = git(root, "config", "--worktree", "--get-regexp", r"^juno\.(controller|workspace)\.")
+    remnants = ["metadata-controller.json", "controller-workspace.json", "task-workspace.json", "integration-workspace.json"]
+    if registration or role or any((root / ".juno_task/config" / name).exists() for name in remnants):
+        fail("Simple marker conflicts with managed registration or policy; use a separately authorized fresh-workspace transition", result)
+    for name in ("JUNO_TASK_ROOT", "JUNO_CONTROL_EFFECTIVE_ROOT", "JUNO_CONTROL_INVOCATION_ROOT"):
+        value = os.environ.get(name, "").strip()
+        if value and canonical(value, root) != root:
+            fail(f"{name} assertion mismatch: Simple root is {root}", result)
+    for name in ("JUNO_WORKSPACE_ROLE", "JUNO_CONTROL_INVOCATION_ROLE"):
+        value = os.environ.get(name, "").strip()
+        if value and value != "simple":
+            fail(f"{name} assertion mismatch: Simple workspace is not {value}", result)
+    if os.environ.get("JUNO_CONTROLLER_BRANCH", "").strip():
+        fail("JUNO_CONTROLLER_BRANCH assertion mismatch: Simple has no managed controller branch", result)
+    result["actual_branch"] = git(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+    result["git_common_dir"] = repository_identity(root)
+    if operation == "orchestration":
+        fail("Simple workspace does not support managed task/merge/integration operations; use yy ledger for local bookkeeping or explicit Git commands", result)
+    return result
+
+
+def resolve(cwd: Path, operation: str, ignore_environment_assertions: bool = False) -> dict[str, object]:
     cwd = cwd.resolve()
     repo_root_text = git(cwd, "rev-parse", "--show-toplevel")
     current_root = Path(repo_root_text).resolve() if repo_root_text else cwd
+    simple = resolve_simple(cwd, current_root, bool(repo_root_text), operation)
+    if simple is not None:
+        return simple
+    if ignore_environment_assertions:
+        for key in ("JUNO_TASK_ROOT", "JUNO_CONTROLLER_BRANCH", "JUNO_WORKSPACE_ROLE"):
+            os.environ.pop(key, None)
     enforcement = os.environ.get("JUNO_WORKSPACE_ENFORCEMENT", "off").strip().lower()
     if enforcement not in VALID_ENFORCEMENT:
         enforcement = "strict"
@@ -237,6 +315,7 @@ def main() -> None:
     parser.add_argument("--format", choices=["json", "root", "shell"], default="json")
     parser.add_argument("--register", metavar="PATH", help="Register the canonical controller checkout")
     parser.add_argument("--branch", help="Exact branch of the canonical controller checkout")
+    parser.add_argument("--ignore-environment-assertions", action="store_true", help="Ignore managed routing assertions only; Simple assertions always remain authoritative")
     args = parser.parse_args()
     cwd = Path(args.cwd).resolve()
     if bool(args.register) != bool(args.branch):
@@ -245,7 +324,9 @@ def main() -> None:
         root = git(cwd, "rev-parse", "--show-toplevel")
         if not root:
             raise SystemExit("controller-resolver: registration requires a Git worktree")
+        resolve_simple(cwd, Path(root), True, "orchestration")
         target = canonical(args.register, Path(root))
+        resolve_simple(target, target, True, "orchestration")
         target_root = git(target, "rev-parse", "--show-toplevel")
         if not target_root or Path(target_root).resolve() != target:
             raise SystemExit("controller-resolver: registered controller must be an exact Git worktree root")
@@ -279,13 +360,16 @@ def main() -> None:
         if not existing_path and not existing_branch:
             subprocess.run(["git", "-C", str(cwd), "config", "--local", "juno.controller.path", str(target)], check=True)
             subprocess.run(["git", "-C", str(cwd), "config", "--local", "juno.controller.branch", args.branch], check=True)
-    result = resolve(cwd, args.operation)
+    result = resolve(cwd, args.operation, args.ignore_environment_assertions)
     if args.format == "root":
         print(result["path"])
     elif args.format == "shell":
         print(f"export JUNO_TASK_ROOT={shlex.quote(str(result['path']))}")
         print(f"export JUNO_CONTROLLER_SOURCE={shlex.quote(str(result['source']))}")
         print(f"export JUNO_WORKSPACE_ROLE={shlex.quote(str(result['role']))}")
+        if result["role"] == "simple":
+            print("unset JUNO_KANBAN_CONTROLLER_BINDING")
+            return
         binding = {"git_common_dir": result["git_common_dir"],
                    "controller_path": result["path"],
                    "controller_ref": result["controller_ref"],

@@ -275,6 +275,7 @@ route_registered_product_control() {
     local effective_operation resolution fields controller invocation role branch source runtime
     case "$operation:$PREBOOTSTRAP_SUBCOMMAND" in
         ledger:*|kanban:*) effective_operation=kanban ;;
+        task:local) effective_operation=kanban ;;
         task:status|task:admission|task:preflight|task:doctor|task:lease-status|task:state-archive-plan|task:state-archive-verify|task:state-archive-get|task:|task:-h|task:--help) effective_operation=kanban ;;
         task:start|task:run|task:resume|task:recover-predispatch|task:recover-wall-budget|task:hydrate|task:finish|task:checkpoint|task:sync|task:runtime-bootstrap|task:lease-heartbeat|task:lease-handoff|task:lease-successor|task:lease-revoke|task:lease-release|task:state-archive-apply|task:state-archive-rollback) effective_operation=orchestration ;;
         merge:status|merge:|merge:-h|merge:--help) effective_operation=kanban ;;
@@ -288,8 +289,8 @@ route_registered_product_control() {
             return 2 ;;
     esac
     [ -f "$PACKAGED_CONTROLLER_RESOLVER" ] || return 1
-    if ! resolution="$(JUNO_TASK_ROOT= JUNO_CONTROLLER_BRANCH= JUNO_WORKSPACE_ROLE= JUNO_WORKSPACE_ENFORCEMENT=off \
-        python3 "$PACKAGED_CONTROLLER_RESOLVER" --cwd "$PWD" --operation "$effective_operation")"; then
+    if ! resolution="$(JUNO_WORKSPACE_ENFORCEMENT=off \
+        python3 "$PACKAGED_CONTROLLER_RESOLVER" --cwd "$PWD" --operation "$effective_operation" --ignore-environment-assertions)"; then
         return 2
     fi
     fields="$(printf '%s' "$resolution" | python3 -c 'import json,sys; x=json.load(sys.stdin); print(x["path"]); print(x["current_root"]); print(x["role"]); print(x.get("expected_branch") or ""); print(x["source"])')" || return 2
@@ -298,6 +299,21 @@ route_registered_product_control() {
     role="$(printf '%s\n' "$fields" | sed -n '3p')"
     branch="$(printf '%s\n' "$fields" | sed -n '4p')"
     source="$(printf '%s\n' "$fields" | sed -n '5p')"
+    if [ "$role" = simple ]; then
+        case "$operation:$PREBOOTSTRAP_SUBCOMMAND" in
+            task:local)
+                require_compatible_node || return $?
+                if current_runtime_supports_lifecycle; then
+                    exec_current_runtime "$@"
+                fi
+                run_owned_command "$YYLO_NODE_EXECUTABLE" "$CLI_ENTRYPOINT" "$@"
+                ROUTED_COMMAND_STATUS=$?
+                return 0 ;;
+            *)
+                echo "yylo: Simple workspace refuses managed routing; use yy task local for bookkeeping (agent/Ledger startup support is delivered separately)" >&2
+                return 2 ;;
+        esac
+    fi
     if [ "$controller" = "$invocation" ]; then
         case "$role" in controller) ;; *)
             echo "yylo: control-plane routing refused persisted workspace role '$role'; run yy doctor workspace" >&2

@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import * as path from 'node:path';
-import { existsSync as requireExists } from 'node:fs';
+import { existsSync as requireExists, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { buildChildProcessEnvironment } from '../core/child-process-environment.js';
 
@@ -10,13 +10,34 @@ const PACKAGED_CONTROLLER_RESOLVER = path.resolve(
 );
 
 export type ControllerOperation = 'diagnostic' | 'kanban' | 'orchestration' | 'session-write' | 'product-edit';
-export type WorkspaceRole = 'controller' | 'controller-retired' | 'task' | 'integration-owner' | 'unregistered';
+export type WorkspaceRole = 'controller' | 'controller-retired' | 'task' | 'integration-owner' | 'unregistered' | 'simple';
+
+/** Discovery hint only. The installed resolver validates bytes and Git authority. */
+export function hasSimpleWorkspaceHint(cwd: string): boolean {
+  let directory = path.resolve(cwd);
+  while (true) {
+    const marker = path.join(directory, '.juno_task/config.json');
+    if (requireExists(marker)) {
+      try {
+        const raw = JSON.parse(readFileSync(marker, 'utf8'));
+        const workspace = raw?.controllerWorkspace;
+        if (workspace !== undefined && workspace?.mode !== 'metadata-only' && !(workspace?.mode === undefined && workspace?.enabled === true)) return true;
+      } catch { return true; }
+    }
+    if (directory === path.dirname(directory)) return false;
+    directory = path.dirname(directory);
+  }
+}
 
 export interface ControllerResolution {
   path: string;
   current_root: string;
   resolver: 'installed' | 'missing';
-  source: 'environment' | 'registration' | 'primary-worktree' | 'non-git-current-root' | 'current-root';
+  source: 'environment' | 'registration' | 'primary-worktree' | 'non-git-current-root' | 'current-root' | 'workspace-config';
+  workspace_mode?: 'simple';
+  workspace_version?: 1;
+  invocation_cwd?: string;
+  capabilities?: readonly string[];
   expected_branch: string | null;
   actual_branch: string | null;
   role: WorkspaceRole;
@@ -33,15 +54,18 @@ export function resolveController(
   operation: ControllerOperation = 'diagnostic',
   options: { ignoreEnvironmentAssertions?: boolean; trustedResolver?: boolean } = {},
 ): ControllerResolution {
+  const simpleHint = hasSimpleWorkspaceHint(workingDirectory);
+  const trustedResolver = options.trustedResolver || simpleHint;
   let search = path.resolve(workingDirectory);
-  let resolver = options.trustedResolver
+  let resolver = trustedResolver
     ? PACKAGED_CONTROLLER_RESOLVER
     : path.join(search, '.juno_task', 'scripts', 'controller_resolver.py');
-  while (!options.trustedResolver && !requireExists(resolver) && search !== path.dirname(search)) {
+  while (!trustedResolver && !requireExists(resolver) && search !== path.dirname(search)) {
     search = path.dirname(search);
     resolver = path.join(search, '.juno_task', 'scripts', 'controller_resolver.py');
   }
   if (!requireExists(resolver)) {
+    if (simpleHint) throw new Error('Installed Simple workspace resolver is missing. Repair the CLI package explicitly; refusing local-script or controller fallback.');
     const currentRoot = path.resolve(workingDirectory);
     return {
       path: currentRoot,
@@ -58,7 +82,7 @@ export function resolveController(
     };
   }
   const env = buildChildProcessEnvironment();
-  if (options.ignoreEnvironmentAssertions) {
+  if (options.ignoreEnvironmentAssertions && !simpleHint) {
     delete env.JUNO_TASK_ROOT;
     delete env.JUNO_CONTROLLER_BRANCH;
     delete env.JUNO_WORKSPACE_ROLE;
@@ -67,6 +91,8 @@ export function resolveController(
     cwd: workingDirectory,
     env,
     encoding: 'utf8',
+    timeout: 15_000,
+    maxBuffer: 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   return JSON.parse(output) as ControllerResolution;

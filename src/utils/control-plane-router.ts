@@ -67,6 +67,7 @@ export function routeControlPlane(
   workingDirectory: string,
   operation: ControllerOperation,
   resolver: typeof resolveController = resolveController,
+  capability?: 'local-task-bookkeeping',
 ): RoutedControlPlane {
   // Diagnostic resolution validates persisted topology without pretending that
   // the product checkout itself is performing the eventual controller write.
@@ -75,8 +76,24 @@ export function routeControlPlane(
     trustedResolver: true,
   });
   const controllerRoot = path.resolve(resolution.path);
+  if (resolution.role === 'simple') {
+    if (!resolution.valid || resolution.resolver !== 'installed' || capability !== 'local-task-bookkeeping' || operation !== 'kanban') {
+      throw new Error('Simple workspace does not support managed task/merge/integration operations. Use `yy task local` or `yy ledger` for bookkeeping; completion is not managed delivery.');
+    }
+    return {
+      controllerRoot,
+      invocationRoot: path.resolve(resolution.current_root),
+      invocationRole: 'simple',
+      resolution,
+      env: buildChildProcessEnvironment(process.env, {
+        JUNO_TASK_ROOT: controllerRoot,
+        JUNO_WORKSPACE_ROLE: 'simple',
+        JUNO_WORKSPACE_ENFORCEMENT: 'strict',
+      }),
+    };
+  }
   let invocationRoot = path.resolve(resolution.current_root);
-  let invocationRole = resolution.role;
+  let invocationRole: WorkspaceRole = resolution.role;
   const forwardedRoot = process.env.JUNO_CONTROL_INVOCATION_ROOT?.trim();
   const forwardedRole = process.env.JUNO_CONTROL_INVOCATION_ROLE?.trim();
   const forwardedEffective = process.env.JUNO_CONTROL_EFFECTIVE_ROOT?.trim();

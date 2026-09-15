@@ -1,4 +1,34 @@
 import { Command } from 'commander';
+import { hasSimpleWorkspaceHint, resolveController } from '../../utils/controller-resolver.js';
+
+function simpleReport(cwd: string | undefined, version: string, json?: boolean, kind?: string): boolean {
+  const directory = cwd?.trim() || process.cwd();
+  if (!hasSimpleWorkspaceHint(directory)) return false;
+  const resolution = resolveController(directory, 'diagnostic', { trustedResolver: true });
+  if (resolution.role !== 'simple') return false;
+  if (kind) {
+    if (kind !== 'controller') throw new Error(`Simple workspace has no managed ${kind}; project and Ledger root: ${resolution.path}`);
+    console.log(resolution.path);
+    return true;
+  }
+  const value = {
+    schemaVersion: 'yylo_simple_workspace_diagnostic.v1',
+    mode: resolution.workspace_mode, version: resolution.workspace_version,
+    root: resolution.path, cwd: resolution.invocation_cwd,
+    capabilities: resolution.capabilities,
+    runtime: { cliVersion: version, resolver: 'installed', ledgerCompatibility: 'not-checked', agentStartup: 'not-yet-supported' },
+    managedDelivery: false, concurrency: 'shared-checkout; no project-file isolation',
+  };
+  console.log(json ? JSON.stringify(value, null, 2) : [
+    'Simple workspace (version 1)', `Root: ${value.root}`, `Invocation: ${value.cwd}`,
+    `Capabilities: ${value.capabilities?.join(', ')}`,
+    `CLI: ${version}; installed resolver; Ledger compatibility: not checked`,
+    'Agent startup: not yet supported in this staged runtime',
+    'Managed task/merge/integration: unsupported; yy task local is bookkeeping only',
+    'Concurrent agents share project files without isolation',
+  ].join('\n'));
+  return true;
+}
 import {
   inspectWorkspaceTopology,
   workspaceLocation,
@@ -59,6 +89,7 @@ export function configureWorkspaceCommands(program: Command, version: string): v
     .option('--json', 'Output the stable machine-readable topology')
     .option('-w, --cwd <path>', 'Invocation directory (default: current directory)')
     .action((options: { json?: boolean; cwd?: string }) => {
+      if (simpleReport(options.cwd, version, options.json)) return;
       const value = report(options.cwd, version);
       console.log(options.json ? JSON.stringify(value, null, 2) : humanInfo(value));
     });
@@ -74,6 +105,7 @@ export function configureWorkspaceCommands(program: Command, version: string): v
         throw new Error(`Unknown workspace kind: ${kind}`);
       if (kind === 'task' && !taskId) throw new Error('where task requires TASK_ID.');
       if (kind !== 'task' && taskId) throw new Error(`${kind} does not accept TASK_ID.`);
+      if (simpleReport(options.cwd, version, false, kind)) return;
       console.log(
         workspaceLocation(
           report(options.cwd, version),
@@ -90,6 +122,7 @@ export function configureWorkspaceCommands(program: Command, version: string): v
     .option('--json', 'Output the stable machine-readable topology')
     .option('-w, --cwd <path>', 'Invocation directory (default: current directory)')
     .action((options: { json?: boolean; cwd?: string }) => {
+      if (simpleReport(options.cwd, version, options.json)) return;
       const value = report(options.cwd, version);
       console.log(options.json ? JSON.stringify(value, null, 2) : humanInfo(value));
       if (!value.healthy) process.exitCode = 1;
