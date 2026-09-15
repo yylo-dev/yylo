@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { Command } from 'commander';
-import { planSimpleInit, applySimpleInit, writeSimpleInitPlan } from '../simple-init.js';
+import { planSimpleInit, applySimpleInit, planSimpleConversion, applySimpleConversion, writeSimpleInitPlan } from '../simple-init.js';
 import { resolveController } from '../controller-resolver.js';
 import { configureInitCommand } from '../../cli/commands/init.js';
 import { SIMPLE_FILES } from '../../templates/simple-workspace.js';
@@ -13,6 +13,7 @@ vi.mock('../../cli/utils/multiline.js', () => ({ promptInputOnce: vi.fn(), promp
 
 let root: string;
 let originalEnv: NodeJS.ProcessEnv;
+const conversionDestinations: string[] = [];
 const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const snap = () => ({ head: git('rev-parse', 'HEAD'), refs: git('show-ref'), worktrees: git('worktree', 'list', '--porcelain'), index: git('ls-files', '--stage') });
 beforeEach(async () => {
@@ -24,7 +25,209 @@ beforeEach(async () => {
   git('add', 'notebook.ipynb'); git('commit', '-qm', 'fixture');
   await fs.writeFile(path.join(root, 'notebook.ipynb'), 'dirty notebook');
 });
-afterEach(async () => { vi.restoreAllMocks(); process.env = originalEnv; await fs.rm(root, { recursive: true, force: true }); });
+afterEach(async () => {
+  vi.restoreAllMocks(); process.env = originalEnv;
+  for (const destination of conversionDestinations.splice(0)) await fs.rm(destination, { recursive: true, force: true });
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+async function advancedFixture(extraProductFile?: { name: string; content: string }): Promise<string> {
+  git('branch', '-M', 'main');
+  await fs.mkdir(path.join(root, '.juno_task'), { recursive: true });
+  await fs.writeFile(path.join(root, '.juno_task/config.json'), '{"defaultSubagent":"pi"}');
+  await fs.writeFile(path.join(root, 'AGENTS.md'), 'Use yy task start TASK_ID. Project tests: npm test.');
+  await fs.writeFile(path.join(root, '.gitignore'), '*.json\n');
+  if (extraProductFile) {
+    const file = path.join(root, extraProductFile.name);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, extraProductFile.content);
+    git('add', '-f', extraProductFile.name);
+  }
+  git('add', '--all'); git('add', '-f', '.juno_task/config.json'); git('commit', '-qm', 'product');
+  const product = git('rev-parse', 'HEAD');
+  // Disposable fixture only: model the existing split controller/product history.
+  git('checkout', '--orphan', 'advanced-controller'); git('rm', '-rf', '.');
+  const write = async (name: string, content: unknown) => {
+    const file = path.join(root, '.juno_task', name);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, typeof content === 'string' ? content : JSON.stringify(content));
+  };
+  await write('config.json', { controllerWorkspace: { mode: 'metadata-only', policy: '.juno_task/config/metadata-controller.json' } });
+  await write('config/metadata-controller.json', { schema_version: 'juno_metadata_controller_policy.v1', controller_branch: 'refs/heads/advanced-controller', product_ref: 'refs/heads/main' });
+  await write('config/task-workspace.json', { schema_version: 'juno_task_workspace_config.v1', repository: '.', target_ref: 'refs/heads/main' });
+  await write('state/tasks.json', { schema_version: 'juno_task_workspace_state.v2', tasks: {}, queues: {} });
+  await write('tasks/ab/ABC123.md', '---\nid: ABC123\nstatus: done\n---\nPreserve task history');
+  await write('ledger/ab/ABC123/1.json', '{"revision":1,"response":"original"}');
+  await write('objects/sha256/ab/payload', '');
+  await fs.writeFile(path.join(root, '.juno_task/objects/sha256/ab/payload'), Buffer.from([0, 1, 2, 255]));
+  await write('wiki/project.md', '# Project knowledge\n');
+  await fs.writeFile(path.join(root, '.gitignore'), '.juno_task/runtime/\n.juno_task/secrets/\n');
+  git('add', '--all'); git('commit', '-qm', 'controller');
+  git('config', 'extensions.worktreeConfig', 'true');
+  git('config', '--local', 'juno.controller.path', root);
+  git('config', '--local', 'juno.controller.branch', 'refs/heads/advanced-controller');
+  git('config', '--worktree', 'juno.workspace.role', 'controller');
+  expect(resolveController(root, 'diagnostic', { trustedResolver: true })).toMatchObject({ valid: true, role: 'controller' });
+  return product;
+}
+function conversionDestination(): string {
+  const destination = `${root}-simple-${conversionDestinations.length}`;
+  conversionDestinations.push(destination);
+  return destination;
+}
+
+describe('Advanced-to-Simple fresh-workspace conversion', () => {
+  it('previews and applies product history plus Ledger, leaving source/registration unchanged', async () => {
+    const product = await advancedFixture();
+    const before = snap(); const config = git('config', '--local', '--list');
+    process.env.JUNO_TASK_ROOT = root;
+    process.env.JUNO_WORKSPACE_ROLE = 'controller';
+    const destination = conversionDestination();
+    const plan = await planSimpleConversion(root, destination);
+    expect(plan.source.targetSha).toBe(product);
+    await expect(fs.stat(destination)).rejects.toThrow();
+    expect(plan.retain).toEqual(['.juno_task', 'AGENTS.md', '.gitignore']);
+    await expect(writeSimpleInitPlan(path.join(root, 'plan.json'), plan)).rejects.toThrow(/outside/);
+    expect(await applySimpleConversion(plan)).toBe('converted');
+    expect(snap()).toEqual(before); expect(git('config', '--local', '--list')).toBe(config);
+    const outputGit = (...args: string[]) => execFileSync('git', ['-C', destination, ...args], { encoding: 'utf8' }).trim();
+    expect(outputGit('rev-parse', 'HEAD')).toBe(product);
+    expect(outputGit('branch', '--show-current')).toBe('main');
+    expect(outputGit('remote')).toBe('');
+    expect(outputGit('branch', '--list', '*advanced-controller*')).toBe('');
+    expect(outputGit('diff', '--cached')).toBe('');
+    expect(await fs.readFile(path.join(destination, 'notebook.ipynb'), 'utf8')).toBe('dirty notebook');
+    for (const file of plan.copy) expect(await fs.readFile(path.join(destination, file.path))).toEqual(await fs.readFile(path.join(root, file.path)));
+    expect(await fs.readFile(path.join(destination, '.juno_task/advanced-backup/AGENTS.md'), 'utf8')).toContain('Project tests: npm test');
+    expect(await fs.readFile(path.join(destination, 'AGENTS.md'), 'utf8')).toContain('inactive under');
+    expect(JSON.parse(await fs.readFile(path.join(destination, '.juno_task/config.json'), 'utf8')).controllerWorkspace.mode).toBe('simple');
+    expect(process.env.JUNO_TASK_ROOT).toBe(root); // Conversion never mutates parent routing.
+    delete process.env.JUNO_TASK_ROOT; delete process.env.JUNO_WORKSPACE_ROLE;
+    expect(resolveController(destination)).toMatchObject({ valid: true, role: 'simple' });
+    await expect(fs.stat(path.join(destination, '.juno_task/state'))).rejects.toThrow();
+    await expect(applySimpleConversion(plan)).rejects.toThrow(/must not exist/);
+  });
+
+  it.each([
+    { name: '.env.yylo', content: 'fixture, not a credential', error: /tracks secrets/ },
+    { name: 'pkg/.claude/settings.json', content: '{}', error: /Nested agent/ },
+    { name: 'pkg/AGENTS.md', content: 'Use yy task start TASK_ID', error: /Nested agent/ },
+    { name: '.juno_task/tasks/ab/OTHER.md', content: 'other board', error: /also contains durable/ },
+  ])('refuses unsupported product content $name before mutation', async ({ name, content, error }) => {
+    await advancedFixture({ name, content });
+    const destination = conversionDestination(); const before = snap();
+    await expect(planSimpleConversion(root, destination)).rejects.toThrow(error);
+    expect(snap()).toEqual(before);
+    await expect(fs.stat(destination)).rejects.toThrow();
+  });
+
+  it.each(['WORKING', 'QUEUED', 'CONFLICTED', 'unknown'])('refuses unsettled lifecycle %s without destination writes', async (state) => {
+    await advancedFixture(); const destination = conversionDestination();
+    await fs.writeFile(path.join(root, '.juno_task/state/tasks.json'), JSON.stringify({ schema_version: 'juno_task_workspace_state.v2', tasks: { ABC123: { state } } }));
+    git('add', '.'); git('commit', '-qm', 'state');
+    await expect(planSimpleConversion(root, destination)).rejects.toThrow(/Unfinished or unknown/);
+    await expect(fs.stat(destination)).rejects.toThrow();
+  });
+
+  it('refuses dirty, ignored durable, stale, tampered and colliding sources/destinations', async () => {
+    await advancedFixture(); const destination = conversionDestination();
+    const plan = await planSimpleConversion(root, destination);
+    await fs.writeFile(path.join(root, 'untracked.txt'), 'preserve');
+    await expect(applySimpleConversion(plan)).rejects.toThrow(/Dirty source/);
+    await fs.unlink(path.join(root, 'untracked.txt'));
+    const bad = structuredClone(plan); bad.copy[0]!.path = '../escape';
+    await expect(applySimpleConversion(bad)).rejects.toThrow(/Stale or modified/);
+    git('config', 'user.name', 'Changed');
+    await expect(applySimpleConversion(plan)).rejects.toThrow(/Stale or modified/);
+    await expect(fs.stat(destination)).rejects.toThrow();
+    await fs.mkdir(destination);
+    await expect(planSimpleConversion(root, destination)).rejects.toThrow(/must not exist/);
+    await fs.appendFile(path.join(root, '.gitignore'), '.juno_task/tasks/ignored.md\n');
+    git('add', '.gitignore'); git('commit', '-qm', 'ignore');
+    await fs.writeFile(path.join(root, '.juno_task/tasks/ignored.md'), 'must not omit');
+    await expect(planSimpleConversion(root, conversionDestination())).rejects.toThrow(/Ignored durable/);
+  });
+
+  it('refuses index flags hiding dirty durable bytes', async () => {
+    await advancedFixture(); const destination = conversionDestination();
+    const file = '.juno_task/tasks/ab/ABC123.md';
+    git('update-index', '--assume-unchanged', file);
+    await fs.writeFile(path.join(root, file), 'hidden dirty task');
+    await expect(planSimpleConversion(root, destination)).rejects.toThrow(/assume-unchanged/);
+    expect(await fs.readFile(path.join(root, file), 'utf8')).toBe('hidden dirty task');
+    await expect(fs.stat(destination)).rejects.toThrow();
+  });
+
+  it('keeps an interrupted destination unready and the source unchanged', async () => {
+    await advancedFixture(); const destination = conversionDestination();
+    const before = snap(); const plan = await planSimpleConversion(root, destination);
+    const write = fs.writeFile.bind(fs);
+    vi.spyOn(fs, 'writeFile').mockImplementation(async (...args: Parameters<typeof fs.writeFile>) => {
+      if (String(args[0]) === path.join(destination, '.juno_task/config.json')) throw new Error('injected conversion interruption');
+      return write(...args);
+    });
+    await expect(applySimpleConversion(plan)).rejects.toThrow(/injected/);
+    vi.restoreAllMocks();
+    expect(snap()).toEqual(before);
+    expect(() => resolveController(destination)).toThrow(/incomplete or active Simple/);
+    expect(await fs.readFile(path.join(destination, 'notebook.ipynb'), 'utf8')).toBe('dirty notebook');
+    await expect(applySimpleConversion(plan)).rejects.toThrow(/must not exist/);
+  });
+
+  it('refuses symlinks, nested destinations and Simple sources', async () => {
+    await applySimpleInit(await planSimpleInit(root));
+    await expect(planSimpleConversion(root, conversionDestination())).rejects.toThrow(/registered Advanced/);
+    await fs.rm(path.join(root, '.juno_task'), { recursive: true });
+    await advancedFixture();
+    await expect(planSimpleConversion(root, path.join(root, 'nested'))).rejects.toThrow(/separate/);
+    await fs.symlink('tasks/ab/ABC123.md', path.join(root, '.juno_task/linked'));
+    git('add', '.'); git('commit', '-qm', 'symlink');
+    await expect(planSimpleConversion(root, conversionDestination())).rejects.toThrow(/symlinks and submodules/);
+  });
+
+  it('refuses reverse conversion even with force and preserves Simple configuration', async () => {
+    await applySimpleInit(await planSimpleInit(root));
+    const before = snap(); const configPath = path.join(root, '.juno_task/config.json');
+    const config = await fs.readFile(configPath, 'utf8');
+    const program = new Command(); configureInitCommand(program);
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('exit intercepted'); });
+    await expect(program.parseAsync(['init', 'Do not convert', '--mode', 'advanced', '--force', '--directory', root], { from: 'user' })).rejects.toThrow('exit intercepted');
+    expect(await fs.readFile(configPath, 'utf8')).toBe(config);
+    expect(snap()).toEqual(before);
+  });
+
+  it('checks every source worktree and refuses stale product movement', async () => {
+    const product = await advancedFixture(); const destination = conversionDestination();
+    const owner = `${root}-owner`; conversionDestinations.push(owner);
+    git('worktree', 'add', '--detach', owner, product);
+    const plan = await planSimpleConversion(root, destination);
+    await expect(planSimpleConversion(root, path.join(owner, 'nested'))).rejects.toThrow(/separate from all source/);
+    await fs.writeFile(path.join(owner, 'untracked.txt'), 'preserve owner dirt');
+    await expect(applySimpleConversion(plan)).rejects.toThrow(/Dirty source worktree/);
+    await fs.unlink(path.join(owner, 'untracked.txt'));
+    const child = execFileSync('git', ['-C', root, 'commit-tree', `${product}^{tree}`, '-p', product, '-m', 'new product'], { encoding: 'utf8' }).trim();
+    git('update-ref', 'refs/heads/main', child, product);
+    await expect(applySimpleConversion(plan)).rejects.toThrow(/Stale or modified/);
+    await expect(fs.stat(destination)).rejects.toThrow();
+  });
+
+  it('exposes conversion through the existing init plan/apply CLI only', async () => {
+    await advancedFixture(); const destination = conversionDestination();
+    const external = `${root}-conversion.json`; conversionDestinations.push(external);
+    const program = new Command(); configureInitCommand(program);
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    await program.parseAsync(['init', '--mode', 'simple', '--from-advanced', root, '--directory', destination, '--plan-file', external], { from: 'user' });
+    await expect(fs.stat(destination)).rejects.toThrow();
+    // Fresh Commander instances avoid retained options across multiple parses.
+    const apply = new Command(); configureInitCommand(apply);
+    await apply.parseAsync(['init', '--mode', 'simple', '--apply-plan', external], { from: 'user' });
+    expect(resolveController(destination).role).toBe('simple');
+    const reverse = new Command(); configureInitCommand(reverse);
+    await expect(reverse.parseAsync(['init', '--mode', 'advanced', '--from-advanced', destination], { from: 'user' })).rejects.toThrow(/require --mode simple/);
+  });
+});
 
 describe('fresh Simple initialization', () => {
   it.each([undefined, 'simple'])('initializes guided Simple with final choice or explicit mode %s', async (mode) => {
