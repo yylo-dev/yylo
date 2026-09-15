@@ -32,12 +32,8 @@ export function workspaceCapabilities(value: unknown): readonly WorkspaceCapabil
     : ['diagnostics', 'ledger', 'managed-task', 'managed-merge', 'managed-integration'] as WorkspaceCapability[]);
 }
 
-/** Fail closed during staged delivery, before legacy startup can mutate a Simple project. */
+/** Validate the mode shape; runtime callers must additionally resolve persisted authority. */
 export function assertWorkspaceStartupSupported(value: unknown): void {
   if (value === undefined) return;
-  const workspace = WorkspaceModeSchema.parse(value);
-  if (workspace.mode === 'simple') {
-    throw new Error('Simple workspace version 1 is recognized, but startup is not supported by this runtime yet. '
-      + 'Do not remove the mode marker or run managed initialization; use a runtime with Simple workspace support.');
-  }
+  WorkspaceModeSchema.parse(value);
 }

@@ -307,7 +307,7 @@ route_registered_product_control() {
     source="$(printf '%s\n' "$fields" | sed -n '5p')"
     if [ "$role" = simple ]; then
         case "$operation:$PREBOOTSTRAP_SUBCOMMAND" in
-            task:local)
+            task:local|ledger:*|kanban:*)
                 require_compatible_node || return $?
                 if current_runtime_supports_lifecycle; then
                     exec_current_runtime "$@"
@@ -316,7 +316,7 @@ route_registered_product_control() {
                 ROUTED_COMMAND_STATUS=$?
                 return 0 ;;
             *)
-                echo "yylo: Simple workspace refuses managed routing; use yy task local for bookkeeping (agent/Ledger startup support is delivered separately)" >&2
+                echo "yylo: Simple workspace refuses managed routing; use yy task local or yy ledger for bookkeeping" >&2
                 return 2 ;;
         esac
     fi
@@ -522,8 +522,18 @@ main() {
         return "$status"
     }
 
-    # Check if we're in an initialized yylo project
+    # A copied legacy bootstrap is never authority to provision a Simple root.
+    # Resolve with installed code before sourcing any project-owned shell bytes.
+    local bootstrap_allowed=1
     if [ -d ".juno_task" ] && [ -f "$BOOTSTRAP_SCRIPT" ]; then
+        local bootstrap_resolution bootstrap_role
+        bootstrap_resolution="$(python3 "$PACKAGED_CONTROLLER_RESOLVER" --cwd "$PWD" --operation diagnostic --ignore-environment-assertions)" || return 2
+        bootstrap_role="$(printf '%s' "$bootstrap_resolution" | python3 -c 'import json,sys; print(json.load(sys.stdin)["role"])')" || return 2
+        [ "$bootstrap_role" != simple ] || bootstrap_allowed=0
+    fi
+
+    # Check if we're in an initialized managed yylo project
+    if [ "$bootstrap_allowed" -eq 1 ] && [ -d ".juno_task" ] && [ -f "$BOOTSTRAP_SCRIPT" ]; then
         # Project is initialized - use bootstrap.sh to setup environment and run CLI
         # Bootstrap.sh will:
         # 1. Check if we're in a venv

@@ -31,7 +31,8 @@ import { type QuotaLimitInfo, formatDuration } from './backends/shell-backend.js
 import { resolvePromptCommandSubstitutions } from './prompt-command-substitution.js';
 import { resolvePromptMacros } from './prompt-macro-resolver.js';
 import { getPromptMacroDictionary } from './config.js';
-import { resolveController } from '../utils/controller-resolver.js';
+import { hasSimpleWorkspaceHint, resolveController } from '../utils/controller-resolver.js';
+import { checkLedgerReadiness } from '../cli/commands/ledger.js';
 import { buildChildProcessEnvironment } from './child-process-environment.js';
 
 // =============================================================================
@@ -116,6 +117,14 @@ export interface ExecutionRequest {
 }
 
 function resolveExecutionController(request: ExecutionRequest) {
+  if (hasSimpleWorkspaceHint(request.workingDirectory)) {
+    const resolution = resolveController(request.workingDirectory, 'product-edit');
+    const delegated = request.sessionMetadata?.['executionControllerDirectory'];
+    if (typeof delegated === 'string' && path.resolve(delegated) !== resolution.path) {
+      throw new Error('Simple agent execution controller contradicts the validated local root.');
+    }
+    return resolution;
+  }
   const delegated = request.sessionMetadata?.['executionControllerDirectory'];
   if (typeof delegated === 'string' && delegated.trim() !== '') {
     return resolveController(delegated, 'orchestration', {
@@ -745,7 +754,8 @@ export class ExecutionEngine extends EventEmitter {
     // A managed parent may cd from its dispatch root into a registered task
     // worktree. In that case only, derive authority from persisted identity;
     // same-boundary explicit assertion mismatches remain fail-closed.
-    const controller = typeof request.sessionMetadata?.['executionControllerDirectory'] === 'string'
+    const controller = hasSimpleWorkspaceHint(request.workingDirectory)
+      || typeof request.sessionMetadata?.['executionControllerDirectory'] === 'string'
       ? resolveExecutionController(request)
       : changedManagedWorktree
       ? resolveController(request.workingDirectory, 'orchestration', {
@@ -946,7 +956,14 @@ export class ExecutionEngine extends EventEmitter {
 
     // Resolve once at the orchestration boundary. Explicit or registered
     // controller settings are authoritative and invalid settings fail closed.
-    resolveExecutionController(context.request);
+    const authority = resolveExecutionController(context.request);
+    if (authority.role === 'simple') {
+      if (this.engineConfig.config.controllerWorkspace?.mode !== 'simple'
+          || resolveController(this.engineConfig.config.workingDirectory, 'product-edit').path !== authority.path) {
+        throw new Error('Simple execution requires root-validated Simple configuration.');
+      }
+      await checkLedgerReadiness({ cwd: context.request.workingDirectory });
+    }
 
     // Initialize backend for this execution request
     await this.initializeBackend(context.request);

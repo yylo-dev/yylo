@@ -1,4 +1,5 @@
 import fs from 'fs-extra';
+import { hasSimpleWorkspaceHint, resolveController } from './controller-resolver.js';
 import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
 import { promisify } from 'node:util';
@@ -58,6 +59,10 @@ export async function checkpointControllerAfterFinalization(
   runExitCode: number,
   taskId?: string,
 ): Promise<ControllerCheckpointResult> {
+  if (hasSimpleWorkspaceHint(workingDirectory)) {
+    resolveController(workingDirectory, 'diagnostic');
+    return { attempted: false, ok: true };
+  }
   if (process.env.JUNO_CONTROLLER_CHECKPOINT_ACTIVE === '1') {
     return { attempted: false, ok: true };
   }

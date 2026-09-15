@@ -18,7 +18,7 @@ import type { JunoTaskConfig, PromptMacroConfig } from '../types/index';
 import { getDefaultHooks } from '../templates/default-hooks.js';
 import { SUBAGENT_DEFAULT_MODELS } from './subagent-models.js';
 import { migrateLegacyEnvironment } from './identity-migration.js';
-import { resolveController, type WorkspaceRole } from '../utils/controller-resolver.js';
+import { hasSimpleWorkspaceHint, resolveController, type WorkspaceRole } from '../utils/controller-resolver.js';
 import { WorkspaceModeSchema, assertWorkspaceStartupSupported } from './workspace-mode.js';
 
 /**
@@ -949,6 +949,9 @@ export class ConfigLoader {
     try {
       const fileConfig = await loadConfigFromFile(filePath, this.baseDir);
       assertWorkspaceStartupSupported(fileConfig.controllerWorkspace);
+      if (fileConfig.controllerWorkspace?.mode === 'simple' && fileConfig.workingDirectory) {
+        fileConfig.workingDirectory = resolvePath(fileConfig.workingDirectory, this.projectConfigDir);
+      }
       this.configSources.set('file', fileConfig);
     } catch (error) {
       throw new Error(`Failed to load configuration file: ${error}`);
@@ -1022,7 +1025,12 @@ export class ConfigLoader {
    */
   merge(): JunoTaskConfig {
     // Start with defaults to ensure all required properties are present
-    const mergedConfig = { ...DEFAULT_CONFIG };
+    const simple = [...this.configSources.values()].some(source => source.controllerWorkspace?.mode === 'simple');
+    const mergedConfig = { ...DEFAULT_CONFIG, ...(simple ? {
+      workingDirectory: this.baseDir,
+      sessionDirectory: path.join(this.projectConfigDir, '.juno_task'),
+      hooks: {}, autoDependencyUpdate: false,
+    } : {}) };
 
     // Apply sources in order of precedence (lowest to highest)
     const sourcePrecedence: ConfigSource[] = ['file', 'projectFile', 'env', 'cli'];
@@ -1629,36 +1637,59 @@ export async function loadConfig(
   const invocationDir = path.resolve(baseDir);
   let profileDir = invocationDir;
   let invocationRole: WorkspaceRole = 'unregistered';
-  if (!configFile) {
+  const simpleHint = hasSimpleWorkspaceHint(invocationDir);
+  if (!configFile || simpleHint) {
     try {
       const resolution = resolveController(invocationDir, 'diagnostic');
       profileDir = path.resolve(resolution.path);
       invocationRole = resolution.role;
-    } catch {
+    } catch (error) {
+      if (simpleHint) throw error;
       // Unmanaged and legacy projects continue to use their local project config.
     }
+  }
+  const simple = invocationRole === 'simple';
+  if (simple && configFile && path.resolve(invocationDir, configFile) !== path.join(profileDir, '.juno_task/config.json')) {
+    throw new Error('Simple workspace uses its root .juno_task/config.json; alternate config authority is unsupported.');
   }
   const metadataSource = configFile ? undefined : await readMetadataAgentProfile(profileDir);
   const metadataAgentProfile = metadataSource?.profile;
 
   const allowProjectWrites = process.env.YYLO_PROJECT_BOOTSTRAP_WRITES !== '0'
-    && profileDir === invocationDir && metadataSource === undefined;
+    && !simple && profileDir === invocationDir && metadataSource === undefined;
 
   const resolveConfig = async (): Promise<JunoTaskConfig> => {
     const loader = new ConfigLoader(invocationDir, profileDir);
     loader.fromEnvironment();
-    if (configFile) {
+    if (simple) {
+      await loader.fromFile(path.join(profileDir, '.juno_task/config.json'));
+    } else if (configFile) {
       await loader.fromFile(configFile);
     } else {
       await loader.autoDiscoverFile();
     }
     if (cliConfig) loader.fromCli(cliConfig);
     const merged = loader.merge();
-    // Schema recognition is not runtime enablement: no legacy startup writes for Simple.
     assertWorkspaceStartupSupported(merged.controllerWorkspace);
+    if (simple !== (merged.controllerWorkspace?.mode === 'simple')) {
+      throw new Error('Workspace mode override contradicts persisted root authority.');
+    }
+    if (simple) {
+      const root = await fs.realpath(profileDir);
+      const cwd = await fs.realpath(merged.workingDirectory);
+      const relative = path.relative(root, cwd);
+      if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
+          || resolveController(cwd, 'product-edit').path !== root) {
+        throw new Error('Simple workingDirectory must remain canonically inside the same project root.');
+      }
+      merged.workingDirectory = cwd;
+      merged.sessionDirectory = path.join(root, '.juno_task');
+      merged.autoDependencyUpdate = false;
+      delete merged.gitFlow;
+    }
     // A canonical controller profile supplies preferences, never the invoking
     // task/integration workspace identity.
-    if (profileDir !== invocationDir) {
+    if (!simple && profileDir !== invocationDir) {
       merged.workingDirectory = invocationDir;
       merged.sessionDirectory = path.join(invocationDir, '.juno_task');
     }

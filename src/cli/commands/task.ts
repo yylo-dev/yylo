@@ -183,21 +183,8 @@ export async function invokeLocalTaskBookkeeping(args: string[]): Promise<void> 
   if (route.invocationRole !== 'simple') {
     throw new Error('yy task local is only for Simple workspaces; use yy ledger or the managed task lifecycle here.');
   }
-  try {
-    const { exitCode } = await invokeMachineAwareChild({
-      executable: 'yylo-ledger',
-      args: ['-c', path.join(route.controllerRoot, '.juno_task/tasks/config.json'), ...args],
-      cwd: route.controllerRoot,
-      env: route.env,
-      command: `task.local.${args[0]}`,
-    });
-    if (exitCode !== 0) process.exitCode = exitCode;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new Error('Compatible YYLO Ledger executable is missing from PATH. Install the compatible Ledger runtime explicitly, then retry; no packages were installed.');
-    }
-    throw error;
-  }
+  const { runLedgerDelegate } = await import('./ledger.js');
+  await runLedgerDelegate(args);
 }
 
 export function configureTaskWorkspaceCommand(

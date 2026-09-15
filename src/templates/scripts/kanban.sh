@@ -182,6 +182,55 @@ RESOLVED_ENV=$(python3 "$RESOLVER" --cwd "$INVOCATION_CWD" --operation kanban --
 eval "$RESOLVED_ENV"
 PROJECT_ROOT="$JUNO_TASK_ROOT"
 
+# Simple never activates or provisions a project environment. Preserve invocation
+# cwd and delegate to the independently installed Ledger with root-bound config.
+if [[ "${JUNO_WORKSPACE_ROLE:-}" == "simple" ]]; then
+    export JUNO_KANBAN_INVOCATION_ROOT="$PROJECT_ROOT"
+    source "$SCRIPT_DIR/juno-toolchain-policy.sh"
+    export YYLO_LEDGER_REQUIRED_VERSION="$YYLO_LEDGER_COMPAT_RANGE"
+    exec python3 - "$PROJECT_ROOT" "$@" 3<&0 <<'PY'
+import os, selectors, shutil, subprocess, sys, time
+root, *args = sys.argv[1:]
+if any(arg.startswith('-c') or (arg.startswith('--c') and '--config'.startswith(arg.split('=')[0])) for arg in args):
+    sys.exit('Simple Ledger uses root-bound config; config overrides are unsupported.')
+executable = shutil.which('yylo-ledger')
+required = os.environ.pop('YYLO_LEDGER_REQUIRED_VERSION')
+recovery = f'Install compatible yylo-ledger ({required}) explicitly on PATH and retry; no packages were installed.'
+if not executable:
+    sys.exit(f'Missing installed Ledger for Simple root {root}. {recovery}')
+try:
+    with subprocess.Popen([executable, '--version'], stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as probe:
+        try:
+            output = bytearray()
+            deadline = time.monotonic() + 10
+            with selectors.DefaultSelector() as selector:
+                selector.register(probe.stdout, selectors.EVENT_READ)
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not selector.select(remaining):
+                        raise ValueError('Ledger version probe timed out after 10 seconds')
+                    chunk = os.read(probe.stdout.fileno(), 65536)
+                    if not chunk:
+                        break
+                    output.extend(chunk)
+                    if len(output) > 65536:
+                        raise ValueError('Ledger version output exceeded 64 KiB')
+            code = probe.wait(timeout=max(0.01, deadline - time.monotonic()))
+            if code or output.decode('utf-8').strip() not in (required, f'yylo-ledger {required}'):
+                raise ValueError('incompatible Ledger identity')
+        finally:
+            if probe.poll() is None:
+                probe.kill()
+                probe.wait()
+except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+    sys.exit(f'Ledger readiness failed for {root}: {error}. {recovery}')
+os.dup2(3, 0)
+os.close(3)
+os.execv(executable, [executable, '--config', os.path.join(root, '.juno_task/config.json'), *args])
+PY
+fi
+
 # Kanban runtime and storage both belong to the verified controller checkout.
 cd "$PROJECT_ROOT"
 
