@@ -88,6 +88,30 @@ python3 -c 'import os, kanban; print(kanban.RUNTIME + "|" + os.environ["JUNO_TAS
     await fs.remove(projectRoot);
   });
 
+  it('preserves native format scope and legacy global normalization without changing payload arguments', async () => {
+    const executable = path.join(projectRoot, '.venv_juno/bin/yylo-ledger');
+    await fs.writeFile(executable, `#!/usr/bin/env python3
+import json, sys
+if sys.argv[1:] == ['--version']: print('yylo-ledger 0.3.1')
+else: print(json.dumps(sys.argv[1:]))
+`);
+    await fs.chmod(executable, 0o755);
+    const wrapper = path.join(projectRoot, '.juno_task/scripts/kanban.sh');
+    for (const scope of ['record', 'task', 'wiki', 'workflow', 'artifact']) {
+      for (const format of [['-f', 'json'], ['--format', 'json'], ['--format=ndjson']]) {
+        const args = [scope, 'search', '--text', 'spaces and unicode λ', ...format, '--cursor', 'opaque=='];
+        const result = spawnSync(wrapper, args, { cwd: projectRoot, encoding: 'utf8', env: { ...process.env, JUNO_TASK_ROOT: projectRoot } });
+        expect(result.status, result.stderr).toBe(0);
+        expect(JSON.parse(result.stdout)).toEqual(['--config', path.join(projectRoot, '.juno_task/config.json'), ...args]);
+      }
+    }
+    const legacy = spawnSync(wrapper, ['search', '--body', 'needle', '-f', 'json', '--raw'], {
+      cwd: projectRoot, encoding: 'utf8', env: { ...process.env, JUNO_TASK_ROOT: projectRoot },
+    });
+    expect(legacy.status, legacy.stderr).toBe(0);
+    expect(JSON.parse(legacy.stdout)).toEqual(['--config', path.join(projectRoot, '.juno_task/config.json'), '-f', 'json', '--raw', 'search', '--body', 'needle']);
+  });
+
   it('closes stdin for the identity probe without consuming a heredoc create body', () => {
     const result = spawnSync(path.join(projectRoot, '.juno_task', 'scripts', 'kanban.sh'), ['create'], {
       cwd: projectRoot,
