@@ -1,7 +1,8 @@
 # Simple and Advanced workspaces
 
-Choose a mode for a **new project**. Existing installations are never converted
-by initialization or by a CLI upgrade.
+Choose a mode for a **new project**. Normal initialization and CLI upgrades never
+convert existing installations. The explicit `--from-advanced` plan/apply flow
+below creates a separate Simple workspace without changing the source.
 
 | | Simple (recommended for getting started) | Advanced |
 | --- | --- | --- |
@@ -85,7 +86,7 @@ not proof of tests, review, or protected-target delivery.
 | `info`, workspace doctor, help | Mode/root and capability diagnostics; no provisioning |
 | Managed `task start/run/finish`, leases, recovery | Refused; use local Ledger bookkeeping |
 | `merge` and `integration` delivery | Refused; use separately authorized ordinary Git |
-| Managed migration, bootstrap, topology changes | Not a Simple conversion mechanism |
+| Managed migration, bootstrap, topology changes | Not a Simple conversion mechanism; use the explicit fresh-copy flow below |
 
 Startup checks the installed compatible Ledger with bounded, non-installing
 readiness probes. Missing or incompatible Ledger blocks dispatch with an explicit
@@ -108,14 +109,74 @@ isolate code edits. Coordinate overlapping edits and staging with the user.
 Never reset, stash, overwrite, stage, commit, push, or clean implicitly. Explicit
 ordinary Git commands remain available when authorized.
 
-## Conversion is deferred
+## Convert Advanced to Simple: a fresh copy, not an in-place toggle
 
-Neither Advanced-to-Simple nor Simple-to-Advanced conversion is currently
-implemented. Do not modify a live controller's mode field. A future separately authorized
-transition must inventory product history, Records, registrations, dirty/untracked
-files, secrets, and collisions; prepare a fresh destination from the explicitly
-selected product source; retain the old workspace and rollback identity. Stale
-controller history is not a source for recovering product code.
+The supported direction is **Advanced → Simple**, narrowly scoped to an existing
+registered **metadata-only controller**, with a same-repository product branch
+agreed by its controller and task-workspace policies. Other legacy/combined
+layouts, Simple → Advanced and manual mode-field toggles are unsupported, even
+with `--force`. This is not a general migration engine.
+
+Stop agents and other writers first. Every managed task must be `MERGED` or
+`WITHDRAWN`, and every source worktree must be clean. Commit/preserve work explicitly;
+the converter never finishes tasks, stages work, stashes, or deletes anything for you.
+Ignored durable controller data, unknown states, symlinks, submodules, tracked
+secret/runtime paths, nested agent configuration/managed instructions,
+non-UTF-8 Git paths, sparse/assume-unchanged indexes, conflicting product-side Ledger data and existing
+destinations are refused. Use a fresh sibling directory with an existing parent,
+not a directory inside another workspace.
+
+```sh
+# Read-only preview; store the plan outside source worktrees and Git storage.
+yy init --mode simple --from-advanced /absolute/controller \
+  --directory /absolute/new-simple-project --plan-file /external/conversion.json
+# Review the paths and frozen identities in conversion.json, then explicitly apply:
+yy init --mode simple --apply-plan /external/conversion.json
+```
+
+Without `--plan-file`, `--from-advanced` prints the same read-only preview. Apply
+revalidates the complete plan before creating anything. Plans are bounded to 4 MiB;
+individual Git reads/blobs to 16 MiB. Larger/unsupported projects need a separately
+reviewed transition, not a force flag.
+
+### What is preserved and what changes
+
+- **Source unchanged:** controller, product refs/history, registrations and all
+  existing worktrees remain intact. No automatic cutover or cleanup occurs.
+- **New product checkout:** clones only the policy-selected product branch/history,
+  never substitutes controller code. No source remote is retained, preventing an
+  accidental push into the managed source. Select any future remote explicitly.
+- **Durable data:** copies committed tasks, Ledger history, archives/receipts,
+  document/artifact revisions, content objects, wiki, specs, workflows and tasks.md
+  byte-for-byte. Old lifecycle state/receipts, cache, sessions, secrets and installed
+  runtime remain at the source; they are not active Simple state. Task status is
+  preserved as bookkeeping, not re-certified as managed delivery.
+- **Instructions/configuration:** old product metadata, root AGENTS.md/CLAUDE.md,
+  and root agent configuration folders are retained *inactive* under
+  `.juno_task/advanced-backup`. The original root `.gitignore` is backed up before
+  adding durable-metadata visibility rules. New active instructions use Simple
+  guidance; the conversion receipt is `.juno_task/simple-conversion.json`.
+- **No new commit:** destination changes are unstaged. Review them before explicitly
+  committing. Already committed secrets remain in Git history: this command is not
+  a credential scrubber. Ignored/untracked local secrets are never copied.
+
+### Manual follow-up
+
+1. Enter the new directory. Run `yy info --json` and `yy doctor workspace`.
+2. Review inactive old instructions and bring over project-specific test commands
+   and coding conventions. Do **not** restore Advanced task/worktree/merge rules.
+   Preserved controller wiki/specs are historical knowledge, not Simple authority.
+3. Configure desired agents/models and any compatible custom hooks deliberately;
+   old managed configuration is not activated automatically. Install dependencies
+   and restore credentials through your normal secret-safe process.
+4. Choose the new folder as your working project. The two Ledgers are independent
+   snapshots, not synchronized boards. Keep the original as the rollback source.
+
+If apply is interrupted, preserve the new destination and its `.yylo-simple-init`
+reservation for inspection; it is not agent-ready. Do not remove the reservation
+to force startup. The source still works unchanged. After resolving the cause,
+prepare a new plan for another fresh directory; retries never overwrite a prior
+attempt. No automatic rollback/cleanup framework is involved.
 
 ## Package validation
 

@@ -297,7 +297,17 @@ Use `yy init --interactive --mode simple` to skip the mode question. Inline
 initialization retains Advanced behavior; `yy init "Build an API" --mode advanced`
 makes that explicit. Existing `yy init --mode simple` automation still previews a
 plan; use `--plan-file` then `--apply-plan` to initialize without interaction.
-Initialization does not convert existing workspaces.
+Normal initialization does not convert existing workspaces. For a settled registered
+metadata-only controller, preview then apply a fresh Advanced → Simple copy:
+
+```sh
+yy init --mode simple --from-advanced /controller --directory /new-project --plan-file /external/conversion.json
+yy init --mode simple --apply-plan /external/conversion.json
+```
+
+Source workspaces remain unchanged. Old instructions and settings are retained
+inactive for manual review. Simple → Advanced is not supported, including with
+`--force`.
 Read [Simple and Advanced workspaces](docs/simple-workspaces.md) for exact commands,
 readiness recovery, persistence, and shared-checkout limits.
 

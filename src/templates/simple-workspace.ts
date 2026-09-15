@@ -21,8 +21,12 @@ Keep credentials under .juno_task/secrets, never in task bodies or tracked files
 Startup must use installed runtime capabilities, never a copied install hook or
 an implicit package installation/upgrade. Missing dependencies require explicit
 recovery in an explicitly selected environment with a compatible Ledger on PATH.
-Initialization does not assert runtime readiness. No-Git execution and live
-conversion between Simple and managed workspaces are outside this MVP.
+Initialization does not assert runtime readiness. No-Git execution and in-place
+mode toggles are unsupported. Advanced-to-Simple conversion is available only as
+an explicit reviewed fresh-workspace copy from a settled metadata-only controller:
+yy init --mode simple --from-advanced CONTROLLER --directory NEW_FOLDER --plan-file EXTERNAL_PLAN
+then yy init --mode simple --apply-plan EXTERNAL_PLAN. Keep source workspaces intact.
+Simple-to-Advanced conversion is not supported, including with --force.
 `;
 
 // Ledger 0.3.x stores canonical tasks, document/artifact revisions and objects

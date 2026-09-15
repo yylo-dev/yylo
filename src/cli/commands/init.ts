@@ -11,9 +11,10 @@ import fs from 'fs-extra';
 import chalk from 'chalk';
 import { Command } from 'commander';
 import { promptMultiline, promptInputOnce } from '../utils/multiline.js';
-import { planSimpleInit, applySimpleInit, writeSimpleInitPlan, type SimpleInitPlan } from '../../utils/simple-init.js';
+import { planSimpleInit, applySimpleInit, planSimpleConversion, applySimpleConversion, writeSimpleInitPlan, type SimpleInitPlan, type SimpleConversionPlan } from '../../utils/simple-init.js';
 
 import { getDefaultHooks } from '../../templates/default-hooks.js';
+import { hasSimpleWorkspaceHint } from '../../utils/controller-resolver.js';
 import { getDefaultModelForSubagent } from '../../core/subagent-models.js';
 import { createPersistedProjectConfigDefaults } from '../../core/config.js';
 import type { InitCommandOptions } from '../types.js';
@@ -1052,6 +1053,10 @@ export async function initCommandHandler(
       return;
     }
 
+    if (hasSimpleWorkspaceHint(context.targetDirectory)) {
+      throw new ValidationError('Simple-to-Advanced conversion is not supported, including with --force. Preserve the existing workspace.', []);
+    }
+
     // Generate Advanced project
     const generator = new SimpleProjectGenerator(context);
     await generator.generate();
@@ -1128,6 +1133,7 @@ export function configureInitCommand(program: Command): void {
     .option('-g, --git-repo <url>', 'Git repository URL')
     .option('-d, --directory <path>', 'Target directory (default: current directory)')
     .option('--mode <mode>', 'Workspace mode: simple or advanced (interactive choice; headless default: advanced)')
+    .option('--from-advanced <controller>', 'Simple: convert a settled Advanced controller into a fresh --directory (preview by default)')
     .option('--plan-file <path>', 'Simple: write a fresh preview plan outside the project')
     .option('--apply-plan <path>', 'Simple: apply an inspected, unchanged initialization plan')
     .option('-f, --force', 'Force overwrite existing files (never supported in Simple mode)')
@@ -1139,21 +1145,28 @@ export function configureInitCommand(program: Command): void {
       if (options.mode !== undefined && !['simple', 'advanced'].includes(options.mode)) {
         throw new ValidationError('Workspace mode must be simple or advanced.', []);
       }
-      if (options.planFile || options.applyPlan || (options.mode === 'simple' && !options.interactive)) {
+      if (options.fromAdvanced || options.planFile || options.applyPlan || (options.mode === 'simple' && !options.interactive)) {
         try {
           if (options.mode !== 'simple') throw new Error('Plan/apply options require --mode simple. No conversion is performed.');
           if (description || options.task || options.force || options.interactive || options.gitRepo || options.gitUrl || options.targetBranch || options.subagent) {
-            throw new Error('Simple initialization supports only --directory, --plan-file or --apply-plan. No force, clone, branch creation or interactive managed setup. Run git init explicitly first.');
+            throw new Error('Simple plan/apply supports --directory, --from-advanced, --plan-file or --apply-plan only. No force, managed Git options or interactive setup in plan/apply. Use --interactive --mode simple for guided fresh setup.');
           }
           if (options.planFile && options.applyPlan) throw new Error('Choose --plan-file or --apply-plan, not both.');
+          if (options.fromAdvanced && options.applyPlan) throw new Error('--apply-plan already binds the source; do not also pass --from-advanced.');
+          if (options.fromAdvanced && !options.directory) throw new Error('--from-advanced requires a fresh --directory. No in-place conversion.');
           if (options.applyPlan) {
             const stat = await fs.lstat(options.applyPlan);
-            if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 262144) throw new Error('Simple plan must be a regular file no larger than 256 KiB.');
-            const plan = await fs.readJson(options.applyPlan) as SimpleInitPlan;
-            if (options.directory && await fs.realpath(path.resolve(options.directory)) !== plan.root) throw new Error('--directory does not match the inspected plan root.');
-            console.log(JSON.stringify({ outcome: await applySimpleInit(plan), root: plan.root }));
+            if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4194304) throw new Error('Simple plan must be a regular file no larger than 4 MiB.');
+            const plan = await fs.readJson(options.applyPlan) as SimpleInitPlan | SimpleConversionPlan;
+            if (options.directory) {
+              const directory = path.resolve(options.directory);
+              const canonical = path.join(await fs.realpath(path.dirname(directory)), path.basename(directory));
+              if (canonical !== plan.root) throw new Error('--directory does not match the inspected plan root.');
+            }
+            const outcome = plan.schema === 'yylo_simple_conversion_plan.v1' ? await applySimpleConversion(plan) : await applySimpleInit(plan);
+            console.log(JSON.stringify({ outcome, root: plan.root }));
           } else {
-            const plan = await planSimpleInit(options.directory || process.cwd());
+            const plan = options.fromAdvanced ? await planSimpleConversion(options.fromAdvanced, options.directory) : await planSimpleInit(options.directory || process.cwd());
             if (options.planFile) await writeSimpleInitPlan(options.planFile, plan);
             console.log(JSON.stringify(plan, null, 2));
           }
@@ -1200,10 +1213,18 @@ Simple workspace automation (prior Git initialization required):
   Without --plan-file/--apply-plan, prints a read-only preview.
   Preserves existing AGENTS.md, CLAUDE.md and .gitignore; generates supplemental
   .juno_task/simple-agent-guidance.md and a metadata-local ignore file.
-  Simple has no force, conversion, Git initialization, commits, worktrees, or installation.
+  Fresh Simple setup has no force, Git initialization, commits, worktrees, or installation.
   Omitted-mode inline automation retains Advanced behavior; --mode advanced is explicit.
   Interrupted initialization is refused until explicitly inspected/recovered.
   Runtime readiness and agent activation are separate from initialization.
+
+Advanced to Simple (fresh destination only; source workspaces remain unchanged):
+  yy init --mode simple --from-advanced /controller --directory /new-project --plan-file /external/conversion.json
+  yy init --mode simple --apply-plan /external/conversion.json
+  Requires a registered metadata-only controller, settled tasks and clean worktrees.
+  Copies selected product history and committed Ledger data; retains inactive old
+  instructions/config. No automatic cutover, remote, staging, commits or cleanup.
+  Review custom instructions/settings manually. Simple-to-Advanced is unsupported.
 
 Modes:
   Interactive Mode (default):
