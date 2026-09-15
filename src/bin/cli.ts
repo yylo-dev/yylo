@@ -16,6 +16,7 @@ import chalk from 'chalk';
 import { EXIT_CODES, isCLIError } from '../cli/types.js';
 import type { SubagentType } from '../types/index.js';
 import { resolveAutomaticProjectBootstrap } from '../utils/controller-resolver.js';
+import { AgentStartupError, errorMessage } from '../utils/agent-startup.js';
 import { classifyLeadingCommand, hasManagedWorkspaceMarker } from '../utils/control-plane-router.js';
 import {
   InvocationLifecycle,
@@ -272,9 +273,16 @@ function handleCLIError(error: unknown, verbose: number = 0): void {
     return;
   }
 
-  // Handle unexpected errors
+  if (error instanceof AgentStartupError) {
+    console.error(error.message);
+    writeSelectedMachineError(error, 2);
+    process.exitCode = 2;
+    return;
+  }
+
+  // Handle unexpected errors without losing structured execution messages.
   console.error(chalk.red.bold('\n❌ Unexpected Error'));
-  console.error(chalk.red(`   ${error instanceof Error ? error.message : String(error)}`));
+  console.error(chalk.red(`   ${errorMessage(error)}`));
 
   if (verbose && error instanceof Error) {
     console.error(chalk.gray('\n📍 Stack Trace:'));

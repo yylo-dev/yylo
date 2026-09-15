@@ -918,13 +918,9 @@ describe('hooks', () => {
       expect(await fs.pathExists(configPath)).toBe(true);
 
       const config = await fs.readJson(configPath);
-      // Auto-migration now includes default hooks template with file size monitoring
+      // Default hooks do not install or upgrade dependencies at agent startup.
       expect(config.hooks).toMatchObject({
-        START_RUN: {
-          commands: expect.arrayContaining([
-            expect.stringContaining('./.juno_task/scripts/install_requirements.sh'),
-          ]),
-        },
+        START_RUN: { commands: [] },
         START_ITERATION: {
           commands: expect.arrayContaining([
             expect.stringContaining('CLAUDE.md'),
@@ -952,13 +948,9 @@ describe('hooks', () => {
       await loadConfig({ baseDir: testDir });
 
       const config = await fs.readJson(configPath);
-      // Auto-migration now includes default hooks template with file size monitoring
+      // Default hooks do not install or upgrade dependencies at agent startup.
       expect(config.hooks).toMatchObject({
-        START_RUN: {
-          commands: expect.arrayContaining([
-            expect.stringContaining('./.juno_task/scripts/install_requirements.sh'),
-          ]),
-        },
+        START_RUN: { commands: [] },
         START_ITERATION: {
           commands: expect.arrayContaining([
             expect.stringContaining('CLAUDE.md'),

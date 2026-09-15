@@ -1237,11 +1237,7 @@ logLevel: info
         workingDirectory: tempDir,
         sessionDirectory: path.join(tempDir, '.juno_task'),
         hooks: {
-          START_RUN: {
-            commands: expect.arrayContaining([
-              expect.stringContaining('./.juno_task/scripts/install_requirements.sh'),
-            ]),
-          },
+          START_RUN: { commands: [] },
           START_ITERATION: {
             commands: expect.arrayContaining([
               expect.stringContaining('CLAUDE.md'),
@@ -1991,11 +1987,7 @@ mcpServerPath: "/usr/local/bin/mcp-server"
         workingDirectory: tempDir,
         sessionDirectory: path.join(tempDir, '.juno_task'),
         hooks: {
-          START_RUN: {
-            commands: expect.arrayContaining([
-              expect.stringContaining('./.juno_task/scripts/install_requirements.sh'),
-            ]),
-          },
+          START_RUN: { commands: [] },
           START_ITERATION: {
             commands: expect.arrayContaining([
               expect.stringContaining('CLAUDE.md'),

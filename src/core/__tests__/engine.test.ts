@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   resolvePromptCommandSubstitutions: vi.fn(),
   resolvePromptMacros: vi.fn(),
   executeHook: vi.fn().mockResolvedValue(undefined),
+  checkLedgerReadiness: vi.fn().mockResolvedValue('/fixture/yylo-ledger'),
 }));
 
 vi.mock('../backends/shell-backend.js', () => ({
@@ -49,6 +50,8 @@ vi.mock('../../cli/utils/advanced-logger.js', () => ({
     debug: vi.fn(),
   },
 }));
+
+vi.mock('../../cli/commands/ledger.js', () => ({ checkLedgerReadiness: mocks.checkLedgerReadiness }));
 
 vi.mock('../../utils/hooks.js', () => ({
   executeHook: mocks.executeHook,
@@ -156,6 +159,7 @@ describe('ExecutionEngine', () => {
       warnings: [],
     }));
     mocks.executeHook.mockResolvedValue(undefined);
+    mocks.checkLedgerReadiness.mockResolvedValue('/fixture/yylo-ledger');
 
     // Re-set ShellBackend constructor (mockReset clears its mockImplementation)
     const { ShellBackend } = await import('../backends/shell-backend.js');
@@ -286,32 +290,27 @@ describe('ExecutionEngine', () => {
       expect(mocks.execute).toHaveBeenCalledOnce();
     });
 
-    it('fails closed before dispatch when dependency version repair fails', async () => {
-      engineConfig.config.skipHooks = false;
-      engineConfig.config.hooks = {
-        START_RUN: { commands: ['./.juno_task/scripts/install_requirements.sh'] },
-      } as any;
-      mocks.executeHook.mockResolvedValue({
-        hookType: 'START_RUN',
-        totalDuration: 5,
-        commandResults: [{
-          command: './.juno_task/scripts/install_requirements.sh',
-          exitCode: 2,
-          stdout: 'known version mismatch',
-          stderr: 'repair failed',
-          duration: 5,
-          success: false,
-        }],
-        success: false,
-        commandsExecuted: 1,
-        commandsFailed: 1,
-      });
-      engine = new ExecutionEngine(engineConfig);
-
-      await expect(engine.execute(makeRequest())).rejects.toThrow(
-        'Dependency preflight failed (exit 2)',
-      );
+    it('fails closed before hooks or backend initialization on a genuine readiness failure', async () => {
+      engineConfig.config.skipHooks = true; // Dependency admission is not an optional user hook.
+      mocks.checkLedgerReadiness.mockRejectedValue(new Error('known version mismatch'));
+      await expect(engine.execute(makeRequest())).rejects.toThrow(/Dependency preflight.*known version mismatch/);
+      expect(mocks.executeHook).not.toHaveBeenCalled();
+      expect(mocks.initialize).not.toHaveBeenCalled();
       expect(mocks.execute).not.toHaveBeenCalled();
+    });
+
+    it('removes the legacy installer while preserving custom hooks and product cwd', async () => {
+      engineConfig.config.skipHooks = false;
+      engineConfig.config.hooks = { START_RUN: { commands: [
+        './.juno_task/scripts/install_requirements.sh', 'echo owner hook',
+      ] } } as any;
+      mocks.executeHook.mockResolvedValue({ commandResults: [], success: true });
+      const request = makeRequest();
+      await engine.execute(request);
+      expect(mocks.executeHook).toHaveBeenCalledWith('START_RUN',
+        { START_RUN: { commands: ['echo owner hook'] } },
+        expect.objectContaining({ workingDirectory: request.workingDirectory }), expect.anything());
+      expect(mocks.checkLedgerReadiness).toHaveBeenCalledWith({ cwd: expect.any(String) });
     });
 
     it('should handle multiple iterations', async () => {
@@ -1385,7 +1384,7 @@ describe('ExecutionEngine', () => {
       const request = makeRequest({
         requestId: 'test-metadata',
         subagent: 'cursor',
-        workingDirectory: '/test/path',
+        workingDirectory: process.env.JUNO_TASK_ROOT || process.cwd(),
         maxIterations: 1,
         model: 'gpt-4',
         timeoutMs: 45000,
@@ -1399,7 +1398,7 @@ describe('ExecutionEngine', () => {
           toolName: 'cursor_subagent',
           arguments: expect.objectContaining({
             instruction: 'Test instruction',
-            project_path: '/test/path',
+            project_path: request.workingDirectory,
             model: 'gpt-4',
             iteration: 1,
           }),

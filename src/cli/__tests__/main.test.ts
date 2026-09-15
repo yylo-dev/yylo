@@ -44,6 +44,12 @@ import type {
   ProgressEvent,
 } from '../../core/engine.js';
 
+// Workspace authority is exercised with real Git in agent-startup.test.ts.
+vi.mock('../../utils/agent-startup.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../utils/agent-startup.js')>(),
+  resolveAgentWorkspace: vi.fn(),
+}));
+
 // Mock external dependencies
 vi.mock('../../core/config.js', () => ({
   loadConfig: vi.fn().mockResolvedValue({
