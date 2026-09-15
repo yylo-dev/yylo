@@ -53,7 +53,7 @@ export interface ControllerResolution {
 export function resolveController(
   workingDirectory: string,
   operation: ControllerOperation = 'diagnostic',
-  options: { ignoreEnvironmentAssertions?: boolean; trustedResolver?: boolean } = {},
+  options: { ignoreEnvironmentAssertions?: boolean; trustedResolver?: boolean; env?: NodeJS.ProcessEnv } = {},
 ): ControllerResolution {
   const simpleHint = hasSimpleWorkspaceHint(workingDirectory);
   const trustedResolver = options.trustedResolver || simpleHint;
@@ -82,7 +82,7 @@ export function resolveController(
       diagnostics: ['controller resolver is not installed; workspace is unmanaged'],
     };
   }
-  const env = buildChildProcessEnvironment();
+  const env = buildChildProcessEnvironment(options.env ?? process.env);
   if (options.ignoreEnvironmentAssertions && !simpleHint) {
     delete env.JUNO_TASK_ROOT;
     delete env.JUNO_CONTROLLER_BRANCH;

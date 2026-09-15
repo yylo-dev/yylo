@@ -34,7 +34,8 @@ import { createExecutionEngine, createExecutionRequest } from '../../core/engine
 import { getCurrentGitBranch } from '../../core/git.js';
 import { logger, LogLevel } from '../utils/advanced-logger.js';
 import { ConcurrentFeedbackCollector } from '../../utils/concurrent-feedback-collector.js';
-import { resolveController } from '../../utils/controller-resolver.js';
+import { hasSimpleWorkspaceHint, resolveController } from '../../utils/controller-resolver.js';
+import { checkLedgerReadiness, LedgerDelegateError } from './ledger.js';
 import { buildChildProcessEnvironment } from '../../core/child-process-environment.js';
 import { writeTerminalProgress } from '../../utils/terminal-progress-writer.js';
 import { checkpointControllerAfterFinalization } from '../../utils/controller-checkpoint.js';
@@ -261,6 +262,10 @@ async function runKanbanGetCommand(
   deadlineMs: number,
 ): Promise<KanbanLookupResult> {
   const controller = resolveController(workingDirectory, 'kanban');
+  if (controller.role === 'simple') {
+    command = await checkLedgerReadiness({ cwd: workingDirectory });
+    args = ['--config', path.join(controller.path, '.juno_task/config.json'), ...args];
+  }
   const execFile = promisify(childProcess.execFile);
 
   for (let attempt = 1; attempt <= KANBAN_GET_MAX_ATTEMPTS; attempt += 1) {
@@ -372,8 +377,9 @@ async function fetchReferencedKanbanTasks(
   const failuresById = new Map<string, KanbanLookupFailure>();
   const kanbanScriptPath = path.join(workingDirectory, KANBAN_TASK_SCRIPT_RELATIVE_PATH);
   const hasKanbanScript = await fs.pathExists(kanbanScriptPath);
-  const command = hasKanbanScript ? kanbanScriptPath : 'juno-kanban';
-  const manualCommand = hasKanbanScript ? './.juno_task/scripts/kanban.sh' : 'juno-kanban';
+  const simple = hasSimpleWorkspaceHint(workingDirectory);
+  const command = simple ? 'yylo-ledger' : hasKanbanScript ? kanbanScriptPath : 'juno-kanban';
+  const manualCommand = simple ? 'yy ledger' : hasKanbanScript ? './.juno_task/scripts/kanban.sh' : 'juno-kanban';
 
   if (taskIds.length === 0) {
     return { tasksById, failuresById, manualCommand };
@@ -1858,6 +1864,14 @@ export async function mainCommandHandler(
       ? path.resolve(process.cwd(), options.cwd)
       : process.cwd();
 
+    if (options.cwd && hasSimpleWorkspaceHint(process.cwd())) {
+      const origin = resolveController(process.cwd(), 'product-edit');
+      const selected = resolveController(requestedWorkingDirectory, 'product-edit');
+      if (selected.role !== 'simple' || selected.path !== origin.path) {
+        throw new Error('Simple --cwd must remain inside the validated project root.');
+      }
+    }
+
     // Load configuration first so we can resolve defaults from config.json
     const config = await loadConfig({
       baseDir: requestedWorkingDirectory,
@@ -1866,7 +1880,8 @@ export async function mainCommandHandler(
         verbose: effectiveVerbose,
         quiet: options.quiet || false,
         logLevel: options.logLevel || 'info',
-        workingDirectory: requestedWorkingDirectory,
+        ...(options.cwd || !hasSimpleWorkspaceHint(requestedWorkingDirectory)
+          ? { workingDirectory: requestedWorkingDirectory } : {}),
         // Pass through onHourlyLimit if specified via CLI flag
         ...(options.onHourlyLimit
           ? { onHourlyLimit: options.onHourlyLimit as 'wait' | 'raise' }
@@ -1874,6 +1889,9 @@ export async function mainCommandHandler(
       },
     });
 
+    if (config.controllerWorkspace?.mode === 'simple') {
+      await checkLedgerReadiness({ cwd: config.workingDirectory });
+    }
     await prepareSessionBranchExecution(options, config);
 
     // Set logger level based on effective verbose:
@@ -2083,7 +2101,9 @@ export async function mainCommandHandler(
     if (exitCode !== null) {
       // This is the true outer execution finalizer: history, session branches,
       // continuation state, and the running marker have already been persisted.
-      await checkpointControllerAfterFinalization(config.workingDirectory, exitCode);
+      if (config.controllerWorkspace?.mode !== 'simple') {
+        await checkpointControllerAfterFinalization(config.workingDirectory, exitCode);
+      }
       if (executionError !== undefined) throw executionError;
       process.exit(exitCode);
       return;
@@ -2101,6 +2121,10 @@ export async function mainCommandHandler(
       }
 
       process.exit(1);
+      return;
+    } else if (error instanceof LedgerDelegateError) {
+      console.error(error.message);
+      process.exitCode = error.exitCode;
       return;
     } else if (error instanceof ConfigurationError) {
       console.error(chalk.red.bold('\n❌ Configuration Error'));
