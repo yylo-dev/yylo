@@ -284,13 +284,21 @@ yy merge project TASK_ID
 through `QUEUED`. `merge land` composes and lands exactly that task with native
 Git; `merge project` separately records an already successful Git result.
 
-### Opt-in Simple workspaces
+### Choose Simple or Advanced
 
-For local code, notebooks, notes, and Ledger in one Git checkout, use explicit
-`yy init --mode simple` plan/apply initialization. Agents work locally;
-`yy task local` is bookkeeping, not managed delivery. No implicit commits,
-worktrees, package upgrades, or conversion of existing managed installations.
-Read [Simple workspaces](docs/simple-workspaces.md) for exact commands,
+For a new project, run `git init`, then `yy init`. The final question selects:
+
+- **Simple (recommended to start):** code, notebooks, notes and Ledger in one
+  checkout. Agents share files; `yy task local` is bookkeeping, not delivery.
+  No implicit commits, worktrees or package installation.
+- **Advanced:** a separate controller, isolated task worktrees and managed merging.
+
+Use `yy init --interactive --mode simple` to skip the mode question. Inline
+initialization retains Advanced behavior; `yy init "Build an API" --mode advanced`
+makes that explicit. Existing `yy init --mode simple` automation still previews a
+plan; use `--plan-file` then `--apply-plan` to initialize without interaction.
+Initialization does not convert existing workspaces.
+Read [Simple and Advanced workspaces](docs/simple-workspaces.md) for exact commands,
 readiness recovery, persistence, and shared-checkout limits.
 
 ### Manual implementation path (managed mode)

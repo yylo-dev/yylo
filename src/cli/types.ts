@@ -120,6 +120,8 @@ export interface MainCommandOptions extends GlobalCLIOptions {
  * Init command options
  */
 export interface InitCommandOptions extends GlobalCLIOptions {
+  /** Workspace topology; omitted headless mode remains Advanced */
+  mode?: 'simple' | 'advanced';
   /** Target directory */
   directory?: string;
   /** Force overwrite existing files */
