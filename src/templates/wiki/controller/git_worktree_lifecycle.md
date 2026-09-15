@@ -63,6 +63,28 @@ blocks another task's land. Historical queue, review, candidate, and CAS receipt
 remain immutable data; no supported command executes or resumes their retired
 engine.
 
+## Read-only task doctor
+
+`yy task doctor [TASK_ID]` compares lifecycle records with Ledger without repair.
+Board scans use cursor-bound hot pages of 100 projected records, not one Ledger
+process per task. Only selected IDs absent from hot pages receive batched exact
+`get --compact` lookups, preserving cold-ID retrieval without enumerating cold
+storage. Exact-ID doctor uses one bounded get. Bodies are never returned by doctor.
+
+The default output covers at most 1000 lifecycle rows. Use `--limit 1..1000` and
+`--offset N` to inspect sorted-ID windows; an offset is not a snapshot cursor.
+`coverage` reports read calls, pages, cold batches, selected/total records,
+`next_offset`, and completeness. Partial scans report `outcome: incomplete`,
+never overall agreement. Missing tasks and failed reads remain distinct.
+Each child is capped at 30 seconds and 1 MiB combined output; scans admit no new
+child after 90 seconds or 100 hot pages. A child may finish within its own bound.
+Oversized, malformed, failed, or stale-cursor responses stop the scan without
+retrying by offset. Lifecycle changes during the scan also mark it incomplete.
+Observations are explicitly non-atomic across lifecycle, hot pages, and cold
+reads. A later change can invalidate an earlier observation; doctor grants no
+projection or integration authority. Process-count reduction is not an elapsed-
+time guarantee.
+
 ## Manual tokens and managed recovery
 
 `start` and `lease-successor` return a `lease_token` once. Store it privately;

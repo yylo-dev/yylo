@@ -3200,11 +3200,161 @@ def recover_kanban_sync(controller: Path, task_id: str,
     return result
 
 
-def kanban_sync_doctor(controller: Path, task_id: Optional[str] = None) -> dict[str, Any]:
+DOCTOR_PAGE_SIZE = 100
+DOCTOR_ROW_LIMIT = 1000
+DOCTOR_MAX_PAGES = 100
+DOCTOR_READ_BYTES = 1024 * 1024
+
+
+def _doctor_read(controller: Path, argv: list[str]) -> str:
+    """Bound one read-only Ledger child, including malformed/oversized replies."""
+    process = subprocess.Popen([str(_kanban_wrapper(controller)), *argv], cwd=controller,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, start_new_session=True)
+    chunks: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+    deadline = time.monotonic() + 30
+    completed = False
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+            while selector.get_map():
+                if time.monotonic() >= deadline:
+                    raise KanbanSyncError("doctor Ledger read timed out", {})
+                for key, _ in selector.select(0.1):
+                    data = os.read(key.fileobj.fileno(), 65536)
+                    if not data:
+                        selector.unregister(key.fileobj)
+                        continue
+                    chunks[key.data].extend(data)
+                    if sum(map(len, chunks.values())) > DOCTOR_READ_BYTES:
+                        raise KanbanSyncError("doctor Ledger output exceeded byte limit", {})
+        process.wait(timeout=max(0.01, deadline - time.monotonic()))
+        if process.returncode:
+            # Never echo task bodies or arbitrary stderr into the doctor report.
+            raise KanbanSyncError("doctor Ledger read failed; snapshot may have changed",
+                                  {"returncode": process.returncode})
+        payload = chunks["stdout"].decode("utf-8")
+        completed = True
+        return payload
+    except (UnicodeDecodeError, subprocess.TimeoutExpired) as exc:
+        raise KanbanSyncError("doctor Ledger response unavailable", {}) from exc
+    finally:
+        if not completed or process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        process.wait()
+        process.stdout.close()
+        process.stderr.close()
+
+
+def _doctor_json_documents(payload: str) -> list[Any]:
+    decoder = json.JSONDecoder()
+    documents: list[Any] = []
+    remaining = payload.strip()
+    try:
+        while remaining:
+            value, end = decoder.raw_decode(remaining)
+            documents.append(value)
+            remaining = remaining[end:].strip()
+            if len(documents) > 2:
+                raise ValueError("unexpected framing")
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise KanbanSyncError("doctor Ledger response is malformed", {}) from exc
+    return documents
+
+
+def _doctor_board_rows(controller: Path, ids: list[str], *, exact: bool = False
+                       ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Cursor-bound hot pages; cold lookup only for exact requested missing IDs.
+
+    This is not an atomic snapshot with lifecycle state or cold reads. Never
+    retry a stale cursor by offset or silently fall back to per-row hot reads.
+    """
+    board: dict[str, dict[str, Any]] = {}
+    coverage: dict[str, Any] = {"read_calls": 0, "hot_pages": 0, "cold_batches": 0,
+                                "complete": True, "consistency": "non_atomic_observation"}
+    if any(not isinstance(key, str) or not TASK_RE.fullmatch(key) for key in ids):
+        raise TaskWorkspaceError("unsafe task id in doctor selection")
+    wanted = set(ids)
+    seen: set[str] = set()
+    deadline = time.monotonic() + 90
+
+    def acquire(argv: list[str]) -> list[Any]:
+        if time.monotonic() >= deadline:
+            raise KanbanSyncError("doctor scan time budget reached", {})
+        coverage["read_calls"] += 1
+        return _doctor_json_documents(_doctor_read(controller, ["-f", "json", *argv]))
+
+    def accept(rows: Any, allowed: Optional[set[str]] = None) -> None:
+        if not isinstance(rows, list) or len(rows) > DOCTOR_PAGE_SIZE:
+            raise KanbanSyncError("doctor Ledger row count/shape is invalid", {})
+        for row in rows:
+            if (not isinstance(row, dict) or not isinstance(row.get("id"), str)
+                    or not TASK_RE.fullmatch(row["id"]) or row["id"] in seen
+                    or (allowed is not None and row["id"] not in allowed)
+                    or row.get("status") not in ("backlog", "todo", "in_progress", "done", "archive")
+                    or not isinstance(row.get("fields", {}), dict)):
+                raise KanbanSyncError("doctor Ledger row identity/shape is invalid", {})
+            seen.add(row["id"])
+            if row["id"] in wanted:
+                fields = row.get("fields", {})
+                board[row["id"]] = {"status": row["status"], "fields": {
+                    key: fields.get(key) for key in ("lifecycle_projection", "lifecycle_state")}}
+
+    try:
+        if not exact and ids:
+            cursor = None
+            cursors: set[str] = set()
+            for _ in range(DOCTOR_MAX_PAGES):
+                argv = ["list", "--limit", str(DOCTOR_PAGE_SIZE), "--projection", "metadata",
+                        "--fields", "id,status,fields", "--show-cursor"]
+                if cursor is not None:
+                    argv += ["--cursor", cursor]
+                docs = acquire(argv)
+                coverage["hot_pages"] += 1
+                if (len(docs) != 2 or not isinstance(docs[1], dict)
+                        or not isinstance(docs[1].get("summary"), dict)
+                        or "next_cursor" not in docs[1]["summary"]):
+                    raise KanbanSyncError("doctor Ledger page framing is invalid", {})
+                accept(docs[0])
+                cursor = docs[1]["summary"]["next_cursor"]
+                if cursor is None:
+                    break
+                if not isinstance(cursor, str) or not cursor or cursor in cursors or len(cursor) > 4096:
+                    raise KanbanSyncError("doctor Ledger cursor is invalid", {})
+                cursors.add(cursor)
+            else:
+                raise KanbanSyncError("doctor Ledger hot page limit reached", {})
+        missing = sorted(wanted - board.keys())
+        for offset in range(0, len(missing), DOCTOR_PAGE_SIZE):
+            batch = missing[offset:offset + DOCTOR_PAGE_SIZE]
+            docs = acquire(["get", *batch, "--compact"])
+            coverage["cold_batches"] += 0 if exact else 1
+            if len(docs) != 1:
+                raise KanbanSyncError("doctor Ledger exact read framing is invalid", {})
+            values = [docs[0]] if isinstance(docs[0], dict) else docs[0]
+            accept(values, set(batch))
+        if wanted - board.keys():
+            coverage.update(complete=False, reason="kanban_task_absent")
+    except (KanbanSyncError, OSError) as exc:
+        coverage.update(complete=False, reason="kanban_read_failed",
+                        diagnostic=str(exc)[:256])
+    coverage["readable"] = len(board)
+    return board, coverage
+
+
+def kanban_sync_doctor(controller: Path, task_id: Optional[str] = None, *,
+                       limit: int = DOCTOR_ROW_LIMIT, offset: int = 0) -> dict[str, Any]:
     """Bounded read-only reconciliation of board truth versus task records."""
     state = read_state(controller)
     records = state.get("tasks", {})
+    if not 1 <= limit <= DOCTOR_ROW_LIMIT or offset < 0:
+        raise TaskWorkspaceError("doctor requires 1 <= limit <= 1000 and offset >= 0")
     selected = sorted(records.items())
+    total = len(selected)
     if task_id is not None:
         if not TASK_RE.fullmatch(task_id):
             raise TaskWorkspaceError("unsafe task id")
@@ -3213,24 +3363,38 @@ def kanban_sync_doctor(controller: Path, task_id: Optional[str] = None) -> dict[
                     "rows": [], "summary": {"examined": 0, "drift": 0},
                     "outcome": "no_task_record"}
         selected = [(task_id, records[task_id])]
+        total = 1
+    else:
+        selected = selected[offset:offset + limit]
+    board_rows, coverage = _doctor_board_rows(controller, [key for key, _ in selected],
+                                              exact=task_id is not None)
+    coverage.update(total_records=total, selected_records=len(selected), offset=offset,
+                    next_offset=(offset + len(selected)
+                                 if task_id is None and offset + len(selected) < total else None))
+    coverage["complete"] = coverage["complete"] and (task_id is not None or
+                             (offset == 0 and len(selected) == total))
     rows: list[dict[str, Any]] = []
     drift = 0
     for current_id, record in selected:
         if not isinstance(record, dict):
-            continue
+            coverage.update(complete=False, reason="malformed_lifecycle_record")
+            record = {}
         lifecycle_state = record.get("state")
         expected = LIFECYCLE_BOARD_STATUS.get(lifecycle_state) if isinstance(lifecycle_state, str) else None
         reasons: list[str] = []
         board_status = None
         board_fields: dict[str, Any] = {}
         board_error = None
-        try:
-            board = read_kanban_task(controller, current_id)
+        board = board_rows.get(current_id)
+        if board is None:
+            board_error = coverage.get("reason", "kanban_read_failed")
+            reasons.append(board_error)
+        else:
             board_status = board.get("status")
-            board_fields = board.get("fields") if isinstance(board.get("fields"), dict) else {}
-        except (KanbanSyncError, OSError) as exc:
-            board_error = str(exc)[:256]
-            reasons.append("kanban_read_failed")
+            board_fields = board["fields"]
+        if expected is None:
+            reasons.append("malformed_lifecycle_record")
+            coverage.update(complete=False, reason="malformed_lifecycle_record")
         if board_error is None and isinstance(lifecycle_state, str) and expected is not None:
             if board_status != expected:
                 if expected == "in_progress" and board_status in PRESTART_TRACKING_STATUSES:
@@ -3263,11 +3427,14 @@ def kanban_sync_doctor(controller: Path, task_id: Optional[str] = None) -> dict[
                                             if lifecycle_state == "MERGED"
                                             else KANBAN_SYNC_RECOVERY.format(task=current_id))
                                            if reasons else None)})
+    if read_state(controller) != state:
+        coverage.update(complete=False, reason="lifecycle_snapshot_changed")
     return {"schema_version": KANBAN_SYNC_SCHEMA, "task_id": task_id,
-            "rows": rows,
+            "rows": rows, "coverage": coverage,
             "summary": {"examined": len(rows), "drift": drift,
                         "agree": len(rows) - drift},
-            "outcome": "drift" if drift else "agree"}
+            "outcome": ("incomplete" if not coverage["complete"] else
+                        "drift" if drift else "agree")}
 
 
 def start(controller: Path, task_id: str, requested_paths: Optional[list[str]] = None,
@@ -8653,6 +8820,10 @@ def parser() -> argparse.ArgumentParser:
         "state-archive-plan", "state-archive-apply", "state-archive-verify",
         "state-archive-get", "state-archive-rollback"))
     value.add_argument("--task")
+    value.add_argument("--limit", type=int, default=DOCTOR_ROW_LIMIT,
+                       help="doctor only: maximum lifecycle rows (1-1000)")
+    value.add_argument("--offset", type=int, default=0,
+                       help="doctor only: lifecycle row offset in sorted task IDs")
     value.add_argument("--run-id", help="exact active task-run identity for receipt-bound recovery")
     value.add_argument("--attempt", type=int,
                        help="exact task-run worker attempt for wall-budget recovery")
@@ -8857,7 +9028,8 @@ def main(argv: list[str] | None = None) -> int:
                 elif args.operation == "sync":
                     result = recover_kanban_sync(controller, args.task, args.lease_token)
                 elif args.operation == "doctor":
-                    result = kanban_sync_doctor(controller, args.task or None)
+                    result = kanban_sync_doctor(controller, args.task or None,
+                                                limit=args.limit, offset=args.offset)
                 elif args.operation == "status":
                     result = status(controller, args.task)
                 elif args.operation == "admission":
