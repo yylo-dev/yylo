@@ -540,31 +540,95 @@ def metadata_controller_policy_identity(root: Path, branch_ref: str) -> dict[str
 
 
 def worker_metadata_identity(root: Path, task_id: str) -> dict[str, str]:
-    """Bind admission-written metadata, never waive executable/config dirt."""
+    """Bind task-local state and controller inputs, not checkpoint representation.
+
+    Only canonical task metadata may change independently. Unknown paths remain
+    protected; ignored executable/instruction roots are explicitly included.
+    This is acceptance evidence, not a sandbox or attribution of a writer.
+    """
     if not task_id.isascii() or not task_id.isalnum() or len(task_id) > 64:
         raise RunnerError("invalid worker task identity")
-    if git(root, "diff", "--cached", "--name-only"):
-        raise RunnerError("staged controller changes refuse worker admission")
-    paths = set(filter(None, (git(root, "diff", "--name-only", "-z") + "\0" +
+    state_path = root / ".juno_task/state/tasks.json"
+    if (state_path.is_symlink() or state_path.resolve() != state_path.absolute()
+            or not state_path.is_file() or state_path.stat().st_size > 25 * 1024 * 1024):
+        raise RunnerError("worker lifecycle state is missing, unsafe or unbounded")
+    try:
+        with state_path.open("rb") as stream:
+            state_bytes = stream.read(25 * 1024 * 1024 + 1)
+        if len(state_bytes) > 25 * 1024 * 1024:
+            raise RunnerError("worker lifecycle state exceeds snapshot budget")
+        state = json.loads(state_bytes)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise RunnerError("worker lifecycle state is missing or malformed") from exc
+    tasks = state.get("tasks") if isinstance(state, dict) else None
+    if (not isinstance(tasks, dict) or not isinstance(tasks.get(task_id), dict)
+            or not isinstance(tasks[task_id].get("state"), str) or not tasks[task_id]["state"]):
+        raise RunnerError("worker lifecycle task evidence is missing or malformed")
+    identities = {"task_state": sha(canonical(tasks[task_id])),
+                  "state_schema": sha(canonical({k: v for k, v in state.items() if k != "tasks"}))}
+
+    def metadata(relative: str, *, unrelated: bool = False) -> bool:
+        if relative == ".juno_task/state/tasks.json":
+            return True
+        match = __import__("re").fullmatch(
+            r"\.juno_task/(?:tasks/([^/]+)/([A-Za-z0-9]+)\.md|"
+            r"ledger/([^/]+)/([A-Za-z0-9]+)/[^/]+\.ndjson|"
+            r"task-scopes/([^/]+)/([A-Za-z0-9]+)\.json)", relative)
+        if not match:
+            return False
+        shard, owner = next((match[i], match[i + 1]) for i in (1, 3, 5) if match[i])
+        return shard == owner[:2].lower() and (not unrelated or owner != task_id)
+
+    dirty = set(filter(None, (git(root, "diff", "HEAD", "--name-only", "-z") + "\0" +
+                             git(root, "diff", "--cached", "--name-only", "-z") + "\0" +
                              git(root, "ls-files", "--others", "--exclude-standard", "-z")).split("\0")))
-    prefix = task_id[:2].lower()
-    exact = {".juno_task/state/tasks.json", f".juno_task/tasks/{prefix}/{task_id}.md"}
-    ledger = f".juno_task/ledger/{prefix}/{task_id}/"
-    identities = {}
+    if any(not metadata(p) for p in dirty):
+        raise RunnerError("non-metadata controller changes refuse worker admission")
+    tracked = set(filter(None, git(root, "ls-tree", "-r", "--name-only", "-z", "HEAD").split("\0")))
+    paths = {p for p in tracked | dirty if not metadata(p, unrelated=True)}
+    # These installed inputs may be ignored by Git. Never enumerate runtime
+    # journals, dependency trees or cold storage to obtain this identity.
+    for relative in (".juno_task/config", ".juno_task/scripts", ".juno_task/prompts",
+                     ".pi/skills", ".pi/extensions", ".claude/skills", ".agents/skills"):
+        directory = root / relative
+        if directory.is_symlink():
+            raise RunnerError("worker input root must not be a symlink")
+        if directory.is_dir():
+            for path in directory.rglob("*"):
+                if "__pycache__" not in path.parts and (path.is_file() or path.is_symlink()):
+                    paths.add(path.relative_to(root).as_posix())
+                    if len(paths) > 10000:
+                        raise RunnerError("worker inputs exceed snapshot file budget")
+    for relative in ("AGENTS.md", "CLAUDE.md", ".juno_task/managed-assets.json"):
+        if (root / relative).exists():
+            paths.add(relative)
+    task_path = f".juno_task/tasks/{task_id[:2].lower()}/{task_id}.md"
+    paths.add(task_path)
+    scope_path = f".juno_task/task-scopes/{task_id[:2].lower()}/{task_id}.json"
+    for relative in (task_path, scope_path):
+        path = root / relative
+        if path.is_symlink() or path.resolve() != path.absolute():
+            raise RunnerError("worker task inputs must not traverse symlinks")
+    identities["task_scope_present"] = str((root / scope_path).exists())
+    if (root / scope_path).exists():
+        paths.add(scope_path)
     total = 0
+    if len(paths) > 10000:
+        raise RunnerError("worker inputs exceed snapshot file budget")
     for relative in sorted(paths):
         path = root / relative
-        if (relative not in exact and not (relative.startswith(ledger)
-                and relative[len(ledger):].endswith(".ndjson")
-                and "/" not in relative[len(ledger):])):
-            raise RunnerError("unrelated controller changes refuse worker admission")
-        if (not path.is_file() or path.is_symlink()
-                or path.resolve() != path.absolute()):
-            raise RunnerError("worker metadata must be an existing regular file without symlinks")
-        total += path.stat().st_size
+        if not path.is_file():
+            raise RunnerError("worker input is missing or not a regular file")
+        with path.open("rb") as stream:
+            content = stream.read(25 * 1024 * 1024 - total + 1)
+        total += len(content)
         if total > 25 * 1024 * 1024:
-            raise RunnerError("worker metadata exceeds snapshot budget")
-        identities[relative] = sha(path.read_bytes())
+            raise RunnerError("worker inputs exceed snapshot byte budget")
+        # Bind link identity as well as content (configured external files are
+        # additionally checked by verify_compatible_config).
+        identities[relative] = sha(canonical({"content": sha(content),
+            "mode": path.lstat().st_mode, "resolved": str(path.resolve()),
+            "link": os.readlink(path) if path.is_symlink() else None}))
     return identities
 
 
@@ -573,10 +637,16 @@ def controller_identity(root: Path, *, worker_task_id: str | None = None) -> dic
     config = root / ".juno_task/config.json"
     if not config.is_file():
         raise RunnerError("controller is missing its config or is dirty")
-    if mark["status"]:
-        if worker_task_id is None:
-            raise RunnerError("controller is missing its config or is dirty")
+    if worker_task_id is not None:
+        # Keep reviewer fingerprints strict. Workers bind actual inputs on both
+        # clean and dirty controllers so checkpointing cannot change the shape.
+        for key in ("head", "status", "index_sha256"):
+            mark.pop(key)
         mark["worker_metadata_sha256"] = worker_metadata_identity(root, worker_task_id)
+        mark["registration_sha256"] = sha(git(root, "config", "--get-regexp",
+            r"^juno\.(controller|workspace)\.", check=False).encode())
+    elif mark["status"]:
+        raise RunnerError("controller is missing its config or is dirty")
     mark["config_sha256"] = sha(config.read_bytes())
     resolver = root / ".juno_task/scripts/controller_resolver.py"
     if resolver.is_file():
@@ -1334,6 +1404,8 @@ def run(args: argparse.Namespace) -> int:
         f"managed-{args.mode}", args.task_id or args.tool_id)
     proc: subprocess.Popen[bytes] | None = None; interrupted = 0
     producer_completed = False
+    terminal_result = None
+    controller_guard: dict[str, Any] = {"outcome": "not_checked"}
     timed_out = False
     termination_events: list[dict[str, Any]] = []
     old_handlers: dict[int, Any] = {}
@@ -1412,10 +1484,19 @@ def run(args: argparse.Namespace) -> int:
             "identity_sha256": sha(canonical(identity).rstrip(b"\n")),
             "response_sha256": sha(response_path.read_bytes()),
         }
+        controller_guard = {"outcome": "refused", "reason": "identity_unavailable"}
         controller_after = controller_identity(controller_root, worker_task_id=worker_task_id)
+        changes = sorted(key for key in controller_before.keys() | controller_after.keys()
+                         if controller_before.get(key) != controller_after.get(key))
+        controller_guard = {"outcome": "refused" if changes else "passed",
+                            "changed_keys": changes[:16], "changed_key_count": len(changes),
+                            "before_sha256": sha(canonical(controller_before)),
+                            "after_sha256": sha(canonical(controller_after))}
+        if changes:
+            raise RunnerError("controller authority/input identity changed during managed launch")
+        controller_guard["outcome"] = "refused"
         verify_compatible_config(compatible_config)
-        if controller_after != controller_before:
-            raise RunnerError("controller mutated during managed launch")
+        controller_guard["outcome"] = "passed"
         if args.mode == "reviewer" and subject_after != subject_before:
             raise RunnerError("review candidate mutated during managed launch")
         if args.mode == "worker":
@@ -1441,6 +1522,8 @@ def run(args: argparse.Namespace) -> int:
                     "termination_events": termination_events,
                     "live_log": {"path": str(live_log_path), "sha256": sha(live_log_path.read_bytes())},
                     "semantic_outcome": (terminal_result or {}).get("state", "completed"),
+                    "producer_terminal_result": terminal_result,
+                    "controller_guard": controller_guard,
                     "terminal_result": terminal_result,
                     "compatible_config_sha256": compatible_config["sha256"],
                     "capture_source": capture_source,
@@ -1501,6 +1584,8 @@ def run(args: argparse.Namespace) -> int:
                     "producer_elapsed_seconds": producer_elapsed,
                     "live_log": {"path": str(live_log_path), "sha256": sha(live_log_path.read_bytes())},
                     "elapsed_seconds": round(time.monotonic() - started, 3), "semantic_outcome": "failed",
+                    "producer_terminal_result": terminal_result,
+                    "controller_guard": controller_guard,
                     "compatible_config_sha256": compatible_config["sha256"],
                     "failure_type": type(cleanup_error or exc).__name__,
                     "failure": failure, "reason_code": reason_code,
