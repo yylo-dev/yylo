@@ -138,6 +138,12 @@ classify_prebootstrap_command() {
     case "$PREBOOTSTRAP_COMMAND" in
         -V|--version|info|where|capabilities|benchmark|ledger|kanban|task|merge|integration|evidence|tmux) return 0 ;;
         doctor) [ "$PREBOOTSTRAP_SUBCOMMAND" = "workspace" ] && return 0 ;;
+        init)
+            # Mode initialization must validate its plan before any copied hook/bootstrap.
+            for token in "$@"; do
+                case "$token" in --mode|--mode=*|--plan-file|--plan-file=*|--apply-plan|--apply-plan=*) return 0 ;; esac
+            done ;;
+
     esac
     return 1
 }

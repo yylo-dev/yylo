@@ -2182,7 +2182,9 @@ async function main(): Promise<void> {
   const isWorkspaceDiscovery = commandArgs[0] === 'info' || commandArgs[0] === 'where' || commandArgs[0] === 'capabilities' || (commandArgs[0] === 'doctor' && commandArgs[1] === 'workspace');
   const isTmuxCommand = commandArgs[0] === 'tmux';
   const isControlPlaneCommand = ['ledger', 'kanban', 'task', 'merge', 'integration'].includes(commandArgs[0] ?? '');
-  const isReadOnlyIdentityRequest = isReadOnlyVersionRequest || isReadOnlyLifecycleStatus || isReadOnlyTaskStatus || isMigrationCommand || isScriptsDoctor || isWorkspaceDiscovery || isTmuxCommand || isControlPlaneCommand;
+  // Explicit mode initialization owns every write; never run legacy bootstrap first.
+  const isModeInit = commandArgs[0] === 'init' && commandArgs.some((arg) => /^--(?:mode|plan-file|apply-plan)(?:=|$)/.test(arg));
+  const isReadOnlyIdentityRequest = isReadOnlyVersionRequest || isReadOnlyLifecycleStatus || isReadOnlyTaskStatus || isMigrationCommand || isScriptsDoctor || isWorkspaceDiscovery || isTmuxCommand || isControlPlaneCommand || isModeInit;
   const isForceUpdate = process.argv.includes('--force-update');
   const isExplicitProjectAssetUpdate =
     isForceUpdate ||

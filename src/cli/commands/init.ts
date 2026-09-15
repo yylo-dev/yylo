@@ -11,6 +11,7 @@ import fs from 'fs-extra';
 import chalk from 'chalk';
 import { Command } from 'commander';
 import { promptMultiline, promptInputOnce } from '../utils/multiline.js';
+import { planSimpleInit, applySimpleInit, writeSimpleInitPlan, type SimpleInitPlan } from '../../utils/simple-init.js';
 
 import { getDefaultHooks } from '../../templates/default-hooks.js';
 import { getDefaultModelForSubagent } from '../../core/subagent-models.js';
@@ -1101,12 +1102,38 @@ export function configureInitCommand(program: Command): void {
     .option('-s, --subagent <name>', 'AI subagent to use (claude, codex, gemini, cursor, pi)')
     .option('-g, --git-repo <url>', 'Git repository URL')
     .option('-d, --directory <path>', 'Target directory (default: current directory)')
-    .option('-f, --force', 'Force overwrite existing files')
+    .option('--mode <mode>', 'Explicit workspace mode: simple (default initialization remains unchanged)')
+    .option('--plan-file <path>', 'Simple: write a fresh preview plan outside the project')
+    .option('--apply-plan <path>', 'Simple: apply an inspected, unchanged initialization plan')
+    .option('-f, --force', 'Force overwrite existing files (never supported in Simple mode)')
     .option('-i, --interactive', 'Force interactive mode (even if description is provided)')
     .option('--git-url <url>', 'Git repository URL (alias for --git-repo)')
     .option('--target-branch <name>', 'Product default branch (env: YYLO_TARGET_BRANCH; default: main)')
     .option('-t, --task <description>', 'Task description (alias for positional description)')
     .action(async (description, options, command) => {
+      if (options.mode !== undefined || options.planFile || options.applyPlan) {
+        try {
+          if (options.mode !== 'simple') throw new Error('Explicit initialization mode must be simple. No default fallback or conversion is performed.');
+          if (description || options.task || options.force || options.interactive || options.gitRepo || options.gitUrl || options.targetBranch || options.subagent) {
+            throw new Error('Simple initialization supports only --directory, --plan-file or --apply-plan. No force, clone, branch creation or interactive managed setup. Run git init explicitly first.');
+          }
+          if (options.planFile && options.applyPlan) throw new Error('Choose --plan-file or --apply-plan, not both.');
+          if (options.applyPlan) {
+            const stat = await fs.lstat(options.applyPlan);
+            if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 262144) throw new Error('Simple plan must be a regular file no larger than 256 KiB.');
+            const plan = await fs.readJson(options.applyPlan) as SimpleInitPlan;
+            if (options.directory && await fs.realpath(path.resolve(options.directory)) !== plan.root) throw new Error('--directory does not match the inspected plan root.');
+            console.log(JSON.stringify({ outcome: await applySimpleInit(plan), root: plan.root }));
+          } else {
+            const plan = await planSimpleInit(options.directory || process.cwd());
+            if (options.planFile) await writeSimpleInitPlan(options.planFile, plan);
+            console.log(JSON.stringify(plan, null, 2));
+          }
+        } catch (error) {
+          throw new ValidationError(`Simple initialization refused: ${error instanceof Error ? error.message : String(error)}`, []);
+        }
+        return;
+      }
       // Determine task description from multiple possible sources
       // Priority: positional argument > --task option > interactive mode
       const taskDescription = description || options.task;
@@ -1132,6 +1159,17 @@ export function configureInitCommand(program: Command): void {
     .addHelpText(
       'after',
       `
+Simple workspace (opt-in, prior Git initialization required):
+  yy init --mode simple --directory /project --plan-file /external/simple-plan.json
+  yy init --mode simple --apply-plan /external/simple-plan.json
+
+  Without --plan-file/--apply-plan, prints a read-only preview.
+  Preserves existing AGENTS.md, CLAUDE.md and .gitignore; generates supplemental
+  .juno_task/simple-agent-guidance.md and a metadata-local ignore file.
+  No force, conversion, Git initialization, commits, worktrees, or installation.
+  Interrupted initialization is refused until explicitly inspected/recovered.
+  Runtime readiness and agent activation are separate from initialization.
+
 Modes:
   Interactive Mode (default):
     $ yylo init                                    # Opens interactive TUI
