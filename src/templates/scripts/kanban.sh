@@ -258,8 +258,22 @@ normalize_arguments() {
 
     while [[ $# -gt 0 ]]; do
         case $1 in
+            # Native Record commands own their format option. Hoisting it to
+            # the legacy root parser silently selects the Record default instead.
+            -f|--format|--format=*)
+                local -a format_args=("$1")
+                if [[ "$1" != --format=* && $# -gt 1 ]]; then
+                    format_args+=("$2")
+                fi
+                case "${NORMALIZED_COMMAND_ARGS[0]:-}" in
+                    record|task|wiki|workflow|artifact)
+                        NORMALIZED_COMMAND_ARGS+=("${format_args[@]}") ;;
+                    *) NORMALIZED_GLOBAL_FLAGS+=("${format_args[@]}") ;;
+                esac
+                shift "${#format_args[@]}"
+                ;;
             # Global flags that take a value
-            -f|--format|-c|--config|--project)
+            -c|--config|--project)
                 if [[ -n "${2:-}" ]]; then
                     NORMALIZED_GLOBAL_FLAGS+=("$1" "$2")
                     shift 2
@@ -268,7 +282,7 @@ normalize_arguments() {
                     shift
                 fi
                 ;;
-            --format=*|--config=*|--project=*)
+            --config=*|--project=*)
                 NORMALIZED_GLOBAL_FLAGS+=("$1")
                 shift
                 ;;
