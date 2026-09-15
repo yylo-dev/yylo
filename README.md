@@ -284,7 +284,16 @@ yy merge project TASK_ID
 through `QUEUED`. `merge land` composes and lands exactly that task with native
 Git; `merge project` separately records an already successful Git result.
 
-### Manual implementation path
+### Opt-in Simple workspaces
+
+For local code, notebooks, notes, and Ledger in one Git checkout, use explicit
+`yy init --mode simple` plan/apply initialization. Agents work locally;
+`yy task local` is bookkeeping, not managed delivery. No implicit commits,
+worktrees, package upgrades, or conversion of existing managed installations.
+Read [Simple workspaces](docs/simple-workspaces.md) for exact commands,
+readiness recovery, persistence, and shared-checkout limits.
+
+### Manual implementation path (managed mode)
 
 ```bash
 yy task start TASK_ID
