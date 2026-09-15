@@ -31,7 +31,7 @@ export async function invokeMigration(args: string[]): Promise<void> {
   const runtimeRebind = args[0] === 'runtime-rebind' || args[0] === 'runtime-install-rebind';
   const targetRuntimeProvenance = args[0]?.startsWith('target-runtime-provenance-');
   const metadataController = runtimeRebind || args[0]?.startsWith('agent-surface-repair-')
-    || args[0]?.startsWith('metadata-policy-');
+    || args[0]?.startsWith('metadata-policy-') || args[0]?.startsWith('agent-config-');
   let engineName = 'migration_inventory.py';
   if (evacuation) engineName = 'metadata_evacuation.py';
   if (metadataController) engineName = 'metadata_controller.py';
@@ -62,6 +62,24 @@ export function configureMigrationCommand(
   const migrate = program
     .command('migrate')
     .description('Inventory and plan a reviewed Juno architecture migration');
+  const controllerConfig = migrate.command('controller-config')
+    .description('Reviewed ownership migration for legacy metadata-controller configuration');
+  controllerConfig.command('plan')
+    .description('Classify legacy fields and freeze a clean controller/config/runtime preimage; no mutation')
+    .requiredOption('--root <path>', 'Exact registered metadata-controller root')
+    .requiredOption('--output <file>', 'New plan path outside all Git worktrees')
+    .action((options: { root: string; output: string }) => invoke([
+      'agent-config-plan', '--root', options.root, '--output', options.output,
+    ]));
+  controllerConfig.command('apply')
+    .description('Apply only the reviewed hash-bound plan; preserve original config in the Git parent')
+    .requiredOption('--plan <file>', 'Exact reviewed plan')
+    .requiredOption('--output <file>', 'New external receipt path')
+    .requiredOption('--authorize-config-repair', 'Authorize the exact config-only commit')
+    .action((options: { plan: string; output: string }) => invoke([
+      'agent-config-apply', '--plan', options.plan, '--output', options.output,
+      '--authorize-config-repair',
+    ]));
   const legacyLifecycle = migrate
     .command('legacy-lifecycle')
     .description('Finite inventory, conversion, or drain of an existing legacy umbrella attempt');
