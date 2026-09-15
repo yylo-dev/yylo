@@ -49,6 +49,17 @@ describe('task workspace CLI', () => {
     },
   );
 
+  it('forwards bounded doctor windows and documents non-atomic coverage', async () => {
+    const invoke = vi.fn(async () => undefined);
+    const program = new Command().exitOverride();
+    configureTaskWorkspaceCommand(program, invoke);
+    await program.parseAsync(['node', 'yy', 'task', 'doctor', '--limit', '100', '--offset', '200']);
+    expect(invoke).toHaveBeenLastCalledWith('doctor', '', [], ['--limit', '100', '--offset', '200']);
+    const doctor = program.commands.find(c => c.name() === 'task')?.commands.find(c => c.name() === 'doctor');
+    expect(doctor?.helpInformation()).toContain('non-atomic');
+    expect(doctor?.helpInformation()).toMatch(/not a snapshot\s+cursor/);
+  });
+
   it('exposes one ordinary task surface without legacy umbrella commands', () => {
     const program = new Command();
     configureTaskWorkspaceCommand(program, async () => undefined);
