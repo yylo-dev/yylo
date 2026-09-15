@@ -1,7 +1,7 @@
 /**
  * Simplified Init command implementation for yylo CLI
  *
- * Minimal flow: Project Root → Main Task → Editor Selection → Git Setup → Save
+ * Minimal flow: Project Root → Main Task → Editor Selection → Git Setup → Save → Workspace Mode
  * Removes all complex features: token counting, cost calculation, character limits, etc.
  */
 
@@ -32,6 +32,7 @@ interface InitVariables {
 }
 
 interface InitializationContext {
+  mode?: 'simple' | 'advanced';
   targetDirectory: string;
   task: string;
   subagent: string;
@@ -45,7 +46,7 @@ interface InitializationContext {
 /**
  * Simplified Interactive TUI for project initialization
  * Minimal flow as requested by user:
- * Project Root → Main Task [Multi line] → select menu [Coding Editors] → Git Setup? yes | No → Save → Already exists? Override | Cancel → Done
+ * Collect all answers before mode-specific writes. Workspace Mode is the final question.
  */
 class SimpleInitTUI {
   // Simple single-line input helper is provided by utils
@@ -53,28 +54,42 @@ class SimpleInitTUI {
   /**
    * Simplified gather method implementing the minimal flow
    */
-  async gather(): Promise<InitializationContext> {
+  async gather(options: InitCommandOptions = {}): Promise<InitializationContext> {
     console.log(chalk.blue.bold('\n🚀 YYLO Project Initialization\n'));
 
     // 1. Project Root
     console.log(chalk.yellow('📁 Step 1: Project Directory'));
-    const targetDirectory = await this.promptForDirectory();
+    const targetDirectory = options.directory ? path.resolve(options.directory) : await this.promptForDirectory();
 
     // 2. Main Task (multi-line, NO character limits)
     console.log(chalk.yellow('\n📝 Step 2: Main Task'));
-    const task = await this.promptForTask();
+    const task = options.task || await this.promptForTask();
 
     // 3. Editor Selection (simplified menu)
     console.log(chalk.yellow('\n👨‍💻 Step 3: Select Coding Editor'));
-    const editor = await this.promptForEditor();
+    const editor = options.subagent || await this.promptForEditor();
 
     // 4. Git Setup (simple yes/no)
     console.log(chalk.yellow('\n🔗 Step 4: Git Setup'));
-    const gitUrl = await this.promptForGitSetup();
+    console.log(chalk.gray('   Simple requires prior git init; repository URLs are Advanced-only.'));
+    const gitUrl = options.gitUrl || await this.promptForGitSetup();
 
     // 5. Save confirmation (handle existing files)
     console.log(chalk.yellow('\n💾 Step 5: Save Project'));
     await this.confirmSave(targetDirectory);
+
+    // This must remain the final question, including existing-file confirmation.
+    console.log(chalk.yellow('\n⚙️  Step 6: Workspace Mode'));
+    console.log(chalk.gray('   Simple: code, notes and Ledger in one Git checkout; shared files, no managed delivery.'));
+    console.log(chalk.gray('   Advanced: separate controller, isolated task worktrees and managed merging.'));
+    console.log(chalk.gray('   Simple adds config, local ignore rules, guidance and a receipt under .juno_task.'));
+    console.log(chalk.gray('   Existing instructions are preserved; selecting a mode does not convert an existing project.'));
+    const answer = options.mode || (await promptInputOnce('Workspace mode: 1) Simple (recommended)  2) Advanced', '1')).trim().toLowerCase() || '1';
+    const mode = ['1', 'simple'].includes(answer) ? 'simple' : ['2', 'advanced'].includes(answer) ? 'advanced' : undefined;
+    if (!mode) throw new ValidationError('Choose Simple (1) or Advanced (2).', []);
+    if (mode === 'simple' && (gitUrl || options.targetBranch || options.force)) {
+      throw new ValidationError('Simple does not support repository URLs, --target-branch or --force. Run git init explicitly first.', []);
+    }
 
     // Create simple variables (no complex template system)
     const variables = this.createSimpleVariables(targetDirectory, task, editor, gitUrl);
@@ -82,6 +97,7 @@ class SimpleInitTUI {
     console.log(chalk.green('\n✅ Setup complete! Creating project...\n'));
 
     return {
+      mode,
       targetDirectory,
       task,
       subagent: editor, // Use selected editor as subagent
@@ -1018,16 +1034,25 @@ export async function initCommandHandler(
 
     if (shouldUseInteractive) {
       // Interactive mode with simplified TUI
-      console.log(chalk.yellow('🚀 Starting simple interactive setup...'));
+      console.log(chalk.yellow('🚀 Starting interactive setup...'));
       const tui = new SimpleInitTUI();
-      context = await tui.gather();
+      context = await tui.gather(options);
     } else {
       // Headless mode
       const headless = new SimpleHeadlessInit(allOptions);
       context = await headless.initialize();
     }
 
-    // Generate project
+    if ((context.mode || options.mode) === 'simple') {
+      const plan = await planSimpleInit(context.targetDirectory, { task: context.task, subagent: context.subagent });
+      const outcome = await applySimpleInit(plan);
+      console.log(chalk.green(`✓ Simple workspace ${outcome}: ${plan.root}`));
+      console.log('Read .juno_task/simple-agent-guidance.md alongside your project instructions. Use yy ledger for local tasks.');
+      console.log('No Git state or dependencies were changed. Runtime readiness is separate: yy doctor workspace.');
+      return;
+    }
+
+    // Generate Advanced project
     const generator = new SimpleProjectGenerator(context);
     await generator.generate();
 
@@ -1102,7 +1127,7 @@ export function configureInitCommand(program: Command): void {
     .option('-s, --subagent <name>', 'AI subagent to use (claude, codex, gemini, cursor, pi)')
     .option('-g, --git-repo <url>', 'Git repository URL')
     .option('-d, --directory <path>', 'Target directory (default: current directory)')
-    .option('--mode <mode>', 'Explicit workspace mode: simple (default initialization remains unchanged)')
+    .option('--mode <mode>', 'Workspace mode: simple or advanced (interactive choice; headless default: advanced)')
     .option('--plan-file <path>', 'Simple: write a fresh preview plan outside the project')
     .option('--apply-plan <path>', 'Simple: apply an inspected, unchanged initialization plan')
     .option('-f, --force', 'Force overwrite existing files (never supported in Simple mode)')
@@ -1111,9 +1136,12 @@ export function configureInitCommand(program: Command): void {
     .option('--target-branch <name>', 'Product default branch (env: YYLO_TARGET_BRANCH; default: main)')
     .option('-t, --task <description>', 'Task description (alias for positional description)')
     .action(async (description, options, command) => {
-      if (options.mode !== undefined || options.planFile || options.applyPlan) {
+      if (options.mode !== undefined && !['simple', 'advanced'].includes(options.mode)) {
+        throw new ValidationError('Workspace mode must be simple or advanced.', []);
+      }
+      if (options.planFile || options.applyPlan || (options.mode === 'simple' && !options.interactive)) {
         try {
-          if (options.mode !== 'simple') throw new Error('Explicit initialization mode must be simple. No default fallback or conversion is performed.');
+          if (options.mode !== 'simple') throw new Error('Plan/apply options require --mode simple. No conversion is performed.');
           if (description || options.task || options.force || options.interactive || options.gitRepo || options.gitUrl || options.targetBranch || options.subagent) {
             throw new Error('Simple initialization supports only --directory, --plan-file or --apply-plan. No force, clone, branch creation or interactive managed setup. Run git init explicitly first.');
           }
@@ -1139,6 +1167,7 @@ export function configureInitCommand(program: Command): void {
       const taskDescription = description || options.task;
 
       const initOptions: InitCommandOptions = {
+        mode: options.mode,
         directory: options.directory,
         force: options.force,
         task: taskDescription,
@@ -1159,14 +1188,20 @@ export function configureInitCommand(program: Command): void {
     .addHelpText(
       'after',
       `
-Simple workspace (opt-in, prior Git initialization required):
+Workspace modes:
+  yy init                         # Final question: Simple (recommended) or Advanced
+  yy init --interactive --mode simple   # Guided Simple setup, no mode question
+  yy init "Build an API" --mode advanced # Explicit Advanced automation
+
+Simple workspace automation (prior Git initialization required):
   yy init --mode simple --directory /project --plan-file /external/simple-plan.json
   yy init --mode simple --apply-plan /external/simple-plan.json
 
   Without --plan-file/--apply-plan, prints a read-only preview.
   Preserves existing AGENTS.md, CLAUDE.md and .gitignore; generates supplemental
   .juno_task/simple-agent-guidance.md and a metadata-local ignore file.
-  No force, conversion, Git initialization, commits, worktrees, or installation.
+  Simple has no force, conversion, Git initialization, commits, worktrees, or installation.
+  Omitted-mode inline automation retains Advanced behavior; --mode advanced is explicit.
   Interrupted initialization is refused until explicitly inspected/recovered.
   Runtime readiness and agent activation are separate from initialization.
 
@@ -1204,6 +1239,7 @@ Interactive Flow:
   3. Subagent Selection → Choose from Claude, Codex, Gemini, Cursor
   4. Git Setup → Simple yes/no for Git configuration
   5. Save → Handle existing files with override/cancel options
+  6. Workspace Mode → Simple (recommended) or Advanced; final question before writes
 
 Notes:
   - All inline mode arguments are optional

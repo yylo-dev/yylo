@@ -28,6 +28,11 @@ async function fileDigest(file: string): Promise<string | null> {
   }
 }
 
+export interface SimpleInitSettings {
+  task?: string;
+  subagent?: string;
+}
+
 export interface SimpleInitPlan {
   schema: 'yylo_simple_init_plan.v1';
   outcome: 'ready' | 'already-initialized';
@@ -36,13 +41,26 @@ export interface SimpleInitPlan {
   preserved: Record<string, string | null>;
   files: Record<string, string>;
   guidance: string;
+  settings?: SimpleInitSettings;
 }
 
-const generatedFiles = (): Record<string, string> => ({ ...SIMPLE_FILES,
-  [RECEIPT]: `${JSON.stringify({ schema: 'yylo_simple_initialization.v1',
-    files: Object.fromEntries(Object.entries(SIMPLE_FILES).map(([name, content]) => [name, digest(content)])),
-  }, null, 2)}\n`,
-});
+function generatedFiles(settings?: SimpleInitSettings): Record<string, string> {
+  const files = { ...SIMPLE_FILES };
+  if (settings) {
+    if (Object.keys(settings).some((key) => !['task', 'subagent'].includes(key)) ||
+        (settings.task !== undefined && typeof settings.task !== 'string') ||
+        (settings.subagent !== undefined && !['claude', 'codex', 'gemini', 'cursor', 'pi'].includes(settings.subagent))) {
+      throw new Error('Invalid Simple initialization settings.');
+    }
+    if (settings.subagent) {
+      files['config.json'] = `${JSON.stringify({ ...JSON.parse(files['config.json']!), defaultSubagent: settings.subagent }, null, 2)}\n`;
+    }
+    if (settings.task) files['simple-agent-guidance.md'] += `\n## Initial project goal\n\n${settings.task}\n`;
+  }
+  return { ...files, [RECEIPT]: `${JSON.stringify({ schema: 'yylo_simple_initialization.v1',
+    files: Object.fromEntries(Object.entries(files).map(([name, content]) => [name, digest(content)])),
+  }, null, 2)}\n` };
+}
 
 async function inspectRoot(directory: string): Promise<SimpleInitPlan['identity'] & { root: string }> {
   const root = await fs.realpath(path.resolve(directory));
@@ -77,7 +95,7 @@ async function inspectRoot(directory: string): Promise<SimpleInitPlan['identity'
 }
 
 /** Pure preflight: no directory creation, package probes, staging or writes. */
-export async function planSimpleInit(directory: string): Promise<SimpleInitPlan> {
+export async function planSimpleInit(directory: string, settings?: SimpleInitSettings): Promise<SimpleInitPlan> {
   const { root, ...identity } = await inspectRoot(directory);
   try {
     await fs.lstat(path.join(root, RESERVATION));
@@ -93,7 +111,7 @@ export async function planSimpleInit(directory: string): Promise<SimpleInitPlan>
       }
     }
   }
-  const files = generatedFiles();
+  const files = generatedFiles(settings);
   let outcome: SimpleInitPlan['outcome'] = 'ready';
   const metadata = path.join(root, '.juno_task');
   try {
@@ -117,13 +135,14 @@ export async function planSimpleInit(directory: string): Promise<SimpleInitPlan>
     if (result.status !== 1) throw new Error(`Cannot inspect Git ignore rules: ${result.stderr || result.error}`);
   }
   return { schema: 'yylo_simple_init_plan.v1', outcome, root, identity, preserved, files,
+    ...(settings ? { settings } : {}),
     guidance: 'Preserve root AGENTS.md/CLAUDE.md; Simple agents must also read .juno_task/simple-agent-guidance.md. Runtime activation/readiness is separate.' };
 }
 
 /** Apply exactly a fresh, revalidated plan. Failure leaves a reservation for explicit recovery. */
 export async function applySimpleInit(plan: SimpleInitPlan): Promise<'initialized' | 'already-initialized'> {
   if (plan?.schema !== 'yylo_simple_init_plan.v1' || typeof plan.root !== 'string') throw new Error('Invalid Simple initialization plan.');
-  const fresh = await planSimpleInit(plan.root);
+  const fresh = await planSimpleInit(plan.root, plan.settings);
   if (JSON.stringify(fresh) !== JSON.stringify(plan)) throw new Error('Stale or modified Simple initialization plan; prepare and inspect a new plan.');
   if (fresh.outcome === 'already-initialized') return 'already-initialized';
   const reservation = path.join(plan.root, RESERVATION);

@@ -8,6 +8,8 @@ import { planSimpleInit, applySimpleInit, writeSimpleInitPlan } from '../simple-
 import { resolveController } from '../controller-resolver.js';
 import { configureInitCommand } from '../../cli/commands/init.js';
 import { SIMPLE_FILES } from '../../templates/simple-workspace.js';
+import { promptInputOnce, promptMultiline } from '../../cli/utils/multiline.js';
+vi.mock('../../cli/utils/multiline.js', () => ({ promptInputOnce: vi.fn(), promptMultiline: vi.fn() }));
 
 let root: string;
 let originalEnv: NodeJS.ProcessEnv;
@@ -25,6 +27,49 @@ beforeEach(async () => {
 afterEach(async () => { vi.restoreAllMocks(); process.env = originalEnv; await fs.rm(root, { recursive: true, force: true }); });
 
 describe('fresh Simple initialization', () => {
+  it.each([undefined, 'simple'])('initializes guided Simple with final choice or explicit mode %s', async (mode) => {
+    const before = snap();
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.mocked(promptMultiline).mockResolvedValue('Explore the notebook');
+    vi.mocked(promptInputOnce).mockImplementation(async (label) => {
+      if (label === 'Subagent choice') return '5';
+      if (label === 'Git setup') return 'n';
+      if (label.startsWith('Workspace mode')) {
+        await expect(fs.stat(path.join(root, '.juno_task'))).rejects.toThrow();
+        return '';
+      }
+      throw new Error(`Unexpected prompt: ${label}`);
+    });
+    const program = new Command(); configureInitCommand(program);
+    await program.parseAsync(['init', '--interactive', '--directory', root, ...(mode ? ['--mode', mode] : [])], { from: 'user' });
+    if (!mode) expect(promptInputOnce).toHaveBeenLastCalledWith(expect.stringContaining('Workspace mode'), '1');
+    else expect(vi.mocked(promptInputOnce).mock.calls.some(([label]) => label.startsWith('Workspace mode'))).toBe(false);
+    const config = JSON.parse(await fs.readFile(path.join(root, '.juno_task/config.json'), 'utf8'));
+    expect(config).toMatchObject({ controllerWorkspace: { mode: 'simple' }, defaultSubagent: 'pi' });
+    expect(await fs.readFile(path.join(root, '.juno_task/simple-agent-guidance.md'), 'utf8')).toContain('Explore the notebook');
+    expect(snap()).toEqual(before);
+    expect(await fs.readFile(path.join(root, 'notebook.ipynb'), 'utf8')).toBe('dirty notebook');
+  });
+
+  it.each([
+    ['--mode', 'unknown'], ['--mode', 'advanced', '--plan-file', '/tmp/unused-plan'],
+    ['--mode', 'simple', '--force'], ['--mode', 'simple', '--plan-file', '/tmp/p', '--apply-plan', '/tmp/p'],
+  ])('refuses contradictory options before writes: %j', async (...args) => {
+    const before = snap(); const program = new Command(); configureInitCommand(program);
+    await expect(program.parseAsync(['init', '--directory', root, ...args], { from: 'user' })).rejects.toThrow();
+    expect(snap()).toEqual(before);
+    await expect(fs.stat(path.join(root, '.juno_task'))).rejects.toThrow();
+  });
+
+  it('revalidates customized plan output and preserves repeat initialization', async () => {
+    const settings = { task: 'Read notebooks', subagent: 'pi' };
+    const plan = await planSimpleInit(root, settings);
+    const bad = structuredClone(plan); bad.settings!.subagent = 'codex';
+    await expect(applySimpleInit(bad)).rejects.toThrow(/Stale or modified/);
+    await applySimpleInit(plan);
+    expect(await applySimpleInit(await planSimpleInit(root, settings))).toBe('already-initialized');
+  });
+
   it('previews without writes and applies only named local assets, preserving Git and user bytes', async () => {
     await fs.writeFile(path.join(root, 'AGENTS.md'), 'Use project tests.');
     await fs.writeFile(path.join(root, 'CLAUDE.md'), 'Read the notebooks.');
