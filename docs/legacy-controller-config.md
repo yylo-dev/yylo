@@ -46,11 +46,11 @@ excluded from the new controller config; their original values remain in the
 frozen parent, not activated as controller hooks. This narrow repair does not
 install product settings in a task checkout. Review a separate product-overlay
 migration if those settings are still required. Unknown or secret-owned fields
-refuse the narrow repair: inspect `yy migrate help inventory` and use the
+refuse the narrow repair: inspect the CLI's migration inventory help and use the
 reviewed full migration rather than deleting fields or copying raw config.
 
-Runtime mismatch is a separate failure. Inspect `yy scripts doctor` and
-`yy migrate help runtime-rebind`; runtime installation/rebinding requires its
+Runtime mismatch is a separate failure. Inspect `yy scripts doctor` and the
+CLI's runtime-rebind migration help; runtime installation/rebinding requires its
 own owner authority. Config repair never performs an upgrade or weakens receipt
 binding. An older binding that cannot execute this migration must be resolved by
 that supported maintenance path first.
