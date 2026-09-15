@@ -429,12 +429,9 @@ describe('Init Command', () => {
 
     describe('interactive initialization', () => {
       it('should run interactive mode', async () => {
-        // Re-establish mocks cleared by mockReset: true
         const multiline = await import('../utils/multiline.js');
-        vi.mocked(multiline.promptMultiline).mockResolvedValue(
-          'Build a test project with full features',
-        );
-        vi.mocked(multiline.promptInputOnce).mockResolvedValue('/current/dir');
+        vi.mocked(multiline.promptMultiline).mockResolvedValue('Build a test project with full features');
+        vi.mocked(multiline.promptInputOnce).mockImplementation(async (label) => label.startsWith('Workspace mode') ? '2' : '/current/dir');
 
         const options: InitCommandOptions = {
           directory: undefined,
@@ -457,12 +454,9 @@ describe('Init Command', () => {
       });
 
       it('should display interactive prompts', async () => {
-        // Re-establish mocks cleared by mockReset: true
         const multiline = await import('../utils/multiline.js');
-        vi.mocked(multiline.promptMultiline).mockResolvedValue(
-          'Build a test project with full features',
-        );
-        vi.mocked(multiline.promptInputOnce).mockResolvedValue('/current/dir');
+        vi.mocked(multiline.promptMultiline).mockResolvedValue('Build a test project with full features');
+        vi.mocked(multiline.promptInputOnce).mockImplementation(async (label) => label.startsWith('Workspace mode') ? 'advanced' : '/current/dir');
 
         const options: InitCommandOptions = {
           directory: undefined,
@@ -476,6 +470,7 @@ describe('Init Command', () => {
 
         await runInit([], options, mockCommand);
 
+        expect(multiline.promptInputOnce).toHaveBeenLastCalledWith(expect.stringContaining('Workspace mode'), '1');
         // Verify interactive mode ran and completed
         expect(consoleSpy).toHaveBeenCalledWith(
           expect.stringContaining('YYLO Project Initialization'),

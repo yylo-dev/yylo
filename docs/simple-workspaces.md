@@ -1,10 +1,39 @@
-# Simple workspaces
+# Simple and Advanced workspaces
 
-Simple mode is opt-in: one Git checkout holds code, notebooks, notes, agent
-configuration, and Ledger. Existing managed metadata-only installations retain
-their controller, task-worktree, and protected integration boundaries.
+Choose a mode for a **new project**. Existing installations are never converted
+by initialization or by a CLI upgrade.
 
-## Initialize explicitly
+| | Simple (recommended for getting started) | Advanced |
+| --- | --- | --- |
+| Files | Code, notebooks, notes and Ledger in one Git checkout | Separate metadata controller and product worktrees |
+| Tasks | Local Ledger bookkeeping | Managed task start/finish and merge delivery |
+| Parallel agents | Shared files and Git index; coordinate edits | Isolated task worktrees |
+| Git | Explicit owner-authorized ordinary Git | Managed protected-target delivery |
+
+## Interactive initialization
+
+In the intended new project folder, run `git init` explicitly, then `yy init`.
+The **last question** asks for Simple or Advanced, after directory, project goal,
+agent, Git setup and existing-file confirmation. Simple is the recommended choice;
+Advanced is the existing managed setup. Mode-specific files are created only after
+selection. Simple requires an ordinary Git checkout and refuses existing managed
+configuration; selecting Simple is not a way to override it.
+
+The project goal is saved in Simple supplemental guidance and the chosen agent in
+`defaultSubagent`. Simple does not clone a repository or configure a remote: leave
+the Advanced-only Git URL blank. Root instructions are preserved. Dependencies
+and credentials must already be installed/configured separately.
+
+```sh
+git init
+yy init
+# Skip only the mode question, retaining guided setup:
+yy init --interactive --mode simple
+# Existing inline automation stays Advanced; make it explicit if desired:
+yy init "Build an API" --mode advanced
+```
+
+## Simple automation: preview and apply
 
 Use an ordinary Git repository, not a managed controller or linked worktree.
 For a new folder, run `git init` yourself first; no-Git operation is not supported.
@@ -81,8 +110,8 @@ ordinary Git commands remain available when authorized.
 
 ## Conversion is deferred
 
-Neither split-to-Simple nor Simple-to-managed conversion is implemented by this
-MVP. Do not modify a live controller's mode field. A future separately authorized
+Neither Advanced-to-Simple nor Simple-to-Advanced conversion is currently
+implemented. Do not modify a live controller's mode field. A future separately authorized
 transition must inventory product history, Records, registrations, dirty/untracked
 files, secrets, and collisions; prepare a fresh destination from the explicitly
 selected product source; retain the old workspace and rollback identity. Stale
