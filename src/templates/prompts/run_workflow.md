@@ -5,7 +5,7 @@ Choose one public interface by intent:
 `TASK_ROOT` names the canonical controller. Control-plane routing never switches or cleans the checkout where the user invoked `yy`.
 
 - Generic ordered reporting or agent work: `workflow_runner.sh --workflow PATH`.
-- Feature implementation: `yy task start TASK_ID`; before editing or testing follow [task dependency hydration](../wiki/controller/task_dependency_hydration.md) and stop before implementation on failure; implement, test, and commit; run read-only `yy task preflight TASK_ID`; then `yy task finish TASK_ID` on that exact tip.
+- Feature implementation: `yy task start TASK_ID`; before editing or testing follow [task dependency hydration](../wiki/controller/task_dependency_hydration.md) and stop before implementation on failure; implement, test, and commit; run `yy task finish TASK_ID` directly on that exact tip. Finish independently enforces admission and validation. Optional read-only `yy task preflight TASK_ID` diagnoses admission before finish; it is not a prerequisite.
 - Delivery observation: `yy merge status [TASK_ID]` (read-only).
 - Delivery mutation: `yy merge land TASK_ID` lands Git and projects Ledger status. Use `yy merge project TASK_ID` only for projection recovery.
 

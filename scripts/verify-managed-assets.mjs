@@ -41,6 +41,15 @@ const canonicalImplementation = readFileSync(
   path.join('src', 'templates', 'skills', 'canonical', 'ralph-loop', 'references', 'implement.md'),
 );
 assertNativeDeliveryReviewBoundary(canonicalImplementation, 'canonical implementation instruction');
+for (const [label, content] of [
+  ['lifecycle prompt', lifecycleSource],
+  ['canonical implementation', canonicalImplementation],
+]) {
+  assert.match(content.toString(), /Optional read-only `yy task preflight TASK_ID`/u,
+    `${label} must keep standalone preflight optional`);
+  assert.match(content.toString(), /not a prerequisite/u);
+  assert.doesNotMatch(content.toString(), /preflighted tip|^yy task preflight TASK_ID$/mu);
+}
 for (const asset of assets) {
   const source = readFileSync(path.join('src', 'templates', asset.source));
   const built = readFileSync(path.join('dist', 'templates', asset.source));
