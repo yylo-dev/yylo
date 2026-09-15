@@ -36,6 +36,7 @@ import { logger, LogLevel } from '../utils/advanced-logger.js';
 import { ConcurrentFeedbackCollector } from '../../utils/concurrent-feedback-collector.js';
 import { hasSimpleWorkspaceHint, resolveController } from '../../utils/controller-resolver.js';
 import { checkLedgerReadiness, LedgerDelegateError } from './ledger.js';
+import { AgentStartupError, errorMessage, resolveAgentWorkspace } from '../../utils/agent-startup.js';
 import { buildChildProcessEnvironment } from '../../core/child-process-environment.js';
 import { writeTerminalProgress } from '../../utils/terminal-progress-writer.js';
 import { checkpointControllerAfterFinalization } from '../../utils/controller-checkpoint.js';
@@ -1802,7 +1803,7 @@ class MainExecutionCoordinator {
     });
 
     engine.on('execution:error', ({ error }) => {
-      this.progressDisplay.onError(error);
+      if (!(error instanceof AgentStartupError)) this.progressDisplay.onError(error);
     });
 
     try {
@@ -1872,7 +1873,7 @@ export async function mainCommandHandler(
       }
     }
 
-    // Load configuration first so we can resolve defaults from config.json
+    // Configuration ownership diagnostics precede dispatch/preflight; metadata sources are read-only.
     const config = await loadConfig({
       baseDir: requestedWorkingDirectory,
       ...(options.config !== undefined ? { configFile: options.config } : {}),
@@ -1889,6 +1890,8 @@ export async function mainCommandHandler(
       },
     });
 
+    // Validate invocation authority before session setup or any controller-owned hook.
+    resolveAgentWorkspace(requestedWorkingDirectory, undefined, 'diagnostic');
     if (config.controllerWorkspace?.mode === 'simple') {
       await checkLedgerReadiness({ cwd: config.workingDirectory });
     }
@@ -2122,6 +2125,10 @@ export async function mainCommandHandler(
 
       process.exit(1);
       return;
+    } else if (error instanceof AgentStartupError) {
+      console.error(error.message);
+      process.exitCode = 2;
+      return;
     } else if (error instanceof LedgerDelegateError) {
       console.error(error.message);
       process.exitCode = error.exitCode;
@@ -2163,7 +2170,7 @@ export async function mainCommandHandler(
     } else {
       // Unexpected error
       console.error(chalk.red.bold('\n❌ Unexpected Error'));
-      console.error(chalk.red(`   ${error}`));
+      console.error(chalk.red(`   ${errorMessage(error)}`));
 
       if (options.verbose) {
         console.error('\n📍 Stack Trace:');

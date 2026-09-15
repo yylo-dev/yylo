@@ -13,8 +13,6 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { existsSync } from 'node:fs';
-import path from 'node:path';
 import type { JunoTaskConfig, SubagentType, ProgressEventType, BackendType } from '../types/index';
 import type {
   ProgressEvent,
@@ -31,8 +29,8 @@ import { type QuotaLimitInfo, formatDuration } from './backends/shell-backend.js
 import { resolvePromptCommandSubstitutions } from './prompt-command-substitution.js';
 import { resolvePromptMacros } from './prompt-macro-resolver.js';
 import { getPromptMacroDictionary } from './config.js';
-import { hasSimpleWorkspaceHint, resolveController } from '../utils/controller-resolver.js';
-import { checkLedgerReadiness } from '../cli/commands/ledger.js';
+import { resolveController } from '../utils/controller-resolver.js';
+import { AgentStartupError, agentStartupHooks, checkAgentReadiness, errorMessage, resolveAgentWorkspace } from '../utils/agent-startup.js';
 import { buildChildProcessEnvironment } from './child-process-environment.js';
 
 // =============================================================================
@@ -117,22 +115,9 @@ export interface ExecutionRequest {
 }
 
 function resolveExecutionController(request: ExecutionRequest) {
-  if (hasSimpleWorkspaceHint(request.workingDirectory)) {
-    const resolution = resolveController(request.workingDirectory, 'product-edit');
-    const delegated = request.sessionMetadata?.['executionControllerDirectory'];
-    if (typeof delegated === 'string' && path.resolve(delegated) !== resolution.path) {
-      throw new Error('Simple agent execution controller contradicts the validated local root.');
-    }
-    return resolution;
-  }
   const delegated = request.sessionMetadata?.['executionControllerDirectory'];
-  if (typeof delegated === 'string' && delegated.trim() !== '') {
-    return resolveController(delegated, 'orchestration', {
-      ignoreEnvironmentAssertions: true,
-      trustedResolver: true,
-    });
-  }
-  return resolveController(request.workingDirectory, 'orchestration');
+  return resolveAgentWorkspace(request.workingDirectory,
+    typeof delegated === 'string' && delegated.trim() ? delegated : undefined);
 }
 
 /**
@@ -505,7 +490,7 @@ export const DEFAULT_PROGRESS_CONFIG: ProgressTrackingConfig = {
  * const result = await engine.execute(request);
  * ```
  */
-class DependencyPreflightError extends Error {
+class DependencyPreflightError extends AgentStartupError {
   constructor(command: string, exitCode: number) {
     super(`Dependency preflight failed (exit ${exitCode}): ${command.slice(0, 500)}`);
     this.name = 'DependencyPreflightError';
@@ -557,7 +542,7 @@ export class ExecutionEngine extends EventEmitter {
       this.emit('execution:complete', { request, result });
       return result;
     } catch (error) {
-      const mcpError = this.wrapError(error);
+      const mcpError = error instanceof AgentStartupError ? error : this.wrapError(error);
       this.emit('execution:error', { request, error: mcpError });
       throw mcpError;
     } finally {
@@ -736,7 +721,8 @@ export class ExecutionEngine extends EventEmitter {
    * Initialize backend for execution request.
    * Directly creates and configures a ShellBackend (no factory indirection).
    */
-  private async initializeBackend(request: ExecutionRequest): Promise<void> {
+  private async initializeBackend(request: ExecutionRequest,
+    controller = resolveExecutionController(request)): Promise<void> {
     // Clean up existing backend if present
     if (this.currentBackend) {
       await this.currentBackend.cleanup();
@@ -746,22 +732,6 @@ export class ExecutionEngine extends EventEmitter {
     // Create ShellBackend directly
     const { ShellBackend } = await import('./backends/shell-backend.js');
     const backend = new ShellBackend();
-
-    const inheritedProjectPath = process.env.JUNO_PROJECT_PATH?.trim();
-    const changedManagedWorktree = inheritedProjectPath !== undefined && inheritedProjectPath !== ''
-      && existsSync(request.workingDirectory)
-      && path.resolve(inheritedProjectPath) !== path.resolve(request.workingDirectory);
-    // A managed parent may cd from its dispatch root into a registered task
-    // worktree. In that case only, derive authority from persisted identity;
-    // same-boundary explicit assertion mismatches remain fail-closed.
-    const controller = hasSimpleWorkspaceHint(request.workingDirectory)
-      || typeof request.sessionMetadata?.['executionControllerDirectory'] === 'string'
-      ? resolveExecutionController(request)
-      : changedManagedWorktree
-      ? resolveController(request.workingDirectory, 'orchestration', {
-        ignoreEnvironmentAssertions: true, trustedResolver: true,
-      })
-      : resolveController(request.workingDirectory, 'orchestration');
 
     // Configure
     const modelShortcuts = this.engineConfig.config.modelShortcuts ?? {};
@@ -773,9 +743,9 @@ export class ExecutionEngine extends EventEmitter {
       enableJsonStreaming: true,
       outputRawJson: this.engineConfig.config.verbose >= 1,
       environment: buildChildProcessEnvironment(process.env, {
-        JUNO_TASK_ROOT: controller.path,
-        JUNO_CONTROLLER_SOURCE: controller.source,
-        JUNO_WORKSPACE_ROLE: controller.role,
+        JUNO_TASK_ROOT: controller.role === 'unregistered' ? undefined : controller.path,
+        JUNO_CONTROLLER_SOURCE: controller.role === 'unregistered' ? undefined : controller.source,
+        JUNO_WORKSPACE_ROLE: controller.role === 'unregistered' ? undefined : controller.role,
         JUNO_MODEL_SHORTCUTS: JSON.stringify(modelShortcuts),
         JUNO_SELECTED_SUBAGENT: request.subagent,
         HEADLESS_UI_TURN_COST_DISPLAY_THRESHOLD_USD:
@@ -957,23 +927,22 @@ export class ExecutionEngine extends EventEmitter {
     // Resolve once at the orchestration boundary. Explicit or registered
     // controller settings are authoritative and invalid settings fail closed.
     const authority = resolveExecutionController(context.request);
+    context.controller = authority;
     if (authority.role === 'simple') {
       if (this.engineConfig.config.controllerWorkspace?.mode !== 'simple'
           || resolveController(this.engineConfig.config.workingDirectory, 'product-edit').path !== authority.path) {
         throw new Error('Simple execution requires root-validated Simple configuration.');
       }
-      await checkLedgerReadiness({ cwd: context.request.workingDirectory });
     }
+    await checkAgentReadiness(authority);
+    context.hooks = agentStartupHooks(this.engineConfig.config.hooks, authority.role === 'unregistered');
 
-    // Initialize backend for this execution request
-    await this.initializeBackend(context.request);
-
-    // Execute START_RUN hook
+    // Execute START_RUN after authority/readiness, before backend initialization.
     try {
-      if (this.engineConfig.config.hooks && !this.engineConfig.config.skipHooks) {
+      if (context.hooks && !this.engineConfig.config.skipHooks) {
         const hookResult = await executeHook(
           'START_RUN',
-          this.engineConfig.config.hooks,
+          context.hooks,
           {
             workingDirectory: context.request.workingDirectory,
             sessionId: context.sessionContext.sessionId,
@@ -1003,12 +972,12 @@ export class ExecutionEngine extends EventEmitter {
         }
       }
     } catch (error) {
+      // Readiness failures have one CLI boundary. Do not print an extra warning.
+      if (error instanceof AgentStartupError) throw error;
       engineLogger.warn('Hook START_RUN failed', { error });
-      // Dependency/version repair is an agent-dispatch prerequisite. Other
-      // owner-defined hook failures retain the historical best-effort behavior.
-      if (error instanceof DependencyPreflightError) throw error;
     }
 
+    await this.initializeBackend(context.request, authority);
     try {
       await this.runIterationLoop(context);
 
@@ -1031,10 +1000,10 @@ export class ExecutionEngine extends EventEmitter {
 
     // Execute END_RUN hook
     try {
-      if (this.engineConfig.config.hooks && !this.engineConfig.config.skipHooks) {
+      if (context.hooks && !this.engineConfig.config.skipHooks) {
         const hookResult = await executeHook(
           'END_RUN',
-          this.engineConfig.config.hooks,
+          context.hooks,
           {
             workingDirectory: context.request.workingDirectory,
             sessionId: context.sessionContext.sessionId,
@@ -1120,10 +1089,10 @@ export class ExecutionEngine extends EventEmitter {
 
     // Execute START_ITERATION hook
     try {
-      if (this.engineConfig.config.hooks && !this.engineConfig.config.skipHooks) {
+      if (context.hooks && !this.engineConfig.config.skipHooks) {
         const hookResult = await executeHook(
           'START_ITERATION',
-          this.engineConfig.config.hooks,
+          context.hooks,
           {
             workingDirectory: context.request.workingDirectory,
             sessionId: context.sessionContext.sessionId,
@@ -1184,7 +1153,7 @@ export class ExecutionEngine extends EventEmitter {
         resolvePromptCommandSubstitutions(input, {
           workingDirectory: context.request.workingDirectory,
           environment: buildChildProcessEnvironment(process.env, {
-            JUNO_TASK_ROOT: resolveExecutionController(context.request).path,
+            JUNO_TASK_ROOT: context.controller?.role === 'unregistered' ? undefined : context.controller?.path,
           }),
         });
 
@@ -1279,10 +1248,10 @@ export class ExecutionEngine extends EventEmitter {
 
       // Execute END_ITERATION hook for successful iteration
       try {
-        if (this.engineConfig.config.hooks && !this.engineConfig.config.skipHooks) {
+        if (context.hooks && !this.engineConfig.config.skipHooks) {
           const hookResult = await executeHook(
             'END_ITERATION',
-            this.engineConfig.config.hooks,
+            context.hooks,
             {
               workingDirectory: context.request.workingDirectory,
               sessionId: context.sessionContext.sessionId,
@@ -1349,10 +1318,10 @@ export class ExecutionEngine extends EventEmitter {
 
       // Execute END_ITERATION hook for failed iteration
       try {
-        if (this.engineConfig.config.hooks && !this.engineConfig.config.skipHooks) {
+        if (context.hooks && !this.engineConfig.config.skipHooks) {
           const hookResult = await executeHook(
             'END_ITERATION',
-            this.engineConfig.config.hooks,
+            context.hooks,
             {
               workingDirectory: context.request.workingDirectory,
               sessionId: context.sessionContext.sessionId,
@@ -1767,7 +1736,7 @@ export class ExecutionEngine extends EventEmitter {
     }
 
     // Classify common transport/socket failures as connection errors so the loop can continue
-    const msg = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    const msg = error instanceof Error ? `${error.name}: ${error.message}` : errorMessage(error);
     const lower = msg.toLowerCase();
     const isConnectionLike = [
       'epipe',
@@ -1957,6 +1926,8 @@ export class ExecutionEngine extends EventEmitter {
  * Internal execution context
  */
 interface ExecutionContext {
+  controller?: ReturnType<typeof resolveExecutionController>;
+  hooks?: JunoTaskConfig['hooks'];
   request: ExecutionRequest;
   status: ExecutionStatus;
   startTime: Date;
