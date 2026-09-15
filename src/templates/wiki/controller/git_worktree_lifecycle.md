@@ -128,6 +128,46 @@ repair ownership. Existing terminal-run, hydration, dirty-worktree, identity,
 and budget restrictions still apply; neither command resets budgets or repairs
 unrelated blockers. Do not run standalone successor first for managed execution.
 
+## Managed worker controller checks
+
+Worker acceptance binds relevant inputs, not controller immobility:
+
+```text
+launch -> controller root/branch/registration + task state/requirements
+       -> configuration/policy/runtime/instruction identity -> worker
+       -> capture actual producer outcome
+       -> compare relevant identities
+            +-- unrelated task metadata / checkpoint -> continue
+            +-- relevant change / unknown evidence -> refuse this worker
+       -> unchanged candidate/path/clean-output checks -> consume result
+```
+
+Unlike the former HEAD/index/status and whole-state equality check, an unrelated
+canonical task row, Ledger event, scope record or checkpoint does not invalidate
+worker acceptance. Staging or committing already admitted metadata is harmless
+when the task's inputs remain unchanged. Task-state acquisition is bounded;
+other tasks' bodies and Ledger content are not read for this comparison.
+
+The guard still binds the selected lifecycle record (including ownership), task
+requirements and optional scope, controller root/branch/common repository and
+registration, tracked non-task inputs, and installed configuration, scripts,
+prompts, skills and instructions even when ignored by Git. Unknown non-metadata
+dirt refuses; dirty or committed relevant changes do not become safe merely
+because a checkpoint occurred. Missing/malformed task evidence refuses. Reviewer
+controller checks remain strict in this iteration.
+
+Receipts separate `producer_terminal_result` from `controller_guard` and overall
+runner success/failure. A producer declaring `incomplete` is never promoted to
+completed by a passing guard. A failed guard retains the captured producer result
+when available and reports bounded changed identity keys and digests, not secret
+file contents. This post-execution check is not a sandbox and does not identify
+which process wrote a changed file.
+
+There is no new command, retry loop, global lock or manual approval for harmless
+checkpoint movement. Existing terminal-run restrictions, budgets, leases,
+validation and native target-update checks are unchanged. Source delivery does
+not activate an installed runtime or replay any historical failed attempt.
+
 ## Runtime and controller recovery
 
 Controller runtime bytes are package-bound. For an ordinary consumer with an
