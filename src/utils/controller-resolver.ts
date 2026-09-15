@@ -4,10 +4,12 @@ import { existsSync as requireExists, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { buildChildProcessEnvironment } from '../core/child-process-environment.js';
 
-const PACKAGED_CONTROLLER_RESOLVER = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '../templates/scripts/controller_resolver.py',
-);
+const resolverDirectory = path.dirname(fileURLToPath(import.meta.url));
+const PACKAGED_CONTROLLER_RESOLVER = [
+  path.resolve(resolverDirectory, '../templates/scripts/controller_resolver.py'), // source utils or bundled CLI
+  path.resolve(resolverDirectory, 'templates/scripts/controller_resolver.py'), // bundled library
+].find((candidate) => requireExists(candidate))
+  ?? path.resolve(resolverDirectory, '../templates/scripts/controller_resolver.py');
 
 export type ControllerOperation = 'diagnostic' | 'kanban' | 'orchestration' | 'session-write' | 'product-edit';
 export type WorkspaceRole = 'controller' | 'controller-retired' | 'task' | 'integration-owner' | 'unregistered' | 'simple';
