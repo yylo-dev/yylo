@@ -14,10 +14,11 @@ Independent agents and reviewers use fresh `yy pi` contexts. Bare `pi` and indir
    contract. Stop before implementation on provisioning or clean-tree failure.
 3. Implement, run focused tests, and commit only inside the returned worktree.
    Starting feature Y never waits for feature X; each has its own worktree.
-4. Run the read-only `yy task preflight TASK_ID` after the worktree is clean
-   and committed. Repair any closure defect while the task remains `WORKING`.
-5. Run `yy task finish TASK_ID` against that exact preflighted tip. This
-   validates affected paths/tests and queues the immutable feature tip.
+4. After the worktree is clean and committed, run `yy task finish TASK_ID`.
+   This independently enforces admission, validates affected paths/tests, and
+   queues the immutable feature tip. Repair closure defects while still `WORKING`.
+5. Optional read-only `yy task preflight TASK_ID` diagnoses admission before
+   finish; it is not a prerequisite and does not replace finish enforcement.
 6. Observe with `yy merge status TASK_ID`. One authorized target owner runs
    `yy merge land TASK_ID`, which updates Ledger automatically; run `yy merge project TASK_ID` only for projection recovery.
    Recompose after target movement and preserve private conflict bytes; one

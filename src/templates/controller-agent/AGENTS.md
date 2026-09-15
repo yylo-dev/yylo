@@ -18,9 +18,10 @@ product code.
    Task start runs the frozen project hydration workflow before reporting the
    worktree agent-ready. Before editing, inspect `$(yy wiki --path)/controller/task_dependency_hydration.md`
    and stop before implementation if hydration is missing, stale, or failed.
-5. After a clean task commit, run the read-only `yy task preflight TASK_ID`,
-   repair any reported closure defect while the task is still `WORKING`, then
-   finish with `yy task finish TASK_ID`.
+5. After a clean task commit, run `yy task finish TASK_ID` directly. Finish
+   independently enforces admission and validation; repair closure defects while
+   still `WORKING`. Optional read-only `yy task preflight TASK_ID` diagnoses
+   admission before finish; it is not a prerequisite.
 6. Tests and semantic reviews are explicit project checks outside merge. The
    native delivery adapter launches no models, chooses no reviewers, schedules
    no suites, and owns no repair or evidence-cache loop.

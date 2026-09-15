@@ -1,5 +1,11 @@
 # YYLO release notes
 
+## Unreleased
+
+- Standalone `yy task preflight` is optional in managed agent guidance and the
+  lifecycle prompt (v1 revision 9). The ordinary path is clean commit then
+  `yy task finish`; finish retains all admission and validation enforcement.
+
 ## 0.2.3-rc.3
 
 Companion package: `@yylo/benchmark@0.1.1-rc.2`.

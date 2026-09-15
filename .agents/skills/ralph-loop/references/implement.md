@@ -39,11 +39,12 @@ task's workspace.
 1. Run focused tests, required dangerous-path checks, parity checks, and
    `git diff --check`.
 2. Stage only task-owned paths, commit coherently, and leave the worktree clean.
-3. Run `yy task preflight TASK_ID` before expensive final validation. Repair any
-   admission, generated-output, runtime, or closure refusal while the task is
-   still `WORKING`.
-4. Run `yy task finish TASK_ID`; it validates the exact preflighted tip and
-   records `QUEUED` with its immutable review-ready closure.
+3. Run `yy task finish TASK_ID` directly after the clean commit; it independently
+   enforces admission and validation of the exact committed tip and records
+   `QUEUED` with its immutable review-ready closure. Repair any admission,
+   generated-output, runtime, or closure refusal while still `WORKING`.
+4. Optional read-only `yy task preflight TASK_ID` can diagnose admission before
+   finish; it is not a prerequisite or a replacement for finish enforcement.
 5. Record the commit and bounded response in Kanban. A lifecycle finalizer may
    attempt a controller checkpoint after terminal metadata is durable; checkpoint
    failure remains a warning and must not change the task or merge outcome.

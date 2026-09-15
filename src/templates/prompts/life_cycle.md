@@ -1,7 +1,7 @@
 ---
 juno_prompt_schema: juno.life_cycle.v1
 public_macro: "@@life_cycle"
-revision: 8
+revision: 9
 ---
 
 # Observable Juno task lifecycle
@@ -44,8 +44,10 @@ Use the installed Juno control plane; do not create another workflow engine.
    evidence-cache loop. Git ancestry is integration evidence, not proof of tests,
    review, or fulfilled requirements.
 7. **Use managed lifecycle boundaries.** After a clean committed implementation,
-   run read-only `yy task preflight TASK_ID`, repair closure defects while
-   `WORKING`, then run separately authorized `yy task finish TASK_ID`. Observe
+   run separately authorized `yy task finish TASK_ID` directly. Finish independently
+   enforces admission and validation; repair closure defects while `WORKING`.
+   Optional read-only `yy task preflight TASK_ID` diagnoses admission before finish
+   but is not a prerequisite. Observe
    with `yy merge status TASK_ID`; one target owner uses `yy merge land TASK_ID`
    for native-Git expected-old delivery and automatic Ledger projection. Use
    `yy merge project TASK_ID` only to retry or repair projection after Git integrated. Recompose and renew candidate checks after target
@@ -64,7 +66,7 @@ Use the installed Juno control plane; do not create another workflow engine.
 
 ## Evolution
 
-This is schema `juno.life_cycle.v1`, revision 8. Change the canonical source in
+This is schema `juno.life_cycle.v1`, revision 9. Change the canonical source in
 `juno-code/src/templates/prompts/life_cycle.md`, update this revision and release
 notes when behavior changes, and validate source/dist/tarball plus managed-install
 parity. Project customizations are user-owned: managed update must preserve or
