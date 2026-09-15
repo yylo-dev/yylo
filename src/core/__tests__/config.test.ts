@@ -363,6 +363,25 @@ describe('Configuration Module', () => {
       },
     );
 
+    it.each([false, true])('keeps migrated controller cwd invocation-owned (explicit=%s)', async (explicit) => {
+      const configPath = path.join(tempDir, '.juno_task/config.json');
+      await fs.ensureDir(path.dirname(configPath));
+      const value = {
+        controllerWorkspace: { mode: 'metadata-only', policy: '.juno_task/config/metadata-controller.json' },
+        agentProfile: { version: 1, promptAssetRoot: '.juno_task/prompts' },
+        defaultMaxIterations: 9,
+      };
+      await fs.writeJson(configPath, value);
+      const before = await fs.readFile(configPath);
+      const config = await loadConfig({ baseDir: tempDir, ...(explicit ? { configFile: configPath } : {}),
+        cliConfig: { workingDirectory: '/legacy/foreign', sessionDirectory: '/legacy/session' } });
+      expect(config.workingDirectory).toBe(tempDir);
+      expect(config.sessionDirectory).toBe(path.join(tempDir, '.juno_task'));
+      expect(config.defaultMaxIterations).toBe(9);
+      expect(config.hooks).toBeUndefined();
+      expect(await fs.readFile(configPath)).toEqual(before);
+    });
+
     it('should accept an enabled cross-project Kanban alias allowlist', () => {
       const config = validateConfig({
         ...DEFAULT_CONFIG,

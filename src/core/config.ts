@@ -266,7 +266,7 @@ function validateMetadataControllerSource(config: Partial<JunoTaskConfig>, sourc
     throw new Error(
       `Metadata-controller configuration ${JSON.stringify(path.resolve(sourcePath))}: ${rejected.join('; ')}. `
       + 'Product execution settings cannot be activated in a metadata-only controller; cwd comes from validated invocation context. '
-      + 'No configuration was rewritten. Inspect this file and run `yy migrate inventory --help` for the supported read-only inventory step before a reviewed migration. '
+      + 'No configuration was rewritten. Inspect this file and run `yy migrate controller-config plan --help` for a reviewed, clean, hash-bound ownership migration; use `yy migrate inventory --help` for unknown/secret fields. '
       + 'Do not delete fields blindly or upgrade the runtime to bypass this ownership check. '
       + 'Runtime receipt compatibility is a separate gate; inspect it with `yy scripts doctor --help`.',
     );
@@ -1283,12 +1283,13 @@ async function loadAmbientControllerEnvironment(controllerDir: string): Promise<
   }
 }
 
-async function readMetadataAgentProfile(baseDir: string): Promise<
+async function readMetadataAgentProfile(baseDir: string, explicitFile?: string): Promise<
   { metadata: true; profile: JunoTaskConfig['agentProfile'] } | undefined
 > {
-  const configPath = path.join(baseDir, PROJECT_CONFIG_FILE);
+  const configPath = explicitFile ? path.resolve(baseDir, explicitFile) : path.join(baseDir, PROJECT_CONFIG_FILE);
   if (!(await fs.pathExists(configPath))) return undefined;
-  const raw = await fs.readJson(configPath) as Record<string, unknown>;
+  const raw = (explicitFile ? await loadConfigFromFile(configPath, baseDir)
+    : await fs.readJson(configPath)) as Record<string, unknown>;
   const workspace = raw.controllerWorkspace as Record<string, unknown> | undefined;
   if (workspace?.mode !== 'metadata-only') return undefined;
   validateMetadataControllerSource(raw as Partial<JunoTaskConfig>, configPath);
@@ -1660,7 +1661,7 @@ export async function loadConfig(
   if (simple && configFile && path.resolve(invocationDir, configFile) !== path.join(profileDir, '.juno_task/config.json')) {
     throw new Error('Simple workspace uses its root .juno_task/config.json; alternate config authority is unsupported.');
   }
-  const metadataSource = configFile ? undefined : await readMetadataAgentProfile(profileDir);
+  const metadataSource = await readMetadataAgentProfile(configFile ? invocationDir : profileDir, configFile);
   const metadataAgentProfile = metadataSource?.profile;
 
   const allowProjectWrites = process.env.YYLO_PROJECT_BOOTSTRAP_WRITES !== '0'
@@ -1697,7 +1698,7 @@ export async function loadConfig(
     }
     // A canonical controller profile supplies preferences, never the invoking
     // task/integration workspace identity.
-    if (!simple && profileDir !== invocationDir) {
+    if (!simple && (metadataSource || profileDir !== invocationDir)) {
       merged.workingDirectory = invocationDir;
       merged.sessionDirectory = path.join(invocationDir, '.juno_task');
     }
