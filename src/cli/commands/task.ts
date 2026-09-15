@@ -296,9 +296,16 @@ export function configureTaskWorkspaceCommand(
       'finish', taskId, [], options.leaseToken ? ['--lease-token', options.leaseToken] : [],
     ));
   task.command('doctor')
-    .description('Read-only reconciliation of Kanban board truth versus task lifecycle records')
-    .argument('[task-id]', 'Optional YYLO Ledger task ID filter')
-    .action((taskId?: string) => invoke('doctor', taskId ?? '', []));
+    .description('Read-only batched Ledger reconciliation; partial/non-atomic coverage is explicit')
+    .argument('[task-id]', 'Optional exact task ID, including cold-archived tasks')
+    .option('--limit <count>', 'Maximum lifecycle rows (1-1000; default 1000)')
+    .option('--offset <count>', 'Skip sorted lifecycle rows (default 0; not a snapshot cursor)')
+    .action((taskId: string | undefined, options: { limit?: string; offset?: string }) => invoke(
+      'doctor', taskId ?? '', [], [
+        ...(options.limit !== undefined ? ['--limit', options.limit] : []),
+        ...(options.offset !== undefined ? ['--offset', options.offset] : []),
+      ],
+    ));
   task.command('sync')
     .description('Recover one pending lifecycle Kanban projection (exact recovery command)')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')

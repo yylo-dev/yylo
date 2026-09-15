@@ -1374,6 +1374,128 @@ class TaskWorkspaceFixture(unittest.TestCase):
         return declaration
 
 
+class DoctorBatchReadTests(unittest.TestCase):
+    def rows(self, count):
+        return [{"id": f"T{i:05d}", "status": "in_progress", "fields": {
+            "lifecycle_projection": task_runtime.KANBAN_LIFECYCLE_PROJECTION,
+            "lifecycle_state": "WORKING"}} for i in range(count)]
+
+    def page(self, rows, cursor=None):
+        return json.dumps(rows) + "\n" + json.dumps({"summary": {"next_cursor": cursor}})
+
+    def test_process_counts_and_wall_time_are_separate_for_1_100_1000_rows(self):
+        import time
+        for count in (1, 100, 1000):
+            rows = self.rows(count)
+            def read(controller, argv):
+                start = int(argv[-1]) if "--cursor" in argv else 0
+                end = start + task_runtime.DOCTOR_PAGE_SIZE
+                self.assertIn("id,status,fields", argv)
+                return self.page(rows[start:end], str(end) if end < count else None)
+            before = time.monotonic()
+            with mock.patch.object(task_runtime, "_doctor_read", side_effect=read) as invoked:
+                board, coverage = task_runtime._doctor_board_rows(Path("/unused"), [r["id"] for r in rows])
+            elapsed = time.monotonic() - before
+            self.assertEqual(len(board), count)
+            self.assertTrue(coverage["complete"])
+            self.assertEqual(invoked.call_count, (count + 99) // 100)
+            print(f"doctor benchmark rows={count} child_invocations={invoked.call_count} "
+                  f"stub_wall_seconds={elapsed:.6f}")
+
+    def test_hot_cold_and_absent_are_distinct_without_cold_enumeration(self):
+        rows = self.rows(2)
+        rows[1]["status"] = "archive"
+        with mock.patch.object(task_runtime, "_doctor_read", side_effect=[
+                self.page(rows[:1]), json.dumps(rows[1:])]) as read:
+            board, coverage = task_runtime._doctor_board_rows(Path("/unused"), [r["id"] for r in rows])
+        self.assertTrue(coverage["complete"])
+        self.assertEqual(board[rows[1]["id"]]["status"], "archive")
+        self.assertEqual(read.call_args_list[1].args[1], ["-f", "json", "get", rows[1]["id"], "--compact"])
+        with mock.patch.object(task_runtime, "_doctor_read", return_value="[]"):
+            board, coverage = task_runtime._doctor_board_rows(Path("/unused"), ["ABSENT"], exact=True)
+        self.assertEqual(coverage["reason"], "kanban_task_absent")
+        self.assertFalse(coverage["complete"])
+
+    def test_exact_id_uses_one_bounded_get_and_strips_body(self):
+        row = self.rows(1)[0]
+        row.update(body="DO_NOT_EXPOSE", agent_response="PRIVATE")
+        with mock.patch.object(task_runtime, "_doctor_read", return_value=json.dumps(row)) as read:
+            board, coverage = task_runtime._doctor_board_rows(Path("/unused"), [row["id"]], exact=True)
+        self.assertEqual(read.call_count, 1)
+        self.assertNotIn("DO_NOT_EXPOSE", json.dumps(board))
+        self.assertNotIn("PRIVATE", json.dumps(board))
+        self.assertTrue(coverage["complete"])
+
+    def test_duplicate_malformed_unexpected_and_failed_reads_are_not_agreement(self):
+        row = self.rows(1)[0]
+        for payload in ("not json", self.page([row, row]), self.page([{"id": "T00000"}]),
+                        self.page([row]) + "\n{}", json.dumps([row])):
+            with mock.patch.object(task_runtime, "_doctor_read", return_value=payload):
+                _, coverage = task_runtime._doctor_board_rows(Path("/unused"), [row["id"]])
+            self.assertFalse(coverage["complete"])
+            self.assertEqual(coverage["reason"], "kanban_read_failed")
+        with mock.patch.object(task_runtime, "_doctor_read", side_effect=OSError("unavailable")):
+            _, coverage = task_runtime._doctor_board_rows(Path("/unused"), [row["id"]], exact=True)
+        self.assertEqual(coverage["reason"], "kanban_read_failed")
+
+    def test_cursor_conflict_is_incomplete_and_never_retried_by_offset(self):
+        rows = self.rows(2)
+        with mock.patch.object(task_runtime, "_doctor_read", side_effect=[
+                self.page(rows[:1], "bound-cursor"), task_runtime.KanbanSyncError("cursor stale", {})]) as read:
+            board, coverage = task_runtime._doctor_board_rows(Path("/unused"), [r["id"] for r in rows])
+        self.assertEqual(read.call_count, 2)
+        self.assertEqual(read.call_args.args[1][-2:], ["--cursor", "bound-cursor"])
+        self.assertEqual(len(board), 1)
+        self.assertFalse(coverage["complete"])
+        self.assertEqual(coverage["consistency"], "non_atomic_observation")
+
+    def test_batched_and_exact_doctor_classifications_match(self):
+        rows = self.rows(5)
+        rows[0]["status"] = "todo"
+        rows[1]["status"] = "done"
+        rows[2]["fields"] = {}
+        rows[3]["fields"]["lifecycle_state"] = "QUEUED"
+        state = {"tasks": {r["id"]: {"state": "WORKING"} for r in rows}}
+        with mock.patch.object(task_runtime, "read_state", return_value=state), \
+                mock.patch.object(task_runtime, "_doctor_read", return_value=self.page(rows)):
+            batch = task_runtime.kanban_sync_doctor(Path("/unused"))
+        for row, expected in zip(rows, batch["rows"]):
+            with mock.patch.object(task_runtime, "read_state", return_value=state), \
+                    mock.patch.object(task_runtime, "_doctor_read", return_value=json.dumps(row)):
+                exact = task_runtime.kanban_sync_doctor(Path("/unused"), row["id"])
+            self.assertEqual(exact["rows"], [expected])
+
+    def test_selection_limit_and_state_race_report_incomplete_coverage(self):
+        rows = self.rows(3)
+        state = {"tasks": {r["id"]: {"state": "WORKING"} for r in rows}}
+        with mock.patch.object(task_runtime, "read_state", return_value=state), \
+                mock.patch.object(task_runtime, "_doctor_read", return_value=self.page(rows)):
+            report = task_runtime.kanban_sync_doctor(Path("/unused"), limit=1, offset=1)
+        self.assertEqual(report["outcome"], "incomplete")
+        self.assertEqual(report["coverage"]["next_offset"], 2)
+        self.assertEqual(len(report["rows"]), 1)
+        with mock.patch.object(task_runtime, "read_state", side_effect=[state, {"tasks": {}}]), \
+                mock.patch.object(task_runtime, "_doctor_read", return_value=self.page(rows)):
+            report = task_runtime.kanban_sync_doctor(Path("/unused"))
+        self.assertEqual(report["coverage"]["reason"], "lifecycle_snapshot_changed")
+        self.assertEqual(report["outcome"], "incomplete")
+
+    def test_bounded_child_rejects_oversized_and_nonzero_responses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "ledger"
+            script.write_text("#!/bin/sh\nprintf '1234567890'\n")
+            script.chmod(0o700)
+            with mock.patch.object(task_runtime, "_kanban_wrapper", return_value=script), \
+                    mock.patch.object(task_runtime, "DOCTOR_READ_BYTES", 5):
+                with self.assertRaisesRegex(task_runtime.KanbanSyncError, "byte limit"):
+                    task_runtime._doctor_read(Path(directory), [])
+            script.write_text("#!/bin/sh\necho PRIVATE >&2\nexit 1\n")
+            with mock.patch.object(task_runtime, "_kanban_wrapper", return_value=script):
+                with self.assertRaises(task_runtime.KanbanSyncError) as failure:
+                    task_runtime._doctor_read(Path(directory), [])
+            self.assertNotIn("PRIVATE", str(failure.exception))
+
+
 class TaskWorkspaceTests(TaskWorkspaceFixture):
     """Real-Git scenario suite for the canonical task-workspace lifecycle."""
 
