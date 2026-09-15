@@ -40,6 +40,11 @@ describe('fresh Simple initialization', () => {
     expect(await fs.readFile(path.join(root, '.gitignore'), 'utf8')).toBe('*.csv\n');
     expect((await fs.readdir(path.join(root, '.juno_task'))).sort()).toEqual(['.gitignore', 'config.json', 'simple-agent-guidance.md', 'simple-init.json']);
     for (const [name, bytes] of Object.entries(SIMPLE_FILES)) expect(await fs.readFile(path.join(root, '.juno_task', name), 'utf8')).toBe(bytes);
+    const guidance = await fs.readFile(path.join(root, '.juno_task/simple-agent-guidance.md'), 'utf8');
+    expect(guidance).toContain('Done is not managed delivery');
+    expect(guidance).toContain('without\nfile isolation');
+    expect(guidance).toContain('No-Git execution');
+    expect(guidance).toContain('Never convert an existing managed installation');
     expect(resolveController(root)).toMatchObject({ role: 'simple', path: root });
     expect(await applySimpleInit(await planSimpleInit(root))).toBe('already-initialized');
     expect(snap()).toEqual(before);

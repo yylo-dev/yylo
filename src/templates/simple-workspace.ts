@@ -5,6 +5,8 @@ This Git checkout is both the project and Ledger root. Work on code, notebooks,
 and notes locally; keep the invoking subdirectory as your working directory.
 Read this file alongside existing project AGENTS.md and CLAUDE.md instructions.
 Do not follow managed-controller guidance that requires a different worktree.
+Use yy info --json or yy doctor workspace to inspect mode/root diagnostics.
+Never convert an existing managed installation by changing its mode field.
 
 Use yy task local or yy ledger for task bookkeeping. Done is not managed delivery.
 Managed task start/finish, merge delivery and integration operations are unsupported.
@@ -18,7 +20,9 @@ Runtime, cache, locks, logs and secrets are ignored, not durable project records
 Keep credentials under .juno_task/secrets, never in task bodies or tracked files.
 Startup must use installed runtime capabilities, never a copied install hook or
 an implicit package installation/upgrade. Missing dependencies require explicit
-recovery. Initialization does not assert runtime readiness.
+recovery in an explicitly selected environment with a compatible Ledger on PATH.
+Initialization does not assert runtime readiness. No-Git execution and live
+conversion between Simple and managed workspaces are outside this MVP.
 `;
 
 // Ledger 0.3.x stores canonical tasks, document/artifact revisions and objects
