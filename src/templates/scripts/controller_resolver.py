@@ -87,6 +87,9 @@ def resolve_simple(cwd: Path, root: Path, has_git: bool, operation: str) -> Opti
     }
     # A Simple marker below/above this Git root must not cross a project boundary.
     for directory in (cwd, *cwd.parents):
+        reservation = directory / ".yylo-simple-init"
+        if reservation.exists() or reservation.is_symlink():
+            fail(f"incomplete or active Simple initialization: {reservation}; preserve bytes and inspect before explicit recovery", result)
         if directory == root:
             continue
         other = directory / ".juno_task/config.json"
