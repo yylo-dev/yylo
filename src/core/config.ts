@@ -19,6 +19,7 @@ import { getDefaultHooks } from '../templates/default-hooks.js';
 import { SUBAGENT_DEFAULT_MODELS } from './subagent-models.js';
 import { migrateLegacyEnvironment } from './identity-migration.js';
 import { resolveController } from '../utils/controller-resolver.js';
+import { WorkspaceModeSchema, assertWorkspaceStartupSupported } from './workspace-mode.js';
 
 /**
  * Environment variable mapping for configuration options
@@ -185,13 +186,7 @@ const GitFlowSchema = z
   .strict()
   .optional();
 
-const ControllerWorkspaceSchema = z
-  .object({
-    mode: z.literal('metadata-only'),
-    policy: z.literal('.juno_task/config/metadata-controller.json'),
-  })
-  .strict()
-  .optional();
+const ControllerWorkspaceSchema = WorkspaceModeSchema.optional();
 
 const SafeRelativeAssetRootSchema = z.string().min(1).refine((value) => {
   if (path.isAbsolute(value)) return false;
@@ -410,7 +405,7 @@ export const JunoTaskConfigSchema = z
     ),
 
     controllerWorkspace: ControllerWorkspaceSchema.describe(
-      'Canonical metadata-only controller ownership and boundary policy pointer',
+      'Canonical workspace mode: metadata-only boundary policy or versioned opt-in Simple',
     ),
 
     agentProfile: AgentProfileSchema.describe(
@@ -953,6 +948,7 @@ export class ConfigLoader {
   async fromFile(filePath: string): Promise<this> {
     try {
       const fileConfig = await loadConfigFromFile(filePath, this.baseDir);
+      assertWorkspaceStartupSupported(fileConfig.controllerWorkspace);
       this.configSources.set('file', fileConfig);
     } catch (error) {
       throw new Error(`Failed to load configuration file: ${error}`);
@@ -971,6 +967,7 @@ export class ConfigLoader {
       const projectConfigFile = await findProjectConfigFile(this.projectConfigDir);
       if (projectConfigFile) {
         const fileConfig = await loadConfigFromFile(projectConfigFile, this.projectConfigDir);
+        assertWorkspaceStartupSupported(fileConfig.controllerWorkspace);
         this.configSources.set('projectFile', fileConfig);
       }
     } catch (error) {
@@ -991,6 +988,7 @@ export class ConfigLoader {
     const projectConfigFile = await findProjectConfigFile(this.projectConfigDir);
     if (projectConfigFile) {
       const fileConfig = await loadConfigFromFile(projectConfigFile, this.projectConfigDir);
+      assertWorkspaceStartupSupported(fileConfig.controllerWorkspace);
       this.configSources.set('projectFile', fileConfig);
     }
 
@@ -998,6 +996,7 @@ export class ConfigLoader {
     const globalConfigFile = await findGlobalConfigFile(this.baseDir);
     if (globalConfigFile) {
       const fileConfig = await loadConfigFromFile(globalConfigFile, this.baseDir);
+      assertWorkspaceStartupSupported(fileConfig.controllerWorkspace);
       this.configSources.set('file', fileConfig);
     }
 
@@ -1117,13 +1116,7 @@ export function validateConfig(config: unknown): JunoTaskConfig {
         : undefined;
       const controllerWorkspace = configRecord?.controllerWorkspace;
       const hasRetiredControllerConfig = Object.prototype.hasOwnProperty.call(configRecord ?? {}, 'lifecycle') || (
-        controllerWorkspace !== undefined && (
-          typeof controllerWorkspace !== 'object' ||
-          controllerWorkspace === null ||
-          Array.isArray(controllerWorkspace) ||
-          (controllerWorkspace as Record<string, unknown>).mode !== 'metadata-only' ||
-          (controllerWorkspace as Record<string, unknown>).policy !== '.juno_task/config/metadata-controller.json'
-        )
+        controllerWorkspace !== undefined && !WorkspaceModeSchema.safeParse(controllerWorkspace).success
       );
 
       const hint = hasPromptMacroSnakeCaseHint
@@ -1661,6 +1654,8 @@ export async function loadConfig(
     }
     if (cliConfig) loader.fromCli(cliConfig);
     const merged = loader.merge();
+    // Schema recognition is not runtime enablement: no legacy startup writes for Simple.
+    assertWorkspaceStartupSupported(merged.controllerWorkspace);
     // A canonical controller profile supplies preferences, never the invoking
     // task/integration workspace identity.
     if (profileDir !== invocationDir) {

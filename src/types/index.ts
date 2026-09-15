@@ -120,11 +120,8 @@ export interface JunoTaskConfig {
     policy: '.juno_task/config/git-flow.json';
   };
 
-  // Metadata-only controller boundary; detailed policy remains Python-owned and versioned.
-  controllerWorkspace?: {
-    mode: 'metadata-only';
-    policy: '.juno_task/config/metadata-controller.json';
-  };
+  // Single persisted workspace-mode authority; resolution validates registration separately.
+  controllerWorkspace?: import('../core/workspace-mode.js').WorkspaceMode;
 
   // Versioned controller-safe agent profile metadata.
   agentProfile?: {
