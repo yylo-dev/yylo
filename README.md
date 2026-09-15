@@ -354,6 +354,10 @@ The plan binds the Git common directory, HEAD/ref, task-state hash, exact JSON p
 
 ## Workspace roles and recovery
 
+For installed consumers, read [upgrade boundaries and troubleshooting](docs/consumer-upgrades.md)
+before changing runtime bindings, tracked scripts, or Ledger. Registration repair
+and provenance repair are not complete cross-version upgrade transactions.
+
 | Workspace | Use it for | Do not use it for |
 | --- | --- | --- |
 | Metadata controller | Ledger/task/merge/release orchestration and durable receipts | Product implementation or target integration edits |
