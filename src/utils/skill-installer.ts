@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import semver from 'semver';
-import { assertSafeManagedWritePath } from './managed-update-transaction.js';
+import { assertSafeManagedWritePath, lstatIfPresent } from './managed-update-transaction.js';
 
 interface SkillGroup {
   name: string;
@@ -32,6 +32,15 @@ export interface SkillInstallResult {
   version: string;
   acquisition: 'npx' | 'git';
   warnings?: string[];
+}
+
+export interface SkillGuidanceReport {
+  coherent: boolean;
+  version: string | null;
+  findings: Array<{
+    destination: string;
+    reason: 'legacy-skill' | 'retired-lifecycle' | 'receipt-drift' | 'unverified' | 'unsafe-or-unreadable';
+  }>;
 }
 
 const execFileAsync = promisify(execFile);
@@ -443,6 +452,97 @@ export class SkillInstaller {
       force,
       ...(version ? { version } : {}),
     })).changed;
+  }
+
+  /** Read-only guidance inspection, independent of CLI package/version receipts.
+   * Only the supported skill names are inspected; project skills and historical
+   * task/wiki evidence are not reinterpreted as active execution instructions.
+   */
+  static async inspectGuidance(projectDir: string): Promise<SkillGuidanceReport> {
+    const findings: SkillGuidanceReport['findings'] = [];
+    let record: InstallRecord | undefined;
+    const receipt = this.recordPath(projectDir);
+    try {
+      await assertSafeManagedWritePath(projectDir, receipt);
+      const receiptStat = await lstatIfPresent(receipt);
+      if (receiptStat) {
+        if (!receiptStat.isFile() || receiptStat.size > 1024 * 1024) throw new Error('Unsafe skill receipt');
+        record = await fs.readJson(receipt);
+        if (record?.schemaVersion !== 1 || record.repository !== this.REPOSITORY ||
+            !Array.isArray(record.skills) || record.skills.length !== this.SKILLS.length ||
+            !this.SKILLS.every((skill) => record?.skills.includes(skill)) ||
+            typeof record.version !== 'string' || !semver.valid(record.version)) {
+          record = undefined;
+          findings.push({ destination: path.relative(projectDir, receipt), reason: 'unverified' });
+        }
+      }
+    } catch {
+      findings.push({ destination: path.relative(projectDir, receipt), reason: 'unsafe-or-unreadable' });
+    }
+    for (const group of this.SKILL_GROUPS) {
+      for (const skill of [...this.SKILLS, ...this.LEGACY_SKILLS]) {
+        const destination = `${group.destDir}/${skill}`;
+        const root = path.join(projectDir, destination);
+        try {
+          await assertSafeManagedWritePath(projectDir, root);
+          if (!(await lstatIfPresent(root))) {
+            if (record?.skills.includes(skill)) findings.push({ destination, reason: 'receipt-drift' });
+            continue;
+          }
+          const legacy = (this.LEGACY_SKILLS as readonly string[]).includes(skill);
+          if (legacy) findings.push({ destination, reason: 'legacy-skill' });
+          // Bounded, no-symlink traversal. Hash bytes/modes exactly like the
+          // independent skill receipt, including nested non-Markdown resources.
+          const files: string[] = [];
+          let count = 0;
+          let bytes = 0;
+          const walk = async (directory: string, depth: number): Promise<void> => {
+            if (depth > 12) throw new Error('Skill inspection depth exceeded');
+            await assertSafeManagedWritePath(projectDir, directory);
+            const entries = await fs.readdir(directory, { withFileTypes: true });
+            for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+              if (++count > 1024 || entry.isSymbolicLink()) throw new Error('Unsafe or oversized skill');
+              const absolute = path.join(directory, entry.name);
+              if (entry.isDirectory()) await walk(absolute, depth + 1);
+              else if (entry.isFile()) files.push(path.relative(root, absolute).split(path.sep).join('/'));
+              else throw new Error('Unsupported skill entry');
+            }
+          };
+          await walk(root, 0);
+          const hash = createHash('sha256');
+          for (const relative of files) {
+            const absolute = path.join(root, relative);
+            await assertSafeManagedWritePath(projectDir, absolute);
+            const stat = await fs.lstat(absolute);
+            bytes += stat.size;
+            if (!stat.isFile() || stat.size > 1024 * 1024 || bytes > 8 * 1024 * 1024) {
+              throw new Error('Unsafe or oversized skill file');
+            }
+            const content = await fs.readFile(absolute);
+            hash.update(relative); hash.update('\0');
+            hash.update(String(stat.mode & 0o777)); hash.update('\0');
+            hash.update(content); hash.update('\0');
+            const text = relative.toLowerCase().endsWith('.md') ? content.toString().replace(/\s+/g, ' ') : '';
+            if (
+              /\byy(?:lo)?\s+merge\s+(?:arbiter|drive|next|resolve)\b/i.test(text) ||
+              /Reviewer A then Reviewer B|low risk has zero semantic reviews|normal risk has at most one/i.test(text)
+            ) {
+              findings.push({ destination: `${destination}/${relative}`, reason: 'retired-lifecycle' });
+            }
+          }
+          if (!legacy) {
+            const expected = record?.skills.includes(skill) ? record.digests?.[group.name]?.[skill] : undefined;
+            if (!expected) findings.push({ destination, reason: 'unverified' });
+            else if (!files.includes('SKILL.md') || hash.digest('hex') !== expected) {
+              findings.push({ destination, reason: 'receipt-drift' });
+            }
+          }
+        } catch {
+          findings.push({ destination, reason: 'unsafe-or-unreadable' });
+        }
+      }
+    }
+    return { coherent: findings.length === 0, version: record?.version ?? null, findings };
   }
 
   /** Local-only status check. This method never resolves tags or invokes a command. */

@@ -7,6 +7,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import fs from 'fs-extra';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -48,7 +49,7 @@ const CONTROLLER_POLICY_PATHS = [
 ] as const;
 const CONTROLLER_BUNDLE_TRACKED_PATHS = [
   '.juno_task/managed-assets.json',
-  ...managedAssetManifest.assets
+  ...[...managedAssetManifest.assets, ...managedAssetManifest.controllerOutputs]
     .map((asset) => asset.destination)
     .filter((destination) => /^\.juno_task\/(prompts|wiki|workflows)\//.test(destination)),
 ].sort();
@@ -910,6 +911,21 @@ exec "$ROOT/.juno_task/scripts/git-flow.sh" "$@"
     }
     if (await this.isMetadataOnlyController(projectDir)) {
       await this.updateMetadataControllerPolicies(projectDir, force);
+      // Root instructions remain CLI-owned ignored runtime outputs even though
+      // skills now have independent acquisition. Do not lose the tracked-user
+      // evidence guard when the skill installer is no longer called here.
+      const tracked = spawnSync('git', [
+        '-C', projectDir, '-c', 'core.fsmonitor=false', 'ls-files', '-z', '--', 'AGENTS.md', 'CLAUDE.md',
+      ], { encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024 });
+      if (tracked.status !== 0) {
+        throw new Error('Metadata-controller instruction ownership inspection failed; preserve all bytes');
+      }
+      const paths = tracked.stdout.split('\0').filter(Boolean);
+      if (paths.length > 0) {
+        throw new Error(
+          `Metadata-controller agent surface contains tracked user evidence; reviewed evacuation is required: ${paths.join(', ')}`,
+        );
+      }
     }
 
     const { ManagedProjectAssets } = await import('./managed-project-assets.js');

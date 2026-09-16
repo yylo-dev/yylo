@@ -33,8 +33,16 @@ product code.
    inventory/drain/conversion; live apply requires separate owner authority.
    Package publication is maintainer-only, outside `yy`, and requires separate authority.
 9. Never copy product code, bulky artifacts, or project-specific skill assets
-   into this controller. Root instructions and core skills here are ignored local
-   runtime files refreshed atomically from one bound immutable Juno package.
+   into this controller. Root instructions and declared prompts/wiki are refreshed
+   atomically from one bound immutable CLI package. Skills are independently
+   acquired from a reviewed `yylo-skills` release and have their own receipt;
+   `yy scripts update` does not install, overwrite, or retire them.
+10. Inspect guidance with read-only `yy scripts doctor` and `yy skills status`.
+    Source-generation drift, CLI instruction-content drift, and independent skill
+    drift are separate findings. Preserve customized or unrecorded files for
+    owner review; a doctor report grants no refresh, skill-install, or cleanup
+    authority. Historical task bodies and acceptance records are evidence, not
+    current execution policy.
 
 Expiry alone never grants ownership; use controller-proven successor or handoff
 recovery and preserve dirty bytes. Controller checkpoints are best-effort warnings,

@@ -285,6 +285,66 @@ describe('ManagedProjectAssets', {
     expect(report.instructionBundle?.schemaVersion).toBe('juno_instruction_bundle.v1');
   });
 
+  it('detects and atomically refreshes receipted nested guidance without touching task state', async () => {
+    await fs.writeJson(path.join(projectDir, '.juno_task/config.json'), {
+      controllerWorkspace: { mode: 'metadata-only', policy: '.juno_task/config/metadata-controller.json' },
+    });
+    const independentSkill = path.join(projectDir, '.pi/skills/ralph-loop-yylo/references/implement.md');
+    await fs.outputFile(independentSkill, 'independent skill owner bytes');
+    await ManagedProjectAssets.update(projectDir, { silent: true });
+    const destinations = [
+      'AGENTS.md',
+      '.juno_task/wiki/controller/git_worktree_lifecycle.md',
+      '.juno_task/wiki/controller/yy_pi_progress.md',
+    ];
+    const receiptPath = path.join(projectDir, '.juno_task/managed-assets.json');
+    const receipt = await fs.readJson(receiptPath);
+    // Reproduce a same-version old receipt: source-generation/version agreement
+    // must not conceal content drift in root instructions or a wiki alias.
+    receipt.schemaVersion = 1;
+    delete receipt.instructionBundle;
+    for (const destination of destinations) {
+      await fs.writeFile(path.join(projectDir, destination), 'yy merge arbiter run\n');
+      receipt.assets[destination].installedSha256 = sha256('yy merge arbiter run\n');
+    }
+    await fs.writeJson(receiptPath, receipt);
+    const statePath = path.join(projectDir, '.juno_task/runtime/task-hydration/active.json');
+    await fs.outputFile(statePath, 'preserve active lease/hydration bytes');
+    const before = await fs.readFile(receiptPath);
+    const report = await ManagedProjectAssets.inspectGeneration(projectDir);
+    expect(report.coherent).toBe(false);
+    for (const destination of destinations) {
+      expect(report.entries).toContainEqual({ destination, installClass: 'controller', state: 'outdated' });
+    }
+    expect(await fs.readFile(receiptPath)).toEqual(before);
+    await expect(withManagedUpdateRollback(projectDir, async () => {
+      await ManagedProjectAssets.update(projectDir, { silent: true });
+      throw new Error('injected nested guidance interruption');
+    })).rejects.toThrow('injected nested guidance interruption');
+    expect(await fs.readFile(receiptPath)).toEqual(before);
+    for (const destination of destinations) {
+      expect(await fs.readFile(path.join(projectDir, destination), 'utf8')).toBe('yy merge arbiter run\n');
+    }
+    await withManagedUpdateRollback(projectDir, () => ManagedProjectAssets.update(projectDir, { silent: true }));
+    expect((await ManagedProjectAssets.inspectGeneration(projectDir)).coherent).toBe(true);
+    expect(await fs.readFile(statePath, 'utf8')).toBe('preserve active lease/hydration bytes');
+    expect(await fs.readFile(independentSkill, 'utf8')).toBe('independent skill owner bytes');
+    expect(Object.keys((await fs.readJson(receiptPath)).assets).some((entry) => entry.includes('/skills/'))).toBe(false);
+  });
+
+  it('refuses ambiguous nested guidance ownership without replacing any instruction', async () => {
+    await fs.writeJson(path.join(projectDir, '.juno_task/config.json'), {
+      controllerWorkspace: { mode: 'metadata-only', policy: '.juno_task/config/metadata-controller.json' },
+    });
+    const destination = '.juno_task/wiki/controller/git_worktree_lifecycle.md';
+    await fs.outputFile(path.join(projectDir, destination), 'user-owned old guidance');
+    const result = await ManagedProjectAssets.update(projectDir, { silent: true });
+    expect(result.conflicts).toContainEqual(expect.objectContaining({ destination }));
+    expect(await fs.readFile(path.join(projectDir, destination), 'utf8')).toBe('user-owned old guidance');
+    expect(await fs.pathExists(path.join(projectDir, 'AGENTS.md'))).toBe(false);
+    expect((await ManagedProjectAssets.inspectGeneration(projectDir)).coherent).toBe(false);
+  });
+
   it('uses canonical UTF-8 ordering and encoding for managed record identity', () => {
     const keys = ['😀', 'a', '.dot', 'é', 'A', '_under'];
     const assets = Object.fromEntries(keys.map((destination, index) => [destination, {
@@ -304,7 +364,7 @@ describe('ManagedProjectAssets', {
     expect(manifest.schemaVersion).toBe(2);
     expect(manifest.instructionBundle).toEqual(expect.objectContaining({
       schemaVersion: 'juno_instruction_bundle.v1',
-      semanticVersion: '1.0.0',
+      semanticVersion: '1.1.0',
       packageVersion: manifest.packageVersion,
       assetCount: Object.keys(manifest.assets).length,
       assetsSha256: expect.stringMatching(/^[0-9a-f]{64}$/),

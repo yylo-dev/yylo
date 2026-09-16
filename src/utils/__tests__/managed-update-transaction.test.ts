@@ -86,7 +86,8 @@ describe('managed update transaction', () => {
 
   it('snapshots and restores an owned dangling symbolic link exactly', async () => {
     project = await fs.mkdtemp(path.join(os.tmpdir(), 'managed-update-link-'));
-    const ownedLink = path.join(project, '.pi');
+    const ownedLink = path.join(project, '.juno_task/prompts');
+    await fs.ensureDir(path.dirname(ownedLink));
     await fs.symlink('missing-owner-target', ownedLink);
 
     await expect(withManagedUpdateRollback(project, async () => {
@@ -97,6 +98,29 @@ describe('managed update transaction', () => {
 
     expect((await fs.lstat(ownedLink)).isSymbolicLink()).toBe(true);
     expect(await fs.readlink(ownedLink)).toBe('missing-owner-target');
+  });
+
+  it('never rolls back independent skill writes, active leases, hydration or task bytes', async () => {
+    project = await fs.mkdtemp(path.join(os.tmpdir(), 'managed-update-independent-'));
+    const independent = [
+      '.agents/skills/ralph-loop-yylo/SKILL.md',
+      '.claude/skills/ralph-loop-yylo/references/implement.md',
+      '.pi/skills/ralph-loop-yylo/SKILL.md',
+      '.juno_task/runtime/leases/active.json',
+      '.juno_task/runtime/task-hydration/active.json',
+      'task/dirty-source.ts',
+    ];
+    for (const relative of independent) await fs.outputFile(path.join(project, relative), 'before');
+    await expect(withManagedUpdateRollback(project, async () => {
+      await fs.outputFile(path.join(project, 'AGENTS.md'), 'partial instruction');
+      // Model independent owners progressing after the CLI snapshot was taken.
+      for (const relative of independent) await fs.writeFile(path.join(project, relative), 'owner progress');
+      throw new Error('interrupted CLI refresh');
+    })).rejects.toThrow('interrupted CLI refresh');
+    for (const relative of independent) {
+      expect(await fs.readFile(path.join(project, relative), 'utf8')).toBe('owner progress');
+    }
+    expect(await fs.pathExists(path.join(project, 'AGENTS.md'))).toBe(false);
   });
 
   it('reports both the primary update error and a snapshot cleanup error', async () => {

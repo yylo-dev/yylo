@@ -122,9 +122,9 @@ describe('target-bound managed controller recovery', {
     await ScriptInstaller.assertMetadataControllerUpdateComplete(root, exactRetry ?? undefined);
   });
 
-  it('recovers the real protected-target bytes from the exact stale distribution fingerprint', async () => {
+  it('preserves historical protected-target evidence rather than mixing its declaration with the new instruction bundle', async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'juno-real-controller-recovery-'));
-    const { targetSha, changedScripts, packageScriptsDir } =
+    const { changedScripts, packageScriptsDir } =
       await createTargetBoundMetadataController(
         root,
         packageVersion,
@@ -144,24 +144,16 @@ describe('target-bound managed controller recovery', {
 
     const manifestPath = path.join(root, '.juno_task/managed-assets.json');
     const before = await fs.readFile(manifestPath);
-    const recovery = await ScriptInstaller.preflightUpdate(root, true);
-    expect(recovery).toMatchObject({ packageVersion, targetSha });
+    // The archived package predates controller wiki-alias ownership and bundle
+    // revision 1.1.0. Equal version strings do not authorize this newer adapter
+    // to recover it using a different declaration; retain the historical bytes.
+    await expect(ScriptInstaller.preflightUpdate(root, true)).rejects.toThrow(
+      'Installed package declaration is mixed with the invoked package identity',
+    );
     expect(changedScripts).toEqual(Object.keys(REAL_STALE_CONTROLLER_SCRIPTS));
     expect(await fs.readFile(manifestPath)).toEqual(before);
-
-    await withManagedUpdateRollback(root, () => ManagedProjectAssets.update(root, {
-      force: true, silent: true, recovery: recovery ?? undefined,
-    }));
-    await ScriptInstaller.assertMetadataControllerUpdateComplete(root, recovery ?? undefined);
-    const manifest = await fs.readJson(manifestPath);
-    expect(manifest.instructionBundle.assetCount).toBe(recovery?.assets.size);
-    for (const [destination, expected] of recovery?.assets ?? []) {
-      expect(await fs.readFile(path.join(root, destination)), destination).toEqual(expected);
-      expect(manifest.assets[destination]).toMatchObject({
-        templateVersion: packageVersion,
-        sourceSha256: sha256(expected),
-        installedSha256: sha256(expected),
-      });
+    for (const [name, identity] of Object.entries(REAL_STALE_CONTROLLER_SCRIPTS)) {
+      expect(sha256(await fs.readFile(path.join(root, '.juno_task/scripts', name)))).toBe(identity.targetSha256);
     }
   });
 
