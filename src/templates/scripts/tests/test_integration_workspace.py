@@ -1219,6 +1219,35 @@ class IntegrationWorkspaceTests(unittest.TestCase):
                                     "target managed asset entry is invalid"):
             runtime.managed_target_provenance(self.repo, malformed)
 
+    def test_source_instruction_bundle_versions_remain_strict(self) -> None:
+        declaration = self.repo / runtime.MANAGED_MANIFEST_PATH
+        value = json.loads(declaration.read_text())
+        value["schemaVersion"] = 2
+        for version in ("1.0.0", "1.1.0", "1.2.0", "2.0.0", None, [], {}):
+            with self.subTest(version=version):
+                value["instructionBundle"] = {
+                    "schemaVersion": "juno_instruction_bundle_declaration.v1",
+                    "semanticVersion": version}
+                declaration.write_text(json.dumps(value, indent=2) + "\n")
+                git(self.repo, "add", runtime.MANAGED_MANIFEST_PATH)
+                git(self.repo, "commit", "-m", "exercise instruction bundle version")
+                target = git(self.repo, "rev-parse", "HEAD")
+                if version in ("1.0.0", "1.1.0"):
+                    runtime.managed_target_provenance(self.repo, target)
+                else:
+                    with self.assertRaisesRegex(runtime.ManagedRuntimeError,
+                                                "target managed asset definition is invalid"):
+                        runtime.managed_target_provenance(self.repo, target)
+        value["instructionBundle"] = {
+            "schemaVersion": "juno_instruction_bundle_declaration.v1",
+            "semanticVersion": "1.1.0", "unexpected": True}
+        declaration.write_text(json.dumps(value, indent=2) + "\n")
+        git(self.repo, "add", runtime.MANAGED_MANIFEST_PATH)
+        git(self.repo, "commit", "-m", "reject extra declaration keys")
+        with self.assertRaisesRegex(runtime.ManagedRuntimeError,
+                                    "target managed asset definition is invalid"):
+            runtime.managed_target_provenance(self.repo, git(self.repo, "rev-parse", "HEAD"))
+
     def test_shipped_template_declaration_matches_the_strict_contract(self) -> None:
         # This suite runs from the shipped template tree (six levels below the
         # repository root) and from installed runtime trees (three levels
