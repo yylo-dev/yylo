@@ -131,9 +131,11 @@ def managed_target_provenance(repository: Path, commit: str) -> dict[str, Any]:
         assets = manifest.get("assets") if isinstance(manifest, dict) else None
         schema = manifest.get("schemaVersion") if isinstance(manifest, dict) else None
         instruction_declaration = manifest.get("instructionBundle") if isinstance(manifest, dict) else None
-        declaration_valid = (schema == 1 or (schema == 2 and instruction_declaration == {
-            "schemaVersion": "juno_instruction_bundle_declaration.v1",
-            "semanticVersion": "1.0.0"}))
+        declaration_valid = (schema == 1 or (schema == 2 and any(
+            instruction_declaration == {
+                "schemaVersion": "juno_instruction_bundle_declaration.v1",
+                "semanticVersion": version}
+            for version in ("1.0.0", "1.1.0"))))
         if not declaration_valid or not isinstance(assets, list):
             raise ManagedRuntimeError("target managed asset definition is invalid")
         package = managed_source_json(repository, commit, MANAGED_PACKAGE_PATH)
@@ -227,7 +229,7 @@ def managed_target_provenance(repository: Path, commit: str) -> dict[str, Any]:
             bundle_sha = hashlib.sha256(json.dumps(core, separators=(",", ":")).encode()).hexdigest()
             if (not isinstance(identity, dict)
                     or identity.get("schemaVersion") != "juno_instruction_bundle.v1"
-                    or identity.get("semanticVersion") != "1.0.0"
+                    or identity.get("semanticVersion") not in ("1.0.0", "1.1.0")
                     or identity.get("packageVersion") != version
                     or identity.get("assetCount") != len(manifest["assets"])
                     or identity.get("assetsSha256") != assets_sha
