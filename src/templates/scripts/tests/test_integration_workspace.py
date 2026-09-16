@@ -127,6 +127,122 @@ class IntegrationWorkspaceTests(unittest.TestCase):
         self.assertTrue(runtime.adoption_restore_owner(self.owner, before))
         self.assertEqual(git(self.owner, "rev-parse", "HEAD"), self.base)
 
+    def test_isolated_source_preserves_split_owner_and_dirty_unrelated_bytes(self) -> None:
+        target = self.local_advance()
+        git(self.owner, "switch", "--detach", target)
+        # Reproduce the incident: HEAD advanced, roleBase retained the old base.
+        before = runtime.adoption_preserved_owner(self.repo, self.owner)
+        git(self.repo, "switch", "product")
+        (self.repo / "src/next.txt").write_text("next")
+        git(self.repo, "add", "src/next.txt")
+        git(self.repo, "commit", "-m", "next generation")
+        newer = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "switch", "--detach")
+        with self.assertRaisesRegex(runtime.AdoptionError, "roleBase"):
+            runtime.adoption_owner_preflight(self.repo, "refs/heads/product", newer, self.owner)
+        (self.owner / "unrelated.txt").write_bytes(b"preserve dirty bytes\x00")
+        worktrees = git(self.repo, "worktree", "list", "--porcelain")
+        source = runtime.adoption_isolated_source(self.repo, newer, self.root / "source")
+        self.assertEqual(git(source, "rev-parse", "HEAD"), newer)
+        self.assertEqual(runtime.adoption_preserved_owner(self.repo, self.owner), before)
+        self.assertEqual(git(self.repo, "worktree", "list", "--porcelain"), worktrees)
+        self.assertEqual((self.owner / "unrelated.txt").read_bytes(), b"preserve dirty bytes\x00")
+        self.assertFalse((source / "unrelated.txt").exists())
+        self.assertNotEqual(git(source, "rev-parse", "--git-common-dir"),
+                            git(self.repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+
+    def test_isolated_source_refuses_symbolic_missing_or_occupied_inputs(self) -> None:
+        for identity in ("HEAD", "refs/heads/product", "0" * 40):
+            with self.subTest(identity=identity), self.assertRaises(runtime.AdoptionError):
+                runtime.adoption_isolated_source(self.repo, identity, self.root / "rejected")
+            self.assertFalse((self.root / "rejected").exists())
+        occupied = self.root / "occupied"
+        occupied.mkdir()
+        (occupied / "keep").write_text("keep")
+        with self.assertRaisesRegex(runtime.AdoptionError, "absent"):
+            runtime.adoption_isolated_source(self.repo, self.base, occupied)
+        self.assertEqual((occupied / "keep").read_text(), "keep")
+        linked = self.root / "linked"
+        linked.symlink_to(self.root / "absent")
+        with self.assertRaisesRegex(runtime.AdoptionError, "absent"):
+            runtime.adoption_isolated_source(self.repo, self.base, linked)
+        self.assertTrue(linked.is_symlink())
+
+    def test_isolated_source_does_not_borrow_dependencies_or_git_config(self) -> None:
+        dependencies = self.owner / "juno-code/node_modules"
+        dependencies.mkdir(parents=True)
+        (dependencies / "foreign").write_text("foreign")
+        git(self.owner, "config", "--worktree", "juno.controller.runtimeExecutable", "/foreign")
+        source = runtime.adoption_isolated_source(self.repo, self.base, self.root / "source")
+        self.assertFalse((source / "juno-code/node_modules").exists())
+        observed = run(["git", "config", "--local", "--get", "juno.controller.runtimeExecutable"],
+                       source, check=False)
+        self.assertEqual(observed.returncode, 1)
+
+    def test_isolated_source_refuses_target_and_owner_races_without_overwriting(self) -> None:
+        before = runtime.adoption_preserved_owner(self.repo, self.owner)
+        runtime.adoption_assert_preserved_source(self.repo, "refs/heads/product",
+                                                 self.base, self.owner, before)
+        target = self.local_advance()
+        with self.assertRaisesRegex(runtime.AdoptionError, "target ref moved"):
+            runtime.adoption_assert_preserved_source(self.repo, "refs/heads/product",
+                                                     self.base, self.owner, before)
+        git(self.owner, "config", "--worktree", "juno.workspace.roleBase", target)
+        with self.assertRaisesRegex(runtime.AdoptionError, "owner identity changed"):
+            runtime.adoption_assert_preserved_source(self.repo, "refs/heads/product",
+                                                     target, self.owner, before)
+        self.assertEqual(git(self.owner, "config", "--worktree", "--get",
+                             "juno.workspace.roleBase"), target)
+        self.assertEqual(git(self.owner, "rev-parse", "HEAD"), self.base)
+
+    def test_source_adoption_failure_is_a_bounded_cli_error(self) -> None:
+        with (mock.patch.object(runtime, "source_runtime_adopt",
+                                side_effect=runtime.AdoptionError("exact preimage changed")),
+              mock.patch("sys.stderr") as stderr):
+            code = runtime.main(["runtime-adopt-source", "--previous-sha", self.base,
+                                 "--target-sha", self.base, "--install-prefix", "/unused",
+                                 "--output", "/unused.json", "--isolated-source"])
+        self.assertEqual(code, 2)
+        self.assertIn("exact preimage changed", str(stderr.write.call_args_list))
+
+    def test_isolated_source_pack_uses_exact_lock_and_refuses_output_collision(self) -> None:
+        # Real Git checkout, fake npm only: isolate process/build ownership assertions.
+        git(self.repo, "switch", "product")
+        package = self.repo / "juno-code"
+        package.mkdir(exist_ok=True)
+        (package / "package-lock.json").write_text('{"lockfileVersion":3}')
+        git(self.repo, "add", "juno-code/package-lock.json")
+        git(self.repo, "commit", "-m", "lock")
+        target = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "switch", "--detach")
+        calls = []
+        def npm(argv, cwd):
+            calls.append(argv)
+            self.assertNotEqual(cwd, self.owner / "juno-code")
+            self.assertTrue((cwd / "package-lock.json").is_file())
+            if argv[1] == "pack":
+                (Path(argv[-1]) / "candidate.tgz").write_bytes(b"candidate")
+
+        artifact = self.root / "candidate.tgz"
+        with mock.patch.object(runtime, "adoption_build_run", side_effect=npm):
+            runtime.adoption_pack_isolated(self.repo, target, artifact)
+            self.assertEqual(artifact.read_bytes(), b"candidate")
+            with self.assertRaisesRegex(runtime.AdoptionError, "absent"):
+                runtime.adoption_pack_isolated(self.repo, target, artifact)
+        self.assertEqual(calls[0], ["npm", "ci"])
+        self.assertEqual(calls[1][:2], ["npm", "pack"])
+        self.assertEqual(artifact.read_bytes(), b"candidate")
+
+    def test_isolated_build_runner_bounds_failures_and_timeout(self) -> None:
+        runtime.adoption_build_run([sys.executable, "-c", "print('ok')"], self.root)
+        with self.assertRaises(runtime.AdoptionError) as failure:
+            runtime.adoption_build_run([sys.executable, "-c",
+                                        "print('x' * 10000); raise SystemExit(3)"], self.root)
+        self.assertLessEqual(len(str(failure.exception)), 4000)
+        with self.assertRaisesRegex(runtime.AdoptionError, "timed out"):
+            runtime.adoption_build_run([sys.executable, "-c", "import time; time.sleep(60)"],
+                                      self.root, timeout_seconds=0.05)
+
     def test_source_adoption_conflicting_completed_replay_refuses_immediately(self) -> None:
         receipt = self.root / "completed-adoption.json"
         receipt.write_text(json.dumps({
