@@ -94,7 +94,8 @@ describe('validated Simple local startup', () => {
   it('blocks missing/incompatible Ledger before stub dispatch without installing', async () => {
     await stubLedger('9.9.9');
     await expect(checkLedgerReadiness({ cwd: nested })).rejects.toThrow(/incompatible/);
-    await fs.remove(path.join(bin, 'yylo-ledger'));
+    // Probe absence by an explicit missing name, but keep the incompatible
+    // fixture ahead of any developer-installed Ledger for the engine check.
     await expect(checkLedgerReadiness({ cwd: nested, executableName: 'missing-ledger-test' })).rejects.toThrow(/Install a compatible/);
     const engine = createExecutionEngine(await loadConfig({ baseDir: nested }));
     try {
