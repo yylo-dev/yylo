@@ -1421,14 +1421,55 @@ ${chalk.gray('This updates scripts from the currently installed yylo package/tem
     .action(async (options: { cwd?: string }) => {
       const argvCwd = extractOptionValueFromArgv(process.argv.slice(2), '--cwd', '-w');
       const workingDirectory = options.cwd?.trim() || argvCwd?.trim() || process.cwd();
-      const [{ ManagedProjectAssets }, { ScriptInstaller }] = await Promise.all([
+      const [{ ManagedProjectAssets }, { ScriptInstaller }, { SkillInstaller }] = await Promise.all([
         import('../utils/managed-project-assets.js'),
         import('../utils/script-installer.js'),
+        import('../utils/skill-installer.js'),
       ]);
       if (await ScriptInstaller.isMetadataOnlyController(workingDirectory)) {
-        const recovery = await ScriptInstaller.assertManagedControllerPackageUpdateAllowed(
-          workingDirectory,
-        );
+        // These are independent authorities. A source-binding refusal must not
+        // suppress content/skill findings or authorize a cross-package repair.
+        let failed = false;
+        let recovery: Awaited<ReturnType<typeof ScriptInstaller.assertManagedControllerPackageUpdateAllowed>> = null;
+        try {
+          recovery = await ScriptInstaller.assertManagedControllerPackageUpdateAllowed(workingDirectory);
+        } catch (error) {
+          console.error(chalk.red(`✗ Source-generation binding: ${error instanceof Error ? error.message : String(error)}`));
+          console.error('Inspect separately with `yy integration runtime-doctor`; no refresh is authorized by this report.');
+          failed = true;
+        }
+        try {
+          const guidance = await ManagedProjectAssets.inspectGeneration(workingDirectory, recovery ?? undefined);
+          if (!guidance.coherent) {
+            console.error(chalk.red('✗ Managed instruction-content drift against the inspected package (not proof of source-generation drift)'));
+            for (const entry of guidance.entries.filter((item) => item.state !== 'current')) {
+              console.error(`  ${entry.state}: ${entry.destination}`);
+            }
+            failed = true;
+          }
+        } catch (error) {
+          console.error(chalk.red(`✗ Managed instruction receipt/content inspection: ${error instanceof Error ? error.message : String(error)}`));
+          failed = true;
+        }
+        if (failed) console.error(chalk.yellow(
+          'Confirm the exact bound package before requesting `yy scripts update`. ' +
+          'Customized/unreceipted files require ownership review; do not force or copy over them.',
+        ));
+        const skills = await SkillInstaller.inspectGuidance(workingDirectory);
+        if (!skills.coherent) {
+          console.error(chalk.red('✗ Independent skill guidance requires review (not owned by the CLI instruction bundle)'));
+          for (const finding of skills.findings) console.error(`  ${finding.reason}: ${finding.destination}`);
+          console.error(chalk.yellow(
+            'Inspect `yy skills status` and .juno_task/runtime/skills-install.json. ' +
+            'Only a separately approved `yy skills install --version <reviewed-version>` may acquire skills. ' +
+            'Preserve customized/unrecorded legacy skills for owner disposition; scripts update cannot repair or retire them.',
+          ));
+          failed = true;
+        }
+        if (failed) {
+          process.exitCode = 1;
+          return;
+        }
         await ScriptInstaller.assertMetadataControllerUpdateComplete(
           workingDirectory, recovery ?? undefined,
         );

@@ -19,9 +19,8 @@ export const MANAGED_UPDATE_ROOTS = [
   '.juno_task/runtime/managed-controller/policy-backups',
   '.venv_juno',
   'scripts/git-flow.sh',
-  '.agents',
-  '.claude',
-  '.pi',
+  // Independent skill acquisition owns .agents/.claude/.pi. A failed CLI
+  // refresh must not roll back another owner's concurrent skill writes.
   'AGENTS.md',
   'CLAUDE.md',
 ] as const;

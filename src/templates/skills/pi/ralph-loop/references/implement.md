@@ -51,8 +51,8 @@ task's workspace.
 
 Stop after queueing. Read-only delivery observation uses `yy merge status
 TASK_ID`. One authorized target owner runs `yy merge land TASK_ID` for exactly
-that immutable source, then `yy merge project TASK_ID` to record the Git result
-separately. Implementation agents do not land their own work, discard dirty
+that immutable source; land projects the verified Git result to Ledger automatically.
+Use `yy merge project TASK_ID` only to recover failed or stale projection. Implementation agents do not land their own work, discard dirty
 bytes, reuse a stale candidate after target movement, or claim that Git ancestry
 proves tests or requirements. Tests and semantic reviews remain explicit project
 checks outside merge; merge launches zero models and owns no repair loop.

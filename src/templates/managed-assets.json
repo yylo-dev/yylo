@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "instructionBundle": {
     "schemaVersion": "juno_instruction_bundle_declaration.v1",
-    "semanticVersion": "1.0.0"
+    "semanticVersion": "1.1.0"
   },
   "controllerOutputs": [
     {
@@ -14,6 +14,21 @@
       "source": "controller-agent/CLAUDE.md",
       "destination": "CLAUDE.md",
       "type": "instruction"
+    },
+    {
+      "source": "wiki/controller/git_worktree_lifecycle.md",
+      "destination": ".juno_task/wiki/controller/git_worktree_lifecycle.md",
+      "type": "wiki"
+    },
+    {
+      "source": "wiki/controller/yy_pi_progress.md",
+      "destination": ".juno_task/wiki/controller/yy_pi_progress.md",
+      "type": "wiki"
+    },
+    {
+      "source": "wiki/controller/task_dependency_hydration.md",
+      "destination": ".juno_task/wiki/controller/task_dependency_hydration.md",
+      "type": "wiki"
     }
   ],
   "admissionOutputs": [

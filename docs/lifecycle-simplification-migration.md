@@ -9,13 +9,54 @@ submission, and one selected-task native-Git delivery boundary.
 
 Normal delivery uses `yy task start|status|checkpoint|preflight|finish` and
 `yy merge status|land|project`. `preflight` is optional and read-only; `finish`
-enforces the same closure. `land` selects one immutable task and uses native Git;
-`project` records Git success separately. Reporting relationships do not own
+enforces the same closure. `land` selects one immutable task, uses native Git,
+and automatically projects verified Git success to Ledger; `project` retries or
+repairs that projection without repeating integration. Reporting relationships do not own
 worktrees, candidates, tests, reviews, or integration.
 
 No `yy task` command creates or advances an umbrella. Finite legacy handling is
 isolated under `yy migrate legacy-lifecycle`; it calls the same managed task
 runtime and does not introduce another state store or executor.
+
+## Controller instruction inspection and ownership
+
+Run `yy scripts doctor` from the controller before relying on refreshed guidance.
+It reports three independent conditions; matching CLI/controller version strings
+alone prove none of them:
+
+- **Source-generation binding:** inspect `yy integration runtime-doctor`. Use only
+  the exact receipt-bound package and its supported, separately authorized
+  rebind/recovery path. Generation drift does not explain how stale instructions
+  were introduced.
+- **CLI instruction-content drift:** doctor lists exact missing, outdated, or
+  customized paths against the inspected package. `AGENTS.md`, `CLAUDE.md`, declared
+  prompts, and the declared wiki paths belong to the CLI receipt. Controller wiki
+  aliases for lifecycle, progress and hydration share the same package sources as
+  their top-level paths; both are inspected and included in atomic refresh/readback.
+  Request authorization for non-force `yy scripts update` only after verifying
+  package binding. Receipted unchanged old bytes can be refreshed; unreceipted or
+  customized files refuse replacement and need owner review. Do not copy over
+  files, merge packages, or use force to manufacture agreement.
+- **Independent skill guidance:** `yy skills status` and
+  `.juno_task/runtime/skills-install.json` describe the separately acquired
+  `yylo-skills` release, not the CLI bundle. Doctor inspects the supported skill
+  names in `.agents/skills`, `.claude/skills`, and `.pi/skills`, including nested
+  references. It reports legacy names, receipt drift, unsafe/unreadable paths and
+  known retired lifecycle markers, even when a skill receipt matches its bytes.
+  This is a bounded compatibility check, not semantic certification of arbitrary
+  project skills. Only a separately approved
+  `yy skills install --version <reviewed-version>` acquires a release. Customized
+  or unrecorded legacy directories remain owner evidence requiring reviewed
+  disposition; scripts update never overwrites or retires them. No skills are
+  silently reacquired or rebundled with the CLI.
+
+Refresh and diagnostics must preserve active task leases, hydration evidence and
+all unrelated dirty controller/task bytes. CLI refresh success certifies its
+package-owned outputs only; it is not full session-guidance convergence. Repeat
+read-only doctor and start a fresh agent session after authorized maintenance so
+already-injected stale instructions are not silently reinterpreted in place.
+Historical baseline/acceptance documents and Ledger bodies remain historical
+records, not current execution policy or automated review-count requirements.
 
 ## Read-only inventory and disposition
 

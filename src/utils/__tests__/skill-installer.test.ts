@@ -98,6 +98,80 @@ describe('SkillInstaller remote acquisition', () => {
     await fs.remove(project);
   });
 
+  it('inspects independent skill receipts locally without claiming CLI-package ownership', async () => {
+    await SkillInstaller.installRemote(project, { version: '2.0.0' });
+    runner.mockClear();
+    expect(await SkillInstaller.inspectGuidance(project)).toEqual({ coherent: true, version: 'v2.0.0', findings: [] });
+    const legacy = '.pi/skills/ralph-loop/references/implement.md';
+    await fs.outputFile(path.join(project, legacy), 'Run yy merge arbiter run TASK_ID\nReviewer A then Reviewer B\n');
+    const report = await SkillInstaller.inspectGuidance(project);
+    expect(report.coherent).toBe(false);
+    expect(report.findings).toContainEqual({ destination: legacy, reason: 'retired-lifecycle' });
+    expect(report.findings).toContainEqual({ destination: '.pi/skills/ralph-loop', reason: 'legacy-skill' });
+    expect(await fs.readFile(path.join(project, legacy), 'utf8')).toContain('yy merge arbiter run');
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it('detects retired nested instructions even when the independent receipt matches', async () => {
+    await SkillInstaller.installRemote(project, { version: '2.0.0' });
+    const destination = '.claude/skills/ralph-loop-yylo/references/implement.md';
+    await fs.outputFile(path.join(project, destination), 'yy merge drive TASK_ID\n');
+    const receiptPath = path.join(project, '.juno_task/runtime/skills-install.json');
+    const receipt = await fs.readJson(receiptPath);
+    const digest = (SkillInstaller as unknown as { directoryDigest(root: string): Promise<string> }).directoryDigest;
+    receipt.digests.claude['ralph-loop-yylo'] = await digest.call(SkillInstaller, path.join(project, '.claude/skills/ralph-loop-yylo'));
+    await fs.writeJson(receiptPath, receipt);
+    const before = await fs.readFile(receiptPath);
+    runner.mockClear();
+    expect(await SkillInstaller.inspectGuidance(project)).toMatchObject({
+      coherent: false,
+      findings: [{ destination, reason: 'retired-lifecycle' }],
+    });
+    expect(await fs.readFile(receiptPath)).toEqual(before);
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it('reports modified, missing and unverified skills without replacing bytes', async () => {
+    await SkillInstaller.installRemote(project, { version: '2.0.0' });
+    const root = '.pi/skills/ralph-loop-yylo';
+    await fs.outputFile(path.join(project, root, 'references/local.md'), 'owner bytes');
+    await fs.remove(path.join(project, '.agents/skills/wiki-yylo'));
+    const receiptPath = path.join(project, '.juno_task/runtime/skills-install.json');
+    const receipt = await fs.readJson(receiptPath);
+    delete receipt.digests.claude['wiki-yylo'];
+    await fs.writeJson(receiptPath, receipt);
+    runner.mockClear();
+    const report = await SkillInstaller.inspectGuidance(project);
+    expect(report.findings).toEqual(expect.arrayContaining([
+      { destination: root, reason: 'receipt-drift' },
+      { destination: '.agents/skills/wiki-yylo', reason: 'receipt-drift' },
+      { destination: '.claude/skills/wiki-yylo', reason: 'unverified' },
+    ]));
+    expect(await fs.readFile(path.join(project, root, 'references/local.md'), 'utf8')).toBe('owner bytes');
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it('refuses unsafe nested paths and bounds local inspection', async () => {
+    const root = '.pi/skills/ralph-loop';
+    await fs.ensureDir(path.join(project, root));
+    await fs.symlink(os.tmpdir(), path.join(project, root, 'references'));
+    const oversized = '.claude/skills/ralph-loop';
+    await fs.outputFile(path.join(project, oversized, 'SKILL.md'), 'x'.repeat(1024 * 1024 + 1));
+    const report = await SkillInstaller.inspectGuidance(project);
+    expect(report.findings).toEqual(expect.arrayContaining([
+      { destination: root, reason: 'unsafe-or-unreadable' },
+      { destination: oversized, reason: 'unsafe-or-unreadable' },
+    ]));
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it('does not reinterpret historical evidence or unrelated project skills as current policy', async () => {
+    await fs.outputFile(path.join(project, '.juno_task/wiki/history.md'), 'yy merge arbiter run TASK_ID');
+    await fs.outputFile(path.join(project, '.pi/skills/project-owned/SKILL.md'), 'yy merge drive TASK_ID');
+    expect(await SkillInstaller.inspectGuidance(project)).toEqual({ coherent: true, version: null, findings: [] });
+    expect(runner).not.toHaveBeenCalled();
+  });
+
   it('resolves latest stable SemVer and installs the exact seven targeted skills', async () => {
     const result = await SkillInstaller.installRemote(project);
     expect(result).toEqual({ changed: true, version: 'v2.0.0', acquisition: 'npx' });
