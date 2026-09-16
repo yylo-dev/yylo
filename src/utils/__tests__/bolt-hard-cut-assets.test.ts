@@ -98,7 +98,8 @@ describe('Bolt shipped hard cut', () => {
     for (const file of surfaces) {
       const text = readFileSync(file, 'utf8');
       expect(text, file).toContain('yy task preflight TASK_ID');
-      expect(text, file).toContain('REVIEW_FINDINGS_EXHAUSTED');
+      expect(text, file).toContain('yy merge land TASK_ID');
+      expect(text, file).not.toContain('REVIEW_FINDINGS_EXHAUSTED');
       expect(text, file).not.toContain('launch a fresh read-only independent `yy pi` review');
     }
 
@@ -142,6 +143,7 @@ describe('Bolt shipped hard cut', () => {
     const workflowRunner = readFileSync(join(sourceRoot, 'scripts/workflow_runner.sh'), 'utf8');
     expect(workflowRunner).not.toMatch(/yy lifecycle(?:\s|`)/i);
     expect(workflowRunner).toContain('yy task start TASK_ID');
-    expect(workflowRunner).toContain('yy merge next');
+    expect(workflowRunner).toContain('yy merge land TASK_ID');
+    expect(workflowRunner).not.toContain('yy merge next');
   });
 });

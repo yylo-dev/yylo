@@ -430,18 +430,18 @@ describe('ExecutionEngine', () => {
     });
 
     it('should include prompt macro warnings in instruction-resolved event payload', async () => {
-      const request = makeRequest({ instruction: 'Run @@unknown now' });
+      const request = makeRequest({ instruction: 'Run @@unk now' });
       const onInstructionResolved = vi.fn();
       engine.on('iteration:instruction-resolved', onInstructionResolved);
 
       mocks.resolvePromptMacros.mockReturnValue({
-        resolvedPrompt: 'Run @@unknown now',
+        resolvedPrompt: 'Run @@unk now',
         warnings: [
           {
             code: 'unresolved',
-            key: 'unknown',
-            token: '@@unknown',
-            message: 'Unresolved prompt macro @@unknown; leaving token unchanged.',
+            key: 'unk',
+            token: '@@unk',
+            message: 'Unresolved prompt macro @@unk; leaving token unchanged.',
           },
         ],
       });
@@ -451,7 +451,7 @@ describe('ExecutionEngine', () => {
       expect(result.status).toBe(ExecutionStatus.COMPLETED);
       const payload = onInstructionResolved.mock.calls[0]?.[0] as Record<string, any>;
       expect(payload.warnings).toEqual([
-        { message: 'Unresolved prompt macro @@unknown; leaving token unchanged.' },
+        { message: 'Unresolved prompt macro @@unk; leaving token unchanged.' },
       ]);
     });
 

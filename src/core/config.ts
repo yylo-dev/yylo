@@ -209,6 +209,17 @@ const EnvironmentBindingSchema = z.object({
   authorized: z.literal(true),
 }).strict().optional();
 
+const HeadlessUiSchema = z
+  .object({
+    turnCostDisplayThresholdUsd: z
+      .number()
+      .finite()
+      .nonnegative()
+      .default(0.5)
+      .describe('Show authoritative per-turn cost above this USD threshold'),
+  })
+  .strict();
+
 const AgentProfileSchema = z
   .object({
     version: z.literal(1),
@@ -227,7 +238,7 @@ export const METADATA_CONTROLLER_CONFIG_FIELD_OWNERSHIP = {
     'defaultModels', 'workflowModels', 'mainTask', 'logLevel', 'logFile', 'verbose',
     'quiet', 'mcpTimeout', 'mcpRetries', 'mcpServerPath', 'mcpServerName',
     'hookCommandTimeout', 'onHourlyLimit', 'interactive', 'headlessMode',
-    'kanbanRegistry', 'promptMacros', 'modelShortcuts',
+    'kanbanRegistry', 'promptMacros', 'modelShortcuts', 'headlessUi',
   ],
   productOnly: ['workingDirectory', 'sessionDirectory', 'gitFlow', 'autoDependencyUpdate', 'hooks', 'skipHooks'],
   secret: ['envFilePath', 'envFileCopied'],
@@ -307,6 +318,8 @@ export const JunoTaskConfigSchema = z
       .refine((values) => new Set(values).size === values.length, 'workflow model selectors must be unique')
       .optional()
       .describe('Exact provider/model selectors approved for explicit managed workflow use'),
+
+    headlessUi: HeadlessUiSchema.default({ turnCostDisplayThresholdUsd: 0.5 }),
 
     // Project metadata
     mainTask: z.string().optional().describe('Main task objective for the project'),
@@ -462,6 +475,7 @@ export function createPersistedProjectConfigDefaults(baseDir: string): Record<st
     defaultMaxIterations: 1,
     defaultModels: { ...SUBAGENT_DEFAULT_MODELS },
     workflowModels: [],
+    headlessUi: { turnCostDisplayThresholdUsd: 0.5 },
     logLevel: 'info',
     verbose: 1,
     quiet: false,
@@ -1219,6 +1233,47 @@ async function loadAuthorizedProfileEnvironment(binding: { source: string; autho
   }
 }
 
+/**
+ * Load the controller-root `.env.yylo` as an ambient environment source.
+ *
+ * Metadata controllers without an explicit `agentProfile.environmentBinding`
+ * still expect their root env file to participate in env precedence. The
+ * ambient file must pass the same safety checks as an authorized binding: a
+ * regular non-symlink file with mode 0600. A missing file is a silent no-op
+ * (metadata mode never manufactures env files); an existing but unsafe file
+ * warns once and is skipped so a stray permission change cannot hard-fail
+ * every controller command.
+ */
+async function loadAmbientControllerEnvironment(controllerDir: string): Promise<void> {
+  const source = path.join(controllerDir, DEFAULT_PROJECT_ENV_FILE);
+  let handle: fsPromises.FileHandle | undefined;
+  const ambientWarn = (error: unknown): void => {
+    console.warn(
+      `Warning: ambient controller environment ${source} exists but is unsafe or unreadable and was not loaded: ${error}`,
+    );
+  };
+  try {
+    handle = await fsPromises.open(source, nodeFs.constants.O_RDONLY | nodeFs.constants.O_NOFOLLOW);
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) {
+      throw new Error('source is not a regular file');
+    }
+    if ((metadata.mode & 0o077) !== 0) {
+      throw new Error('source must have mode 0600');
+    }
+    const parsed = parseEnvFileContent(await handle.readFile('utf8'));
+    for (const [key, value] of Object.entries(parsed)) process.env[key] = value;
+  } catch (error) {
+    // A missing ambient file is an ordinary controller without secrets:
+    // nothing to load and nothing to report. Any other defect (symlink,
+    // non-regular file, wider mode, unreadable bytes) stays visible as one
+    // warning instead of silently dropping configured secrets.
+    if ((error as { code?: string }).code !== 'ENOENT') ambientWarn(error);
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
 async function readMetadataAgentProfile(baseDir: string): Promise<
   { metadata: true; profile: JunoTaskConfig['agentProfile'] } | undefined
 > {
@@ -1620,12 +1675,15 @@ export async function loadConfig(
     return validateConfig(merged);
   };
 
-  // Metadata controllers never load an ambient/default env file. Only a
-  // reviewed explicit 0600 regular-file binding participates in precedence.
+  // Metadata controllers load reviewed explicit environment authority first.
+  // Without an explicit binding, the controller-root `.env.yylo` participates
+  // as an ambient source only while it stays a safe regular 0600 file.
   if (metadataAgentProfile?.environmentBinding) {
     await loadAuthorizedProfileEnvironment(metadataAgentProfile.environmentBinding);
   } else if (!metadataSource) {
     await ensureAndLoadProjectEnv(profileDir, false);
+  } else {
+    await loadAmbientControllerEnvironment(profileDir);
   }
   let resolved = await resolveConfig();
 

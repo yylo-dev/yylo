@@ -1,259 +1,123 @@
 ---
 wiki_contract:
-  line_limit: 260
-  purpose: "Run exact-base task worktrees and one fenced per-target delivery owner."
-  failure_mode_prevented: "Controller edits, stale-worker takeover, model polling, and unsafe target movement."
-  runtime_contract_enforced: "yy task owns feature worktrees; one yy merge arbiter owns composition and expected-old-SHA CAS."
+  line_limit: 220
+  purpose: "Run exact-base task worktrees and land one selected task with native Git."
+  failure_mode_prevented: "Controller edits, stale-worker takeover, FIFO blocking, hidden model review, and unsafe target movement."
+  runtime_contract_enforced: "yy task owns feature worktrees; yy merge selects one task, uses native Git composition and expected-old ref update, then projects Ledger separately."
   validation_gate: "python3 .juno_task/scripts/tests/test_task_workspace.py && python3 .juno_task/scripts/tests/test_merge_queue.py"
-  related_sots:
-    - "controller/fenced_task_leases.md"
-    - "controller/target_arbiter.md"
-    - "controller/sealed_release_epochs.md"
 ---
 
-# Bolt task worktrees and merge queue
+# Task worktrees and native Git delivery
 
-The controller is a metadata store. It contains Kanban/task truth and compact
-receipts, not product code. Runtime scripts are installed from one versioned
-YYLO package and are not synchronized through product history.
+The controller is a metadata store. Product edits happen only in exact-base task
+worktrees. Delivery selects one immutable task source; there is no FIFO queue
+drive, target arbiter, merge-owned test/review/model loop, or automatic repair.
 
 ```text
-metadata controller
-  +-- yy task start X --> product worktree X -- implement/test/commit --+
-  +-- yy task start Y --> product worktree Y -- implement/test/commit --+--> queue
-                                                                          |
-                                                   one target lock + expected-SHA CAS
-                                                                          |
-                                             moved target -> compose; conflict -> preserve
-                                                                          |
-                                                           verify identity -> MERGED
+yy task start X -> edit/test/commit -> preflight -> finish -> QUEUED
+                                                        |
+yy merge land X -> private native Git candidate -> expected-old update
+                                                        |
+                                  automatic lifecycle projection -> Ledger
+                                  (`yy merge project X` retries projection)
 ```
 
 ## Public commands
 
 ```text
-yy task start TASK_ID                    # baseline/default paths (including juno-code)
-yy task start TASK_ID --path juno_kanban  # add a selectable root; repeat for more
+yy task start TASK_ID
 yy task status TASK_ID
+yy task admission TASK_ID
 yy task preflight TASK_ID
-yy task checkpoint TASK_ID
-yy task finish TASK_ID
+yy task finish TASK_ID --lease-token <current-token>
 
-yy task start UMBRELLA_ID --umbrella-admission umbrella.json
-yy task child-checkpoint UMBRELLA_ID CHILD_ID
-yy task status CHILD_ID   # -> TRACKING_ONLY with owner and current-child truth
-
-yy task runtime-bootstrap --dry-run
-# review the printed immutable receipt
-yy task runtime-bootstrap --apply RECEIPT
-
-yy merge status                 # read-only queue observation
-yy merge arbiter status         # read-only owner/next-action observation
-yy merge arbiter run            # explicit fenced on-demand mutation
-yy merge drive --through TASK_ID # explicit typed mutation
-yy merge next                   # explicit single-step recovery
-yy merge resolve TASK_ID        # explicit preserved-conflict recovery
+yy merge status [TASK_ID]       # read-only independent task status
+yy merge land TASK_ID           # compose and land one task; no tests/reviews/models
+yy merge project TASK_ID        # retry or repair Ledger projection after Git integration
 ```
 
-Task start always admits the policy's baseline/default paths and freezes the
-exact configured product target SHA. Omit `--path` for ordinary Juno Code work;
-`juno-code` is already in baseline scope and is not a selectable value. Use
-repeatable `--path` only to add roots listed by the policy's `selectable_paths`,
-such as `juno_kanban` or `frontend`. Task start then creates one branch/worktree.
-Before editing or testing there, the worker follows [task dependency hydration](task_dependency_hydration.md)
-for each configured validation cwd and stops on provisioning or clean-tree
-failure. Runtime identity is validated before any Juno-specific generated-output
-admission. Task preflight is read-only and checks the clean committed tip,
-admitted changed paths, generated-output closure, risk policy, and runtime
-identity before expensive final gates. Task finish repeats that closure,
-persists it, and runs focused validation before queueing. Focused rows without a
-`resource` declaration run in independent concurrent lanes. Rows declaring the
-same bounded `resource.id`, absolute `lock_path`, and `wait_timeout_seconds` run
-once in policy order on one exclusive lane; resource wait precedes and never
-consumes each row's operation `timeout_seconds`. Receipts retain bounded owner
-and wait diagnostics, lane position, and critical-path contribution. A terminal
-failure persists the complete schedule and is not automatically retried against
-an unchanged candidate. Independent features can remain active concurrently.
-Project classification is explicit: a source repository whose
-`juno-code/package.json` names `yylo` must provide both authoritative,
-strict declarations; an ordinary consumer without that package identity has no
-Juno-source declaration requirement.
+`task start` freezes the target and runs exact-lock hydration before reporting
+`WORKING`. In the returned worktree, follow
+[task dependency hydration](task_dependency_hydration.md) before editing or
+testing and stop before implementation on failure. `preflight` is read-only;
+`finish` admits the clean immutable source after configured task validation.
 
-If start reports a stale or absent ordinary consumer target task runtime,
-`scripts update` refreshes only controller-local bytes and is not the recovery.
-Run `yy task runtime-bootstrap --dry-run`, review the immutable
-package/controller/target/path receipt, then apply that exact receipt. An absent
-consumer runtime is recoverable; a present one additionally requires an exact
-managed-inventory hash/version binding to an older package generation. Recovery
-updates the runtime and its inventory entry's version/hashes together while
-preserving the inventory-wide package version and validated unrelated entries. A Juno source
-target is deliberately refused: use a controller package/runtime matching a
-coherent newer target, or update an older source package, template, tracked
-runtime, and managed inventory atomically. This command is restricted to
-the exact registered, sparse metadata-controller class and refuses
-synthetic/product/task worktrees. Apply uses a clean isolated target worktree,
-creates a reviewed recovery commit and durably records its apply intent. Before mutation it discovers
-all exact target-ref holders under the merge queue's repository/target-ref lock.
-Every advancement uses expected-SHA CAS. With one exact clean unlocked holder,
-the planned-path index/worktree state is prepared with Git's non-destructive merge
-mode and revalidated before CAS; concurrent dirt refuses rather than being reset,
-and no post-CAS operation can overwrite it. With no holder, a package-owned clean
-guard checkout holds the branch until immediately before durable completion. Dirty, locked, moved,
-or multiple holders refuse before mutation with a supported clean,
-unlock, or reviewed extra-worktree removal action. An exact package-created
-partial synchronization refuses with a bounded restore command for only the
-planned paths; review and run it before rerunning the same receipt. Fully prepared
-holder or completion interruptions recover directly; the durable intent prevents
-another commit or unrelated ref mutation. Modified or completed
-receipts, package mismatch, non-older inventory generations, and consumer target
-customization without exact managed-inventory provenance also refuse.
+`merge land` resolves only the selected task. It composes in a private detached
+candidate and updates an unchecked-out target with Git expected-old protection.
+If the target is checked out, delivery refuses rather than changing its ref
+behind an index/worktree. If the target moves, recompose and rerun checks for the
+new candidate; there is no unbounded retry. A conflict remains private to that
+task and does not block an unrelated task.
 
-One on-demand target arbiter serializes mutation with a fencing token, per-target
-kernel lock, and expected-old-SHA update, then exits when idle or blocked. Lease
-age alone never transfers ownership: successor attempts require controller proof
-of producer death or explicit handoff. Agents observe rather than poll. Dirty
-conflict bytes are preserved for one bounded managed repair. Exact complete-input
-closures may be reused; drift restarts only the smallest invalid stage.
+Tests and semantic reviews are explicit project policy outside merge. The merge
+adapter launches zero models, selects no reviewer, schedules no suite, and owns
+no evidence cache. A native Git source already contained in target is ancestry
+evidence only; it is not a claim that tests, review, or requirements passed.
 
-Review is queue-owned and risk-based: low zero, normal at most one, and high
-Reviewer A followed by Reviewer B against the same frozen candidate under the
-compatible v1 predecessor-bound receipt contract. The queue permits one repair
-candidate and one delta review group; another material
-finding stops as `REVIEW_FINDINGS_EXHAUSTED` instead of spawning an autonomous
-loop. A changed product candidate invalidates prior semantic evidence, while a
-byte-identical metadata/harness retry may reuse evidence only when all bound
-policy/runtime/closure identities remain exact. After CAS, only deterministic identity/readback and bounded smoke checks run.
-Release waves close admission explicitly and compose every eligible pre-cutoff
-candidate into one private history-preserving epoch; one aggregate gate and one
-protected-target CAS produce read-only release readiness.
+`merge land` projects Ledger immediately after Git success. If projection fails,
+Git remains integrated and the command reports `merge project` as recovery. A
+failed `merge project` leaves the Git result intact and retryable, never repeats
+integration, and never
+blocks another task's land. Historical queue, review, candidate, and CAS receipts
+remain immutable data; no supported command executes or resumes their retired
+engine.
 
-Cleanup refuses unless the delivered commit is reachable and the task worktree
-is safe to remove. Push, release, publication, deployment, production mutation,
-restart, and post-deploy E2E are never implied by merge completion.
+## Manual tokens and managed recovery
 
-Historical local-integration receipts remain readable by Workflow Runner doctor.
-Their executors are retired and must not be adapted into the Bolt path.
-
-## Umbrella-owned sequential children
-
-Approved consolidated delivery may admit one umbrella worktree that executes
-ordered tracking-only children sequentially. `yy task start UMBRELLA_ID
---umbrella-admission umbrella.json` freezes the immutable ordered child set,
-each child's exact scope, the union admission, and the exact base before any
-Git mutation. Children never receive their own worktree, branch, start,
-preflight, finish, or checkpoint: reservations refuse those calls with the
-owning umbrella and the exact recovery command, and child status reports
-`TRACKING_ONLY` with owner, completed, current, and remaining children.
-
-After each child's coherent committed increment on the umbrella worktree,
-record it with `yy task child-checkpoint UMBRELLA_ID CHILD_ID`. The checkpoint
-requires a clean worktree, a new commit chained from the previous child's tip,
-and changed paths inside that child's frozen scope; it appends an immutable
-`juno_task_umbrella_child_checkpoint.v1` entry naming base, tip, changed paths,
-and the frozen child binding. Only the current child may be checkpointed, so
-interruption or crash resumes at exactly the first incomplete child while
-completed child evidence stays durable. Preflight, finish, and merge continue
-to validate the whole union; scope or order drift fails closed. Legacy
-umbrellas admitted before start-time child-union admission recover only
-through the reviewed `recovery-plan`/`recovery-authorize`/`recovery-apply`
-supersession path.
-
-## Checkout-aware entry points
-
-The same installed `yy` command can start in the controller, integration owner,
-task worktree, or a nested directory. Shared Git registration binds those
-checkouts to one exact controller path/ref and product target; routing happens
-before checkout-local bootstrap. The caller's checkout is never switched,
-cleaned, stashed, or made authoritative by inference.
+`start` and `lease-successor` return a `lease_token` once. Store it privately;
+never paste it into task evidence, logs, or shell history. The placeholders below
+mean the exact token from that command's response, not literal argument text.
 
 ```text
-invocation directory
-  +-- controller ---------+
-  +-- integration owner --+--> controller router --> Kanban/task/merge runtime
-  +-- task worktree ------+
-  +-- nested directory ---+
-
-product bytes
-  +-- task worktree ------> edit, focused test, commit
-  +-- integration owner --> synced read/debug/server checkout
+yy task start TASK_ID
+# retain its returned token, then implement/test/commit in the returned worktree
+yy task preflight TASK_ID
+yy task finish TASK_ID --lease-token <returned-token>
 ```
 
-Use `yy info --json` for stable machine-readable topology, `yy where
-controller|integration|target|task` for one script-safe path, and `yy doctor
-workspace` for offline health/refusal guidance. Missing, stale, dirty, attached,
-or ambiguous integration ownership fails closed.
+A helper's exit does not invalidate its token. An ACTIVE attempt's exact current
+token admits manual gated commands even if `lease-status` reports
+`lease_producer_dead`. Status observes without a token; it does not test bearer
+authority. Reuse your current token rather than issuing another successor.
 
-Existing admitted workspaces may retain a historical
-`.juno_task/scripts/install_requirements.sh` that writes
-`.juno_task/.version_check_cache` inside the checkout. `yy integration status`
-and `yy integration runtime-doctor` report both exact paths separately. A
-receipt-bound runtime transition may replace the writer only when its bytes
-match immutable target history. A tracked cache is never restored or deleted
-automatically: remove it in a normal product task, validate the protected
-worktrees byte-stable, and deliver that commit through `yy task`/`yy merge`.
-If that delivered target leaves a clean, detached, full registered owner stale
-with only these two findings, `yy integration repair --dry-run` may emit the
-narrow `stale_owner_legacy_cache_migration.v1` disposition. It binds the old
-HEAD/tree/role base, exact target SHA/tree, finding-removal evidence, protected
-authority, and a topology-preserving recursive gitlink closure. Gitlink SHAs may
-advance, but every target object must already exist locally. Apply revalidates
-the receipt under the target lock, advances only the bound owner and role base,
-hydrates with `--no-fetch`, and requires an exact clean final readback. Any other
-finding, dirt, topology change, unavailable object, authority mismatch, or ref
-drift refuses; this is not a generic blocker bypass.
-
-## Integration owner lifecycle
+If the token is lost and the controller proves the predecessor ended:
 
 ```text
-status [--fetch]
-       |
-       v
-sync: guard -> fetch -> verify target -> fast-forward -> exact submodules
-       |
-       +--> healthy: inspect/debug/start local server here
-       +--> refusal: repair --dry-run -> review receipt -> repair --apply RECEIPT
-
-publication: push --------------------------------------------> plan + apply under one lock
-             push --dry-run -> optional review -> push --apply RECEIPT
-             child repositories first -----------------------> root last
+yy task lease-successor TASK_ID
+# retain the NEW returned token; at the unchanged clean base:
+yy task start TASK_ID --lease-token <returned-token>
+# pass that same token to subsequent gated commands, such as finish
 ```
 
-Repair never discards local work, and push never follows from sync or repair
-authority. Bare `yy integration push` is explicit publication authority and
-internally persists then applies one exact plan; dry-run/apply remain available
-for delayed or audited publication. Every apply binds its plan receipt to exact topology and SHAs,
-rechecks readiness under a lock, and records partial-failure truth for safe
-retry. Package publication, deployment, production mutation, and post-deploy
-E2E remain outside these commands.
+After edits or commits, retry the original gated command with the new token,
+not `start`: start reentry independently requires the unchanged clean base.
+Bare `lease-successor` followed by tokenless `start` is not a supported manual
+sequence. `clean_resume` describes worktree bytes, not hydration/validation
+clearance. Wrong or superseded tokens refuse; expiry alone grants no takeover.
+Live or unknown producers require the current token, an exact holder handoff
+(`lease-successor --handoff-receipt <path>`), or separately authorized operator
+revoke. Never infer that authority from an error's suggested command.
 
-## Observable nonblocking execution
+For **authorized managed execution**, use `yy task run TASK_ID` or its alias
+`yy task resume TASK_ID` instead. The continuing managed process acquires a
+receipt-bound successor after proven predecessor death and carries the token
+internally; no user-supplied token is needed. This may launch workers, not just
+repair ownership. Existing terminal-run, hydration, dirty-worktree, identity,
+and budget restrictions still apply; neither command resets budgets or repairs
+unrelated blockers. Do not run standalone successor first for managed execution.
 
-Use `@@life_cycle TASK_IDS_OR_GOAL` to load the versioned orchestration contract.
-For example, `yy pi -p '@@life_cycle T1 then T2; stop before release'` preserves
-the caller payload once while directing work through canonical `yy` lifecycle
-commands.
+## Runtime and controller recovery
 
-For every long-running agent, finish, merge, or authorized release command,
-create a private task-ID `mktemp -d` run directory and place distinct log, PID,
-and footer files inside it. Capture combined stdout and stderr, keep the producer
-timeout-bounded, atomically publish its PID immediately, and atomically rename a
-strict `juno.watch-footer.v1` footer immediately after exit. Resolve
-`controller_root=$(yy where controller)` and invoke the absolute
-`$controller_root/.juno_task/scripts/watch_progress.py` path rather than a
-checkout-relative script or rewritten polling loop. Its producer example,
-JSONL/raw-payload framing, and footer/PID identity contract are in the watching
-progress guidance (`yy_pi_progress.md`). A quiet process doing real-Git or test work is
-active until PID/process evidence or a valid terminal footer proves completion;
-log silence alone is never a hang signal. Report exact exit, elapsed duration,
-and run-directory paths. This pattern adds observation only; Workflow Runner and
-the managed-agent runner remain the execution owners.
+Controller runtime bytes are package-bound. For an ordinary consumer with an
+older managed runtime, use the receipt-bound `yy task runtime-bootstrap` flow.
+A Juno source target requires an exact package artifact/runtime matching the
+source generation, explicit controller rebind, and exact target-transition
+runtime refresh. These are maintenance authorities, not task delivery, and must
+not publish, push, deploy, or mutate the product ref.
 
-Independent review is fresh and read-only against one frozen committed diff.
-Task finish, merge/CAS, integration repair/push receipts, release build/tag/global
-verification, and push/publish/deploy authorities remain separate boundaries.
+## Preservation and exclusions
 
-Agent orchestration instructions and core skills are ignored installed assets in
-the controller. Product/domain instructions and skills are tracked in product
-history and materialized in task worktrees. A controller symlink inside the
-integration owner is intentionally unnecessary and unsafe for search/staging;
-use `yy where controller` when an agent or script needs the exact path.
+Never reset, stash, force, rebase, squash, or clean to manufacture compliance.
+Preserve dirty/conflicted worktrees, source commits, and historical receipts.
+Task completion and Git ancestry grant no package release, tag, push,
+publication, deployment, production mutation, or cleanup authority.

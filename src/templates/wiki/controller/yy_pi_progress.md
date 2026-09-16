@@ -9,7 +9,7 @@ Do not assemble a producer with heredocs and do not use `sleep; tail` polling.
 
 ```text
 new command you own       -> yy watch exec -- COMMAND...
-already detached watch run -> yy watch status RUN_ID / yy watch await RUN_ID
+already detached watch run -> yy watch status RUN_ID / yy watch follow RUN_ID / yy watch await RUN_ID
 coherent task checkpoint   -> yy task checkpoint TASK_ID; yy evidence run TASK_ID
 waiting for task evidence  -> yy evidence await TASK_ID
 external one-shot blocker  -> await_blocker.py --then ...
@@ -41,6 +41,34 @@ yy watch await "$run_id"
 code. Timeout or interruption sends TERM and then bounded KILL only to the owned
 process group. Unrelated process groups are never cleanup targets.
 
+## Read-only log follower
+
+`follow` reads `combined.log` from byte zero, follows appended bytes, and returns
+the producer exit code only after observing the exact atomic footer. It never
+signals or acquires ownership of the producer. Ctrl-C exits only the follower.
+Malformed or missing footers are not terminal truth.
+
+```bash
+# Direct terminal or tmux pane: semantic ANSI when stdout is a TTY
+yy watch follow "$run_id"
+tmux split-window -h "yy watch follow '$run_id'"
+
+# Stable plain semantic layout
+NO_COLOR=1 yy watch follow "$run_id"
+yy watch follow "$run_id" | cat
+
+# Raw log access remains available without presentation
+tail -F ".juno_task/runtime/watch-runs/$run_id/combined.log"
+cat ".juno_task/runtime/watch-runs/$run_id/combined.log"
+```
+
+The follower colors only exact `[THINKING]`, `[TOOL]`, `[INPUT]`,
+`[TOOL_RESPONSE]`, `[ANSWER]`, and `[STATUS]` grammar. A tool response is red
+only when its enclosing compact tool metadata contains structured
+`"isError":true`; arbitrary words such as `error`, `failed`, or `blocked` do
+not select error styling. Unknown tags, malformed metadata, and non-Pi logs pass
+through unchanged. `NO_COLOR` and pipes preserve the same text and spacing.
+
 ## Task validation evidence
 
 A task is the unit of intent and may contain several commits. A commit is not
@@ -59,8 +87,8 @@ tip, tree, changed paths, command, dependency locks, controller policy, runtime,
 and local runner class. Unknown or mixed ownership falls back conservatively.
 A later tip reuses a command only when its complete input closure remains exact.
 `yy task finish` creates the final checkpoint, reuses valid receipts, runs only
-missing commands, and binds the receipts into the review-ready closure. The
-merge queue re-verifies those receipts before expensive admission.
+missing commands, and binds the receipts into the immutable task closure. Tests
+and semantic review end here; native delivery does not rerun or reinterpret them.
 
 ## Terminal files
 
@@ -95,18 +123,18 @@ strict observer for a pre-existing producer. It never signals that producer.
 New producers should use `yy watch exec` so PID publication, logging, footer
 publication, timeout handling, and descendant settlement are not hand-written.
 
-## Managed task and merge drivers
+## Managed task execution and native delivery
 
-Use `yy task run TASK_ID` for the controller-owned typed implementation path and
-`yy merge drive --through TASK_ID` for the frozen FIFO delivery path. Both write
-compact projections and immutable artifacts under
-`.juno_task/runtime/lifecycle-runs/`; they stop rather than inherit conflict,
-release, push, deploy, or other external authority. `yy task start|checkpoint|
-preflight|finish`, `yy evidence run|status|await`, and `yy merge status|next|
-resolve` remain the diagnostic and explicit recovery primitives.
+Use `yy task run TASK_ID` for the controller-owned typed implementation path.
+After it queues the immutable source, observe `yy merge status TASK_ID`, run
+`yy merge land TASK_ID`, then separately run `yy merge project TASK_ID`. Merge
+has no managed driver, FIFO scope, lifecycle YAML, model prompt, review, repair,
+or validation scheduler. It preserves a private conflict and refuses stale
+target updates rather than inheriting release, push, deploy, or other external
+authority.
 
-Lifecycle YAML and prompts are controller-owned committed assets. A run freezes
-the controller commit, raw/semantic template digest, prompt digests, compiler,
+Task lifecycle YAML and prompts are controller-owned committed assets. A task
+run freezes the controller commit, template and prompt digests, compiler,
 runtime, model, and budget identities. Customized assets are preserved by
 ordinary managed updates, active attempts are immutable, and automatic
 model-authored template or prompt mutation is refused.

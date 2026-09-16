@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 import signal
@@ -286,6 +287,107 @@ class WatchProgressTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertAlmostEqual(clock.sleeps[0], 0.02, places=6)
         self.assertNotIn(0.1, clock.sleeps)
+
+    def write_run(self, run_id="run-1"):
+        run_dir = self.root / run_id
+        run_dir.mkdir()
+        (run_dir / "run.json").write_text(json.dumps({
+            "schema_version": "juno.watch-run.v1", "run_id": run_id, "state": "RUNNING"
+        }))
+        return run_dir
+
+    def follow_command(self, run_id="run-1"):
+        return [sys.executable, str(SCRIPT), "follow", "--root", str(self.root), run_id]
+
+    def test_follow_completed_run_from_start_and_propagates_footer_exit(self):
+        run_dir = self.write_run()
+        content = b"before\n[ANSWER] {\"id\":1,\"time\":\"12:00:00\"}\n  done\n[/ANSWER]\n"
+        (run_dir / "combined.log").write_bytes(content)
+        (run_dir / "footer").write_bytes(VALID_FOOTER)
+        result = subprocess.run(self.follow_command(), capture_output=True, timeout=2)
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertEqual(result.stdout, content)
+
+    def test_follow_live_run_emits_each_appended_byte_once(self):
+        run_dir = self.write_run()
+        log = run_dir / "combined.log"
+        log.write_bytes(b"first")
+        follower = subprocess.Popen(self.follow_command(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        time.sleep(0.1)
+        with log.open("ab") as handle:
+            handle.write(b" line\nsecond\n"); handle.flush()
+        self.atomic_write(run_dir / "footer", VALID_FOOTER.replace(b"exit_code=7", b"exit_code=0"))
+        stdout, stderr = follower.communicate(timeout=2)
+        self.assertEqual(follower.returncode, 0, stderr)
+        self.assertEqual(stdout, b"first line\nsecond\n")
+
+    def test_semantic_formatter_colors_exact_tags_and_structured_errors_only(self):
+        watcher = load_watcher()
+        stream = io.StringIO()
+        formatter = watcher.SemanticFollowFormatter(stream, color=True)
+        formatter.feed(
+            b'[TOOL] {"id":1,"tool":"bash","status":"done"}\n'
+            b'[TOOL_RESPONSE]\n  error failed blocked\n[/TOOL_RESPONSE]\n[/TOOL]\n'
+            b'[TOOL] {"id":2,"tool":"bash","status":"error","isError":true}\n'
+            b'[TOOL_RESPONSE]\n  no\n[/TOOL_RESPONSE]\n[/TOOL]\n', final=True)
+        output = stream.getvalue()
+        first, second = output.split('\x1b[2m\x1b[3m[TOOL]', 2)[1:]
+        self.assertNotIn(watcher.ANSI_ERROR, first)
+        self.assertIn(watcher.ANSI_RESPONSE, first)
+        self.assertIn(watcher.ANSI_ERROR, second)
+
+    def test_semantic_formatter_styles_thinking_input_answer_and_strips_embedded_ansi(self):
+        watcher = load_watcher()
+        stream = io.StringIO()
+        formatter = watcher.SemanticFollowFormatter(stream, color=True)
+        formatter.feed(
+            b'[THINKING] {"id":1,"time":"12:00:00"}\n  think\n[/THINKING : 0.10s]\n'
+            b'[TOOL] {"id":2,"tool":"bash","status":"running"}\n[INPUT]\n  \x1b[31mecho hi\x1b[0m\n[/INPUT]\n[/TOOL]\n'
+            b'[ANSWER] {"id":3,"time":"12:00:01"}\n  yes\n[/ANSWER]\n', final=True)
+        output = stream.getvalue()
+        self.assertIn(watcher.ANSI_DIM_ITALIC + "  think", output)
+        self.assertIn(watcher.ANSI_INPUT + "  echo hi", output)
+        self.assertIn(watcher.ANSI_ANSWER + "  yes", output)
+        self.assertNotIn("\x1b[31m", output)
+
+    def test_malformed_unknown_and_arbitrary_logs_pass_through(self):
+        watcher = load_watcher()
+        raw = "ordinary error text\n[UNKNOWN] x\n[TOOL] not-json\n"
+        stream = io.StringIO()
+        watcher.SemanticFollowFormatter(stream, color=True).feed(raw.encode(), final=True)
+        self.assertEqual(stream.getvalue(), raw)
+
+    def test_follow_waits_for_strict_footer_and_interrupt_does_not_signal_producer(self):
+        run_dir = self.write_run()
+        (run_dir / "combined.log").write_text("waiting\n")
+        (run_dir / "footer").write_text("malformed\n")
+        producer = self.producer()
+        follower = subprocess.Popen(self.follow_command(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        time.sleep(0.15)
+        self.assertIsNone(follower.poll())
+        follower.send_signal(signal.SIGINT)
+        stdout, stderr = follower.communicate(timeout=2)
+        self.assertEqual(follower.returncode, 130, stderr)
+        self.assertEqual(stdout, b"waiting\n")
+        self.assertIsNone(producer.poll())
+
+    def test_exec_then_follow_deterministic_multiline_semantic_fixture(self):
+        fixture = (
+            '[THINKING] {"id":1,"time":"12:00:00"}\n  plan\n[/THINKING : 0.10s]\n\n'
+            '[TOOL] {"id":2,"tool":"bash","status":"done","duration":"0.08s"}\n'
+            '[INPUT]\n  printf a\n  printf b\n[/INPUT]\n'
+            '[TOOL_RESPONSE]\n  a\n  b\n[/TOOL_RESPONSE]\n[/TOOL]\n\n'
+            '[ANSWER] {"id":3,"time":"12:00:01"}\n  done\n[/ANSWER]\n'
+        )
+        executed = subprocess.run([
+            sys.executable, str(SCRIPT), "exec", "--root", str(self.root), "--",
+            sys.executable, "-c", f"import sys;sys.stdout.write({fixture!r})",
+        ], capture_output=True, text=True, timeout=3)
+        self.assertEqual(executed.returncode, 0, executed.stderr)
+        record = json.loads(executed.stdout)
+        followed = subprocess.run(self.follow_command(record["run_id"]), capture_output=True, text=True, timeout=2)
+        self.assertEqual(followed.returncode, 0, followed.stderr)
+        self.assertEqual(followed.stdout, fixture)
 
     def test_documented_private_run_directories_are_concurrently_isolated(self):
         command = 'mktemp -d "${TMPDIR:-/tmp}/yy-TASK_ID-run.XXXXXX"'

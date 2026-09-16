@@ -254,7 +254,6 @@ describe('ScriptInstaller', {
         'migration_inventory.py',
         'operation_snapshot.py',
         'release_gate.py',
-        'release_train.py',
         'risk_policy.py',
         'target_runtime_provenance.py',
         'task_workspace.py',
@@ -268,7 +267,6 @@ describe('ScriptInstaller', {
         'tests/test_metadata_controller.py',
         'tests/test_operation_snapshot.py',
         'tests/test_release_gate.py',
-        'tests/test_release_train.py',
         'tests/test_risk_policy.py',
         'tests/test_task_workspace.py',
         'tests/test_task_workspace_decisions.py',
@@ -401,8 +399,6 @@ describe('ScriptInstaller', {
         { name: 'integration_workspace.py', installed: false },
         { name: 'merge_queue.py', installed: false },
         { name: 'operation_snapshot.py', installed: false },
-        { name: 'release_train.py', installed: false },
-        { name: 'tests/test_release_train.py', installed: false },
         { name: 'tests/test_task_workspace.py', installed: false },
         { name: 'tests/test_task_workspace_decisions.py', installed: false },
         { name: 'tests/test_integration_workspace.py', installed: false },
@@ -595,8 +591,6 @@ describe('ScriptInstaller', {
       await fs.writeFile(path.join(scriptsDir, 'target_runtime_provenance.py'), '#!/usr/bin/env python3\n');
       await fs.writeFile(path.join(scriptsDir, 'merge_queue.py'), '#!/usr/bin/env python3\n');
       await fs.writeFile(path.join(scriptsDir, 'operation_snapshot.py'), '#!/usr/bin/env python3\n');
-      await fs.writeFile(path.join(scriptsDir, 'release_train.py'), '#!/usr/bin/env python3\n');
-      await fs.writeFile(path.join(scriptsDir, 'tests/test_release_train.py'), '#!/usr/bin/env python3\n');
       await fs.writeFile(path.join(scriptsDir, 'migration_inventory.py'), '#!/usr/bin/env python3\n');
       await fs.writeFile(path.join(scriptsDir, 'metadata_evacuation.py'), '#!/usr/bin/env python3\n');
       await fs.writeFile(path.join(scriptsDir, 'controller_registration.py'), '#!/usr/bin/env python3\n');
@@ -688,8 +682,6 @@ describe('ScriptInstaller', {
         { name: 'integration_workspace.py', installed: true },
         { name: 'merge_queue.py', installed: true },
         { name: 'operation_snapshot.py', installed: true },
-        { name: 'release_train.py', installed: true },
-        { name: 'tests/test_release_train.py', installed: true },
         { name: 'tests/test_task_workspace.py', installed: true },
         { name: 'tests/test_task_workspace_decisions.py', installed: true },
         { name: 'tests/test_integration_workspace.py', installed: true },
@@ -968,16 +960,16 @@ describe('ScriptInstaller', {
       expect(updated).toBe(true);
       expect(await fs.pathExists(path.join(testDir, '.juno_task/scripts/task_workspace.py'))).toBe(true);
       expect(await fs.pathExists(path.join(testDir, '.juno_task/scripts/merge_queue.py'))).toBe(true);
-      // Controller-class lifecycle seeds install on the metadata controller:
-      // compile_lifecycle_template fails closed without these tracked assets.
+      // Only task-run lifecycle seeds remain. Native delivery has no workflow
+      // engine or semantic-repair prompt.
       expect(await fs.pathExists(path.join(testDir, '.juno_task/workflows/yy-task-run.yaml'))).toBe(true);
-      expect(await fs.pathExists(path.join(testDir, '.juno_task/workflows/yy-merge-drive.yaml'))).toBe(true);
+      expect(await fs.pathExists(path.join(testDir, '.juno_task/workflows/yy-merge-drive.yaml'))).toBe(false);
       expect(await fs.pathExists(
         path.join(testDir, '.juno_task/prompts/lifecycle/task-implementation.md'))).toBe(true);
       expect(await fs.pathExists(
         path.join(testDir, '.juno_task/prompts/lifecycle/task-test-repair.md'))).toBe(true);
       expect(await fs.pathExists(
-        path.join(testDir, '.juno_task/prompts/lifecycle/merge-semantic-repair.md'))).toBe(true);
+        path.join(testDir, '.juno_task/prompts/lifecycle/merge-semantic-repair.md'))).toBe(false);
       // Seed installation is scoped: the tracked generation (wiki, prompts,
       // manifest) stays untouched while customized policy blocks it.
       expect(await fs.pathExists(path.join(testDir, '.juno_task/wiki'))).toBe(false);
@@ -1013,7 +1005,7 @@ describe('ScriptInstaller', {
 
       expect(updated).toBe(true);
       expect(await fs.pathExists(path.join(testDir, '.juno_task/workflows/yy-task-run.yaml'))).toBe(true);
-      expect(await fs.pathExists(path.join(testDir, '.juno_task/workflows/yy-merge-drive.yaml'))).toBe(true);
+      expect(await fs.pathExists(path.join(testDir, '.juno_task/workflows/yy-merge-drive.yaml'))).toBe(false);
       expect(await fs.pathExists(
         path.join(testDir, '.juno_task/prompts/lifecycle/task-implementation.md'))).toBe(true);
       // The retired customized asset is untouched: retirement belongs to the
@@ -1042,7 +1034,7 @@ describe('ScriptInstaller', {
       // Non-force update reinstalls exactly the missing seeds.
       expect(await ScriptInstaller.autoUpdate(testDir, false)).toBe(true);
       expect(await fs.pathExists(path.join(testDir, '.juno_task/workflows/yy-task-run.yaml'))).toBe(true);
-      expect(await fs.pathExists(path.join(testDir, '.juno_task/workflows/yy-merge-drive.yaml'))).toBe(true);
+      expect(await fs.pathExists(path.join(testDir, '.juno_task/workflows/yy-merge-drive.yaml'))).toBe(false);
       expect(await fs.readFile(
         path.join(testDir, '.juno_task/prompts/lifecycle/task-implementation.md'), 'utf8'),
       ).toBe(promptsBefore);
@@ -1190,7 +1182,7 @@ describe('ScriptInstaller', {
 
       expect(updated).toBe(true);
       expect(await fs.readFile(wikiPath, 'utf8')).toContain(
-        '# Bolt task worktrees',
+        '# Task worktrees and native Git delivery',
       );
       expect(await fs.readFile(scriptPath, 'utf8')).toContain('def main(');
       const backupRoot = path.join(testDir, '.juno_task/managed-conflicts');

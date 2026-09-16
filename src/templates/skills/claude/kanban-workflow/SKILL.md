@@ -2,34 +2,25 @@
 name: kanban-workflow
 description: Comprehensive guide for using YYLO Ledger task management. Covers all commands (create, list, search, get, mark, update, archive, deps, ready, order, merge), dependency management, best practices, and workflow patterns. Use when you need to interact with the YYLO Ledger board.
 argument-hint: "[command or workflow question]"
+enable-shell-directives: true
 ---
 
 ## YYLO Ledger CLI Reference
 
-Use `yy ledger` for all commands. It delegates to the canonical controller wrapper and the exact `yylo-ledger 0.2.1rc2` Python distribution. `yy kanban` is a labelled legacy Task alias.
+Use `yy ledger` for all commands. Ledger 0.3.x exposes both the compatible flat task commands and the native ID-first `record|task|wiki|workflow|artifact` groups. `yy kanban` is a labelled compatibility alias for the same controller-routed task runtime.
 
-### Native Record contract
+### Supported task contract
 
-- Records use one envelope with immutable ID, kind/profile, revision, lifecycle/tier, relations, provenance, system/custom metadata, and typed payload.
-- Use `yy ledger task|wiki|workflow|artifact|record`; do not simulate Documents, Workflows, or Artifacts with task bodies.
-- Read the current Record first and pass the required expected revision, preimage, or record/payload digest shown by nested `update --help`. A stale compare-and-replace must fail; never retry as an unconditional overwrite.
-- Capture Artifact bytes explicitly as `inline`, content-addressed `local`, or declared `external` evidence. Preserve the returned ID, revision, and SHA-256 digest in references.
-- Normal search is bounded, projected, cursor-based, and hot-only unless an explicit archive command is used.
-- Copy legacy files with `yy migrate ledger inventory|plan|apply|status|verify`. Keep immutable plans/status outside the source tree, apply explicit Record IDs one at a time, verify bytes/history/search, and never delete a legacy source without separate owner approval.
-
-Examples:
-
-```bash
-yy ledger wiki create --title Guide --file guide.md
-yy ledger workflow create --title Build --file workflow.yaml
-yy ledger artifact create --title Report --profile report --mode local --file report.bin
-yy ledger record search --scope all --projection summary --limit 20 --format json
-yy migrate ledger status --source-root /project --plan /external/plan.json --status /external/status.json
-```
+- Preflight installed `yy ledger --version` and `yy ledger --help`; command help is authoritative for the selected runtime.
+- Use the flat task surface for lifecycle task management. Inspect native group help before use; do not guess arguments from source or another installation.
+- New operational PDRs, contracts, plans, reports, receipts, and evidence belong in typed Artifact Records, not product documentation, task bodies/responses, or new `.juno_task/specs` files.
+- If a required native group is absent, fail closed and request a Ledger upgrade. Never invoke mutable source directly or write Ledger store files by hand.
+- Read current task state before mutation, preserve mutation receipts where offered, and never bypass controller routing or lifecycle state with direct file edits.
+- Normal discovery is hot-only unless an explicit cold-archive command is used.
 
 ### Opt-in cross-project routing
 
-Cross-project access is disabled by default. The source `.juno_task/config.json` must set `kanbanRegistry.enabled: true` and explicitly list `allowedProjects`; environment overrides are `JUNO_KANBAN_REGISTRY_ENABLED` and `JUNO_KANBAN_REGISTRY_ALLOWED_PROJECTS`. Register with `yy ledger project add ALIAS --path /absolute/project`, then route any command with `--project ALIAS`. The destination wrapper/runtime remains authoritative, and routing failures never fall back to the source board.
+Cross-project access is disabled by default. The source `.juno_task/config.json` must set `kanbanRegistry.enabled: true` and explicitly list `allowedProjects`; environment overrides are `YYLO_LEDGER_REGISTRY_ENABLED` and `YYLO_LEDGER_REGISTRY_ALLOWED_PROJECTS`. Register with `yy ledger project add ALIAS --path /absolute/project`, then route any command with `--project ALIAS`. The destination wrapper/runtime remains authoritative, and routing failures never fall back to the source board.
 
 ### Legacy Task compatibility commands
 
@@ -146,13 +137,15 @@ These are parsed automatically when the task is created/updated.
 
 When tasks get scattered across subdirectories:
 ```bash
-# Auto-discover and merge all .juno_task dirs
-yy ledger merge --find-all --into ./.juno_task --dry-run
+# First produce and review a deterministic plan
+yy ledger merge ./sub1/.juno_task ./sub2/.juno_task --into ./.juno_task \
+  --dry-run --plan-file /external/ledger-merge-plan.json
 
-# Merge specific sources
-yy ledger merge ./sub1/.juno_task ./sub2/.juno_task --into ./.juno_task
+# Apply only that reviewed plan and retain its receipt
+yy ledger merge ./sub1/.juno_task ./sub2/.juno_task --into ./.juno_task \
+  --apply-plan /external/ledger-merge-plan.json \
+  --receipt-file /external/ledger-merge-receipt.json
 ```
-Strategy: `--strategy keep-newer` (default) or `--strategy keep-both`.
 
 ### Output Formats
 

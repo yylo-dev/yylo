@@ -18,22 +18,17 @@ Independent agents and reviewers use fresh `yy pi` contexts. Bare `pi` and indir
    and committed. Repair any closure defect while the task remains `WORKING`.
 5. Run `yy task finish TASK_ID` against that exact preflighted tip. This
    validates affected paths/tests and queues the immutable feature tip.
-6. Observe with `yy merge status|arbiter status`. One fenced target owner runs
-   `yy merge arbiter run` or typed `yy merge drive` and exits when idle/blocked;
-   agents never poll. `next|resolve` are explicit recovery mutations. Preserve
-   dirty conflict bytes for one bounded managed repair; expiry is not takeover.
-7. Implementation workers never launch lifecycle-semantic reviewers. The
-   managed merge queue is the sole lifecycle-semantic review owner: low risk gets
-   zero, normal risk
-   gets at most one, and high risk gets Reviewer A then Reviewer B on one frozen
-   candidate. It permits at most one repair candidate; a second material finding
-   terminalizes as `REVIEW_FINDINGS_EXHAUSTED`, with no third autonomous review
-   or silently created repair task.
-8. A release wave closes admission with one explicit immutable epoch seal,
-   composes one merge commit per task, reuses exact complete-input evidence,
-   validates/reviews the train once, and advances the target with one CAS.
-9. After expected-SHA CAS, verify identity/readback only; do not redispatch a
-   semantic reviewer for byte-identical delivery.
+6. Observe with `yy merge status TASK_ID`. One authorized target owner runs
+   `yy merge land TASK_ID`, which updates Ledger automatically; run `yy merge project TASK_ID` only for projection recovery.
+   Recompose after target movement and preserve private conflict bytes; one
+   conflict must not block an unrelated task.
+7. Tests and semantic reviews are explicit project checks outside merge. The
+   native adapter launches zero models, chooses no reviewers, schedules no suite,
+   and owns no repair or evidence-cache loop.
+8. Release-version changes follow the same ordinary task/merge lifecycle.
+   Maintainer package preparation remains separately authorized outside `yy`.
+9. After expected-old Git success, retry only Ledger projection; do not repeat
+   integration or infer test/review success from ancestry.
 10. Cleanup is reachability-safe. Push, release, publish, deploy, production
    mutation, restart, and post-deploy E2E always require separate authority.
 

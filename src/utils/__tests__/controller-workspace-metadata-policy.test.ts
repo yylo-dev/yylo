@@ -19,8 +19,20 @@ describe('metadata-controller sparse policy', () => {
     if (temporary) await fs.remove(temporary);
   });
 
-  it('classifies canonical task scopes as recursive controller metadata', async () => {
+  it('classifies native Records and canonical task scopes as recursive controller metadata', async () => {
     const policy = await fs.readJson(path.resolve(process.cwd(), 'src/templates/config/metadata-controller.json'));
+    const nativeRecordRoots = [
+      '.juno_task/archive', '.juno_task/archive-receipts',
+      '.juno_task/artifact-ledger', '.juno_task/artifacts',
+      '.juno_task/document-ledger', '.juno_task/documents',
+      '.juno_task/objects',
+    ];
+    for (const recordRoot of nativeRecordRoots) {
+      expect(policy.copied_metadata).toContain(recordRoot);
+      expect(policy.product_forbidden).toContain(recordRoot);
+      expect(policy.tracked_recursive).toContain(recordRoot);
+      expect(policy.tracked_exact).not.toContain(recordRoot);
+    }
     expect(policy.copied_metadata).toContain('.juno_task/task-scopes');
     expect(policy.product_forbidden).toContain('.juno_task/task-scopes');
     expect(policy.tracked_recursive).toContain('.juno_task/task-scopes');

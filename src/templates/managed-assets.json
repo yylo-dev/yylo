@@ -5,29 +5,16 @@
     "semanticVersion": "1.0.0"
   },
   "controllerOutputs": [
-    { "source": "controller-agent/AGENTS.md", "destination": "AGENTS.md", "type": "instruction" },
-    { "source": "controller-agent/CLAUDE.md", "destination": "CLAUDE.md", "type": "instruction" },
-    { "source": "skills/codex/kanban-workflow/SKILL.md", "destination": ".agents/skills/kanban-workflow/SKILL.md", "type": "skill" },
-    { "source": "skills/codex/plan-kanban-tasks/SKILL.md", "destination": ".agents/skills/plan-kanban-tasks/SKILL.md", "type": "skill" },
-    { "source": "skills/codex/ralph-loop/SKILL.md", "destination": ".agents/skills/ralph-loop/SKILL.md", "type": "skill" },
-    { "source": "skills/codex/ralph-loop/references/first_check.md", "destination": ".agents/skills/ralph-loop/references/first_check.md", "type": "skill" },
-    { "source": "skills/codex/ralph-loop/references/implement.md", "destination": ".agents/skills/ralph-loop/references/implement.md", "type": "skill" },
-    { "source": "scripts/kanban.sh", "destination": ".agents/skills/ralph-loop/scripts/kanban.sh", "type": "script" },
-    { "source": "skills/codex/understand-project/SKILL.md", "destination": ".agents/skills/understand-project/SKILL.md", "type": "skill" },
-    { "source": "skills/claude/kanban-workflow/SKILL.md", "destination": ".claude/skills/kanban-workflow/SKILL.md", "type": "skill" },
-    { "source": "skills/claude/plan-kanban-tasks/SKILL.md", "destination": ".claude/skills/plan-kanban-tasks/SKILL.md", "type": "skill" },
-    { "source": "skills/claude/ralph-loop/SKILL.md", "destination": ".claude/skills/ralph-loop/SKILL.md", "type": "skill" },
-    { "source": "skills/claude/ralph-loop/references/first_check.md", "destination": ".claude/skills/ralph-loop/references/first_check.md", "type": "skill" },
-    { "source": "skills/claude/ralph-loop/references/implement.md", "destination": ".claude/skills/ralph-loop/references/implement.md", "type": "skill" },
-    { "source": "scripts/kanban.sh", "destination": ".claude/skills/ralph-loop/scripts/kanban.sh", "type": "script" },
-    { "source": "skills/claude/understand-project/SKILL.md", "destination": ".claude/skills/understand-project/SKILL.md", "type": "skill" },
-    { "source": "skills/pi/kanban-workflow/SKILL.md", "destination": ".pi/skills/kanban-workflow/SKILL.md", "type": "skill" },
-    { "source": "skills/pi/plan-kanban-tasks/SKILL.md", "destination": ".pi/skills/plan-kanban-tasks/SKILL.md", "type": "skill" },
-    { "source": "skills/pi/ralph-loop/SKILL.md", "destination": ".pi/skills/ralph-loop/SKILL.md", "type": "skill" },
-    { "source": "skills/pi/ralph-loop/references/first_check.md", "destination": ".pi/skills/ralph-loop/references/first_check.md", "type": "skill" },
-    { "source": "skills/pi/ralph-loop/references/implement.md", "destination": ".pi/skills/ralph-loop/references/implement.md", "type": "skill" },
-    { "source": "scripts/kanban.sh", "destination": ".pi/skills/ralph-loop/scripts/kanban.sh", "type": "script" },
-    { "source": "skills/pi/understand-project/SKILL.md", "destination": ".pi/skills/understand-project/SKILL.md", "type": "skill" }
+    {
+      "source": "controller-agent/AGENTS.md",
+      "destination": "AGENTS.md",
+      "type": "instruction"
+    },
+    {
+      "source": "controller-agent/CLAUDE.md",
+      "destination": "CLAUDE.md",
+      "type": "instruction"
+    }
   ],
   "admissionOutputs": [
     {
@@ -43,80 +30,16 @@
       "destination": ".juno_task/scripts/controller_checkpoint.py"
     },
     {
+      "source": "scripts/controller_resolver.py",
+      "destination": ".juno_task/scripts/controller_resolver.py"
+    },
+    {
       "source": "scripts/juno-toolchain-policy.sh",
       "destination": ".juno_task/scripts/juno-toolchain-policy.sh"
     },
     {
       "source": "scripts/kanban.sh",
       "destination": ".juno_task/scripts/kanban.sh"
-    },
-    {
-      "source": "skills/codex/kanban-workflow/SKILL.md",
-      "destination": ".agents/skills/kanban-workflow/SKILL.md"
-    },
-    {
-      "source": "skills/codex/plan-kanban-tasks/SKILL.md",
-      "destination": ".agents/skills/plan-kanban-tasks/SKILL.md"
-    },
-    {
-      "source": "skills/codex/ralph-loop/SKILL.md",
-      "destination": ".agents/skills/ralph-loop/SKILL.md"
-    },
-    {
-      "source": "skills/codex/ralph-loop/references/first_check.md",
-      "destination": ".agents/skills/ralph-loop/references/first_check.md"
-    },
-    {
-      "source": "scripts/kanban.sh",
-      "destination": ".agents/skills/ralph-loop/scripts/kanban.sh"
-    },
-    {
-      "source": "skills/codex/understand-project/SKILL.md",
-      "destination": ".agents/skills/understand-project/SKILL.md"
-    },
-    {
-      "source": "skills/claude/kanban-workflow/SKILL.md",
-      "destination": ".claude/skills/kanban-workflow/SKILL.md"
-    },
-    {
-      "source": "skills/claude/plan-kanban-tasks/SKILL.md",
-      "destination": ".claude/skills/plan-kanban-tasks/SKILL.md"
-    },
-    {
-      "source": "skills/claude/ralph-loop/SKILL.md",
-      "destination": ".claude/skills/ralph-loop/SKILL.md"
-    },
-    {
-      "source": "skills/claude/ralph-loop/references/first_check.md",
-      "destination": ".claude/skills/ralph-loop/references/first_check.md"
-    },
-    {
-      "source": "scripts/kanban.sh",
-      "destination": ".claude/skills/ralph-loop/scripts/kanban.sh"
-    },
-    {
-      "source": "skills/claude/understand-project/SKILL.md",
-      "destination": ".claude/skills/understand-project/SKILL.md"
-    },
-    {
-      "source": "skills/pi/kanban-workflow/SKILL.md",
-      "destination": ".pi/skills/kanban-workflow/SKILL.md"
-    },
-    {
-      "source": "skills/pi/plan-kanban-tasks/SKILL.md",
-      "destination": ".pi/skills/plan-kanban-tasks/SKILL.md"
-    },
-    {
-      "source": "skills/pi/ralph-loop/SKILL.md",
-      "destination": ".pi/skills/ralph-loop/SKILL.md"
-    },
-    {
-      "source": "skills/pi/ralph-loop/references/first_check.md",
-      "destination": ".pi/skills/ralph-loop/references/first_check.md"
-    },
-    {
-      "source": "skills/pi/understand-project/SKILL.md",
-      "destination": ".pi/skills/understand-project/SKILL.md"
     },
     {
       "source": "extensions/pi/juno-skill-preprocessor.ts",
@@ -175,12 +98,6 @@
     {
       "source": "wiki/controller/task_dependency_hydration.md",
       "destination": ".juno_task/wiki/task_dependency_hydration.md",
-      "installClass": "project",
-      "type": "wiki"
-    },
-    {
-      "source": "wiki/controller/sealed_release_epochs.md",
-      "destination": ".juno_task/wiki/controller/sealed_release_epochs.md",
       "installClass": "project",
       "type": "wiki"
     },
@@ -386,6 +303,12 @@
       "type": "script"
     },
     {
+      "source": "scripts/controller_resolver.py",
+      "destination": ".juno_task/scripts/controller_resolver.py",
+      "installClass": "script",
+      "type": "script"
+    },
+    {
       "source": "scripts/managed_agent_runner.py",
       "destination": ".juno_task/scripts/managed_agent_runner.py",
       "installClass": "script",
@@ -436,18 +359,6 @@
     {
       "source": "scripts/operation_snapshot.py",
       "destination": ".juno_task/scripts/operation_snapshot.py",
-      "installClass": "script",
-      "type": "script"
-    },
-    {
-      "source": "scripts/release_train.py",
-      "destination": ".juno_task/scripts/release_train.py",
-      "installClass": "script",
-      "type": "script"
-    },
-    {
-      "source": "scripts/tests/test_release_train.py",
-      "destination": ".juno_task/scripts/tests/test_release_train.py",
       "installClass": "script",
       "type": "script"
     },
@@ -518,12 +429,6 @@
       "type": "workflow"
     },
     {
-      "source": "workflows/yy-merge-drive.yaml",
-      "destination": ".juno_task/workflows/yy-merge-drive.yaml",
-      "installClass": "controller",
-      "type": "workflow"
-    },
-    {
       "source": "prompts/lifecycle/task-implementation.md",
       "destination": ".juno_task/prompts/lifecycle/task-implementation.md",
       "installClass": "controller",
@@ -532,12 +437,6 @@
     {
       "source": "prompts/lifecycle/task-test-repair.md",
       "destination": ".juno_task/prompts/lifecycle/task-test-repair.md",
-      "installClass": "controller",
-      "type": "prompt"
-    },
-    {
-      "source": "prompts/lifecycle/merge-semantic-repair.md",
-      "destination": ".juno_task/prompts/lifecycle/merge-semantic-repair.md",
       "installClass": "controller",
       "type": "prompt"
     }

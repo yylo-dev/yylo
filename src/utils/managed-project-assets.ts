@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'fs-extra';
@@ -75,7 +76,7 @@ export const MANAGED_PROMPT_MACROS = Object.fromEntries(
   ]),
 ) as Record<string, { path: string }>;
 
-interface ManagedAssetRecord {
+export interface ManagedAssetRecord {
   type: string;
   templateVersion: string;
   sourceSha256: string;
@@ -149,14 +150,132 @@ function sha256(content: Buffer | string): string {
   return createHash('sha256').update(content).digest('hex');
 }
 
-function recordsIdentity(assets: Record<string, ManagedAssetRecord>): string {
+const LOCALIZED_CONFIGS = new Set([
+  '.juno_task/config/task-workspace.json',
+  '.juno_task/config/metadata-controller.json',
+  '.juno_task/config/worktree-hydration.yaml',
+]);
+
+export interface ManagedProjectLocalization {
+  targetBranch?: string;
+  gitRemoteUrl?: string;
+}
+
+function gitValue(projectDir: string, args: string[]): string | undefined {
+  const result = spawnSync('git', ['-C', projectDir, ...args], { encoding: 'utf8' });
+  return result.status === 0 && result.stdout.trim() ? result.stdout.trim() : undefined;
+}
+
+function normalizedBranch(value: string | undefined): string {
+  const branch = (value || '').trim().replace(/^refs\/heads\//, '');
+  if (!branch || branch.startsWith('-') || branch.includes('..') || /[~^:?*[\\\s]/.test(branch)) {
+    return 'main';
+  }
+  return branch;
+}
+
+async function isYyloMonorepo(projectDir: string): Promise<boolean> {
+  try {
+    const manifest = await fs.readJson(path.join(projectDir, 'juno-code/package.json'));
+    return manifest?.name === '@yylo/cli';
+  } catch {
+    return false;
+  }
+}
+
+function discoverLocalization(
+  projectDir: string,
+  overrides: ManagedProjectLocalization = {},
+): Required<ManagedProjectLocalization> {
+  const remoteHead = gitValue(projectDir, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'])
+    ?.replace(/^origin\//, '');
+  const currentBranch = gitValue(projectDir, ['branch', '--show-current']);
+  return {
+    targetBranch: normalizedBranch(
+      overrides.targetBranch || process.env.YYLO_TARGET_BRANCH || remoteHead || currentBranch,
+    ),
+    gitRemoteUrl: (
+      overrides.gitRemoteUrl || process.env.JUNO_TASK_GIT_URL ||
+      gitValue(projectDir, ['remote', 'get-url', 'origin']) || ''
+    ).trim(),
+  };
+}
+
+async function localizedManagedSource(
+  projectDir: string,
+  asset: ManagedAssetDefinition,
+  sourceContent: Buffer,
+  localization: ManagedProjectLocalization = {},
+): Promise<Buffer> {
+  if (!LOCALIZED_CONFIGS.has(asset.destination) || await isYyloMonorepo(projectDir)) {
+    return sourceContent;
+  }
+  const local = discoverLocalization(projectDir, localization);
+  if (asset.destination === '.juno_task/config/worktree-hydration.yaml') {
+    return Buffer.from(
+      'schema_version: v1\n' +
+      'workflow_id: worktree-hydration\n' +
+      'workflow_class: task_hydration\n' +
+      'steps:\n' +
+      '  - id: clean_tree\n' +
+      '    name: Prove the consumer worktree is clean\n' +
+      '    probe: ["python3", ".juno_task/scripts/worktree_hydration.py", "--project-root", ".", "verify-clean"]\n' +
+      '    command: ["python3", ".juno_task/scripts/worktree_hydration.py", "--project-root", ".", "verify-clean"]\n' +
+      '    timeout_seconds: 30\n' +
+      '    fail_workflow: true\n' +
+      '    non_interactive: true\n' +
+      '    network: false\n' +
+      '    sensitive: false\n' +
+      '    outputs: []\n',
+    );
+  }
+  const value = JSON.parse(sourceContent.toString('utf8')) as Record<string, any>;
+  if (asset.destination === '.juno_task/config/metadata-controller.json') {
+    value.controller_branch = 'refs/heads/juno/controller-metadata';
+    value.product_ref = `refs/heads/${local.targetBranch}`;
+  } else {
+    value.target_ref = `refs/heads/${local.targetBranch}`;
+    value.workspace_root = '@state/yylo/task-worktrees';
+    value.allowed_paths = [
+      '.gitignore', '.juno_task/config', '.juno_task/managed-assets.json',
+      '.juno_task/prompts', '.juno_task/wiki', 'AGENTS.md', 'CLAUDE.md',
+      'README.md', 'docs', 'src', 'tests',
+    ];
+    value.selectable_paths = [];
+    value.focused_validation = [{
+      id: 'consumer-policy-canary', cwd: '.juno_task', timeout_seconds: 30,
+      max_output_bytes: 16384,
+      argv: ['python3', '-c', "import json; json.load(open('config/task-workspace.json'))"],
+    }];
+    value.full_suite_validation = {
+      id: 'consumer-full-suite-canary', cwd: '.juno_task', timeout_seconds: 30,
+      max_output_bytes: 16384,
+      argv: ['python3', '-c', "import json; json.load(open('config/task-workspace.json'))"],
+    };
+    delete value.validation_profiles;
+    value.documentation_validation = {
+      ...value.documentation_validation,
+      inert_exact_files: ['AGENTS.md', 'CLAUDE.md'],
+      inert_roots: ['.juno_task/wiki'],
+      active_exact_files: ['README.md'],
+      active_roots: ['docs'],
+      public_identities: local.gitRemoteUrl ? [local.gitRemoteUrl] : [],
+    };
+  }
+  return Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+export function managedAssetRecordsIdentity(
+  assets: Record<string, ManagedAssetRecord>,
+): string {
   return sha256(JSON.stringify(Object.entries(assets).sort(([left], [right]) =>
-    left.localeCompare(right)).map(([destination, record]) => ({
-    destination,
-    type: record.type,
-    sourceSha256: record.sourceSha256,
-    installedSha256: record.installedSha256,
-  }))));
+    Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8')))
+    .map(([destination, record]) => ({
+      destination,
+      type: record.type,
+      sourceSha256: record.sourceSha256,
+      installedSha256: record.installedSha256,
+    }))));
 }
 
 function instructionBundleIdentity(
@@ -168,7 +287,7 @@ function instructionBundleIdentity(
     semanticVersion: INSTRUCTION_BUNDLE_DECLARATION.semanticVersion,
     packageVersion: identityVersion,
     assetCount: Object.keys(assets).length,
-    assetsSha256: recordsIdentity(assets),
+    assetsSha256: managedAssetRecordsIdentity(assets),
   };
   return { ...core, bundleSha256: sha256(JSON.stringify(core)) };
 }
@@ -191,7 +310,7 @@ function validateManifest(manifest: unknown, manifestPath: string): ManagedAsset
         !/^[0-9a-f]{64}$/.test(identity.assetsSha256) ||
         !/^[0-9a-f]{64}$/.test(identity.bundleSha256) ||
         identity.assetCount !== Object.keys(parsed.assets).length ||
-        identity.assetsSha256 !== recordsIdentity(parsed.assets) ||
+        identity.assetsSha256 !== managedAssetRecordsIdentity(parsed.assets) ||
         identity.packageVersion !== parsed.packageVersion ||
         identity.bundleSha256 !== sha256(JSON.stringify({
           schemaVersion: identity.schemaVersion,
@@ -363,6 +482,7 @@ export class ManagedProjectAssets {
       force?: boolean;
       silent?: boolean;
       recovery?: TargetBoundManagedRecovery | undefined;
+      localization?: ManagedProjectLocalization | undefined;
     } = {},
   ): Promise<ManagedAssetUpdateResult> {
     await this.preflight(projectDir, {
@@ -450,7 +570,10 @@ export class ManagedProjectAssets {
         if (!recovered && !(await fs.pathExists(sourcePath as string))) {
           throw new Error(`Missing managed package asset: ${sourcePath}`);
         }
-        const sourceContent = recovered ?? await fs.readFile(sourcePath as string);
+        const packageContent = recovered ?? await fs.readFile(sourcePath as string);
+        const sourceContent = recovered
+          ? packageContent
+          : await localizedManagedSource(projectDir, asset, packageContent, options.localization);
         const destinationPath = path.join(projectDir, asset.destination);
         const record = manifest.assets[asset.destination];
         if (await fs.pathExists(destinationPath)) {
@@ -515,7 +638,10 @@ export class ManagedProjectAssets {
       if (!recovered && !(await fs.pathExists(sourcePath as string))) {
         throw new Error(`Missing managed package asset: ${sourcePath}`);
       }
-      const sourceContent = recovered ?? await fs.readFile(sourcePath as string);
+      const packageContent = recovered ?? await fs.readFile(sourcePath as string);
+      const sourceContent = recovered
+        ? packageContent
+        : await localizedManagedSource(projectDir, asset, packageContent, options.localization);
       const sourceHash = sha256(sourceContent);
       const destinationPath = path.join(projectDir, asset.destination);
       const record = manifest.assets[asset.destination];
@@ -852,8 +978,12 @@ export class ManagedProjectAssets {
     const retiredSpecializationPresent = await fs.pathExists(specializationReceipt);
     const entries: ManagedAssetGenerationReport['entries'] = [];
     for (const asset of managedAssetsForProject(projectConfig)) {
-      const sourceContent = targetBoundSource(recovery, asset) ??
+      const recovered = targetBoundSource(recovery, asset);
+      const packageContent = recovered ??
         await fs.readFile(path.join(templatesDir as string, asset.source));
+      const sourceContent = recovered
+        ? packageContent
+        : await localizedManagedSource(projectDir, asset, packageContent);
       const sourceHash = sha256(sourceContent);
       const destinationPath = path.join(projectDir, asset.destination);
       let state: ManagedAssetGenerationState;

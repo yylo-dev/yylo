@@ -1,0 +1,13 @@
+# HOL Plugin Scanner configuration (https://github.com/hashgraph-online/hol-guard)
+#
+# Auto-discovered by `plugin-scanner` when scanning this repository, including
+# by the awesome-ai-plugins catalog sweep, which clones the default branch and
+# runs the pinned ai-plugin-scanner-action without extra flags.
+#
+# The baseline lists scanner rules whose findings were audited line-by-line and
+# confirmed as false positives or by-design behavior for a coding-agent
+# orchestrator CLI. The full audit table — every finding, its file:line, and
+# the evidence for the verdict — lives in docs/security-scanner-baseline.md.
+# Findings that are real defects are fixed, not baselined.
+[scanner]
+baseline_file = ".plugin-scanner-baseline.json"

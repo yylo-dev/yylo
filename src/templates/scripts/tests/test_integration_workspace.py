@@ -101,6 +101,112 @@ class IntegrationWorkspaceTests(unittest.TestCase):
         self.runtime_inspect_patcher.stop()
         self.temporary.cleanup()
 
+    def test_source_adoption_helpers_execute_real_subprocess_and_git(self) -> None:
+        result = runtime.adoption_run(
+            [sys.executable, "-c", "print('adoption-ok')"], self.root)
+        self.assertEqual(result.stdout.strip(), "adoption-ok")
+        self.assertEqual(runtime.adoption_git(self.repo, "rev-parse", "--git-dir"), ".git")
+        self.assertEqual(
+            runtime.adoption_exact_external(
+                self.root / "external-adoption-receipt.json", self.controller, "receipt"),
+            self.root / "external-adoption-receipt.json",
+        )
+        runtime.adoption_clean(self.owner, "integration owner")
+        (self.owner / "untracked-adoption-input").write_text("drift\n")
+        with self.assertRaisesRegex(runtime.AdoptionError, "requires a clean integration owner"):
+            runtime.adoption_clean(self.owner, "integration owner")
+
+    def test_source_adoption_moves_and_can_restore_a_clean_stale_owner(self) -> None:
+        target = self.local_advance()
+        before = runtime.adoption_prepare_owner(
+            self.repo, "refs/heads/product", target, self.owner)
+        self.assertTrue(before["moved"])
+        self.assertEqual(git(self.owner, "rev-parse", "HEAD"), target)
+        self.assertEqual(git(self.owner, "config", "--worktree", "--get",
+                             "juno.workspace.roleBase"), target)
+        self.assertTrue(runtime.adoption_restore_owner(self.owner, before))
+        self.assertEqual(git(self.owner, "rev-parse", "HEAD"), self.base)
+
+    def test_source_adoption_conflicting_completed_replay_refuses_immediately(self) -> None:
+        receipt = self.root / "completed-adoption.json"
+        receipt.write_text(json.dumps({
+            "schema_version": runtime.SOURCE_ADOPTION_SCHEMA,
+            "operation": "runtime-adopt-source", "outcome": "completed",
+            "controller": str(self.controller), "repository": str(self.repo),
+            "target_ref": "refs/heads/product", "previous_sha": self.base,
+            "target_sha": self.base, "install_prefix": str(self.root / "runtime-a"),
+        }))
+        with self.assertRaisesRegex(runtime.AdoptionError, "conflicts with the exact requested transaction"):
+            runtime.adoption_replay(
+                receipt, self.controller, self.repo, "refs/heads/product",
+                self.base, self.base, self.root / "runtime-b")
+
+    def test_source_adoption_exact_completed_replay_is_verified_idempotent(self) -> None:
+        output = self.root / "completed-adoption.json"
+        prefix = self.root / "runtime"
+        prefix.mkdir()
+        executable = prefix / "cli.mjs"
+        executable.write_text("runtime\n")
+        artifact = self.root / "artifact.tgz"
+        artifact.write_bytes(b"artifact")
+        install_receipt = self.root / "install.json"
+        install_receipt.write_text("{}\n")
+        marker = {"schema_version": runtime.SOURCE_ADOPTION_SCHEMA,
+                  "receipt": str(output), "target_sha": self.base,
+                  "install_receipt_sha256": runtime.adoption_digest(install_receipt)}
+        (prefix / ".juno-source-adoption-owner.json").write_text(json.dumps(marker))
+        dispatch = {"executable": str(executable), "launcher": str(executable), "links": []}
+        output.write_text(json.dumps({
+            "schema_version": runtime.SOURCE_ADOPTION_SCHEMA,
+            "operation": "runtime-adopt-source", "outcome": "completed",
+            "controller": str(self.controller), "repository": str(self.repo),
+            "target_ref": "refs/heads/product", "previous_sha": self.base,
+            "target_sha": self.base, "install_prefix": str(prefix),
+            "artifact": {"path": str(artifact), "sha256": runtime.adoption_digest(artifact)},
+            "install_receipt": {"path": str(install_receipt),
+                                "sha256": runtime.adoption_digest(install_receipt)},
+            "dispatch": dispatch,
+        }))
+        git(self.controller, "config", "--worktree",
+            "juno.controller.runtimeExecutable", str(executable))
+        with (mock.patch.object(runtime, "adoption_verify_public_dispatch"),
+              mock.patch.object(runtime, "adoption_task_start_admission",
+                                return_value={"current": True})):
+            replay = runtime.adoption_replay(
+                output, self.controller, self.repo, "refs/heads/product",
+                self.base, self.base, prefix)
+        self.assertEqual(replay["replay"], "idempotent")
+        self.assertTrue(replay["verified"])
+
+    def test_source_adoption_public_selector_is_fresh_process_visible_and_owned(self) -> None:
+        bin_dir = self.root / "bin"
+        old_bin = self.root / "old-runtime"
+        new_bin = self.root / "new-runtime"
+        for directory in (bin_dir, old_bin, new_bin):
+            directory.mkdir()
+        old_executable = old_bin / "cli.mjs"
+        new_executable = new_bin / "cli.mjs"
+        old_executable.write_text("old\n")
+        new_executable.write_text("new\n")
+        (old_bin / "yylo.sh").write_text("#!/bin/sh\nexit 91\n")
+        (new_bin / "yylo.sh").write_text(
+            "#!/bin/sh\nprintf 'Commands:\\n  status read\\n  land one\\n  project retry\\n'\n")
+        (old_bin / "yylo.sh").chmod(0o755)
+        (new_bin / "yylo.sh").chmod(0o755)
+        (bin_dir / "yy").symlink_to(old_bin / "yylo.sh")
+        (bin_dir / "yylo").symlink_to(old_bin / "yylo.sh")
+        with mock.patch.dict(os.environ, {"PATH": str(bin_dir)}):
+            selection = runtime.adoption_public_launchers(
+                str(old_executable), new_executable)
+            runtime.adoption_verify_public_dispatch(selection)
+            fresh = run([str(bin_dir / "yy"), "merge", "--help"], self.root)
+            self.assertIn("  land one", fresh.stdout)
+            # A foreign successor must never be overwritten by this transaction's rollback.
+            (bin_dir / "yy").unlink()
+            (bin_dir / "yy").symlink_to(old_bin / "yylo.sh")
+            self.assertFalse(runtime.adoption_restore_public_launchers(selection))
+            self.assertEqual((bin_dir / "yy").resolve(), (old_bin / "yylo.sh").resolve())
+
     def remote_advance(self, text: str = "remote") -> str:
         clone = self.root / f"clone-{text}"
         git(self.root, "clone", str(self.remote), str(clone))
@@ -443,6 +549,69 @@ class IntegrationWorkspaceTests(unittest.TestCase):
         foreign, foreign_code = runtime.register(self.controller, self.root / "not-a-worktree")
         self.assertEqual(foreign_code, 2)
         self.assertEqual(foreign["outcome"], "failed")
+
+    def test_first_run_registration_seeds_exact_identity_routing_and_runtime_idempotently(self) -> None:
+        for key in ("juno.workspace.role", "juno.workspace.roleAuthority",
+                    "juno.workspace.roleBase"):
+            git(self.owner, "config", "--worktree", "--unset-all", key)
+        executable = self.root / "cli.mjs"
+        executable.write_text("// package runtime\n")
+
+        first, code = runtime.register(
+            self.controller, self.owner, runtime_executable=executable,
+            runtime_version="0.2.2")
+        self.assertEqual((code, first["outcome"]), (0, "completed"), first)
+        self.assertTrue(first["status"]["healthy"], first["status"])
+        self.assertEqual(set(first["seeded"]), {
+            "owner:role", "owner:roleAuthority", "owner:roleBase",
+            "controller:role", "controller:roleBase",
+            "repository:controller-routing", "controller:runtime",
+        })
+        self.assertEqual(worktree := git(
+            self.owner, "config", "--worktree", "--get", "juno.workspace.role"),
+            "integration-owner")
+        self.assertEqual(git(self.owner, "config", "--worktree", "--get",
+                             "juno.workspace.roleBase"), self.base)
+        self.assertEqual(git(self.controller, "config", "--worktree", "--get",
+                             "juno.workspace.role"), "controller")
+        self.assertEqual(git(self.repo, "config", "--local", "--get",
+                             "juno.controller.path"), str(self.controller.resolve()))
+        self.assertEqual(git(self.repo, "config", "--local", "--get",
+                             "juno.controller.branch"), "refs/heads/controller")
+        self.assertEqual(git(self.controller, "config", "--worktree", "--get",
+                             "juno.controller.runtimeExecutable"), str(executable.resolve()))
+        resolver = SCRIPT.parent / "controller_resolver.py"
+        resolver_env = {key: value for key, value in os.environ.items() if key not in {
+            "JUNO_TASK_ROOT", "JUNO_CONTROLLER_BRANCH", "JUNO_WORKSPACE_ROLE"}}
+        routed = subprocess.run(
+            ["python3", str(resolver), "--cwd", str(self.owner), "--format", "json"],
+            cwd=self.owner, text=True, capture_output=True, env=resolver_env)
+        self.assertEqual(routed.returncode, 0, routed.stderr or routed.stdout)
+        routing = json.loads(routed.stdout)
+        self.assertTrue(routing["valid"], routing)
+        self.assertEqual(routing["path"], str(self.controller.resolve()))
+
+        second, second_code = runtime.register(
+            self.controller, self.owner, runtime_executable=executable,
+            runtime_version="0.2.2")
+        self.assertEqual((second_code, second["seeded"]), (0, []), second)
+        self.assertEqual(worktree, "integration-owner")
+
+        git(self.owner, "config", "--worktree", "juno.workspace.roleBase", "HEAD^")
+        refused, refused_code = runtime.register(
+            self.controller, self.owner, runtime_executable=executable,
+            runtime_version="0.2.2")
+        self.assertEqual(refused_code, 2)
+        self.assertIn("partial, tampered, or stale", refused["error"])
+        self.assertEqual(git(self.owner, "config", "--worktree", "--get",
+                             "juno.workspace.roleBase"), "HEAD^")
+        git(self.owner, "config", "--worktree", "juno.workspace.roleBase", self.base)
+        git(self.owner, "config", "--worktree", "juno.workspace.roleAuthority", "unprotected")
+        refused, refused_code = runtime.register(
+            self.controller, self.owner, runtime_executable=executable,
+            runtime_version="0.2.2")
+        self.assertEqual(refused_code, 2)
+        self.assertIn("partial, tampered, or stale", refused["error"])
 
     def test_repair_detaches_exact_attached_canonical_owner(self) -> None:
         runtime.register(self.controller, self.owner)

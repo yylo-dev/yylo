@@ -19,6 +19,11 @@ import type { InitCommandOptions } from '../types.js';
 import type { SubagentType } from '../../types/index.js';
 import { ValidationError } from '../types.js';
 import { buildChildProcessEnvironment } from '../../core/child-process-environment.js';
+import {
+  establishFreshInitTopology,
+  installedCliVersion,
+  probeFreshInitTopology,
+} from '../../utils/fresh-init-topology.js';
 
 /** Simple key-value variables for template interpolation */
 interface InitVariables {
@@ -30,6 +35,7 @@ interface InitializationContext {
   task: string;
   subagent: string;
   gitUrl?: string;
+  targetBranch?: string;
   variables: InitVariables;
   force: boolean;
   interactive: boolean;
@@ -207,6 +213,7 @@ class SimpleProjectGenerator {
 
   async generate(): Promise<void> {
     const { targetDirectory, variables, force } = this.context;
+    const freshTopology = probeFreshInitTopology(targetDirectory);
 
     console.log(chalk.blue('📁 Creating project directory...'));
 
@@ -234,6 +241,11 @@ class SimpleProjectGenerator {
     // Create config.json with user's subagent choice and other settings
     console.log(chalk.blue('⚙️ Creating project configuration...'));
     await this.createConfigFile(junoTaskDir, targetDirectory);
+    await fs.writeFile(path.join(targetDirectory, '.gitignore'), [
+      '.agents/', '.claude/', '.env.yylo', '.juno_task/cache/', '.juno_task/locks/',
+      '.juno_task/runtime/', '.juno_task/scripts/', '.pi/', '.venv_juno/',
+      'AGENTS.md', 'CLAUDE.md', '',
+    ].join('\n'));
 
     console.log(chalk.blue('📄 Creating production-ready project files...'));
 
@@ -563,14 +575,29 @@ ${variables.EDITOR ? `using ${variables.EDITOR} as primary AI subagent` : ''}
     // This is a required fresh-install contract: initialization must not succeed with missing macros.
     console.log(chalk.blue('🧭 Installing managed prompts and lifecycle guidance...'));
     const { ManagedProjectAssets } = await import('../../utils/managed-project-assets.js');
-    await ManagedProjectAssets.update(targetDirectory, { silent: false });
+    await ManagedProjectAssets.update(targetDirectory, {
+      silent: false,
+      localization: {
+        ...(this.context.targetBranch ? { targetBranch: this.context.targetBranch } : {}),
+        ...(this.context.gitUrl ? { gitRemoteUrl: this.context.gitUrl } : {}),
+      },
+    });
 
     // Execute install_requirements.sh to install Python dependencies
     console.log(chalk.blue('🐍 Installing Python requirements...'));
     await this.executeInstallRequirements(junoTaskDir);
 
-    // Set up Git repository if Git URL is provided
-    await this.setupGitRepository();
+    // Set up Git repository if Git URL is provided. A fresh unborn repository
+    // is committed exactly once by the topology bootstrap below.
+    await this.setupGitRepository(freshTopology.eligible);
+
+    const topology = freshTopology.eligible
+      ? await establishFreshInitTopology(freshTopology, await installedCliVersion())
+      : { configured: false, integrationOwner: null };
+    if (topology.configured) {
+      console.log(chalk.green('   ✓ Configured controller and protected integration owner'));
+      console.log(chalk.dim(`   Integration owner: ${topology.integrationOwner}`));
+    }
 
     console.log(chalk.green.bold('\n✅ Project initialization complete!'));
     this.printNextSteps(targetDirectory, String(variables.EDITOR || 'claude'));
@@ -676,6 +703,8 @@ ${variables.EDITOR ? `using ${variables.EDITOR} as primary AI subagent` : ''}
         // Only copy files (not directories)
         const stats = await fs.stat(sourcePath);
         if (stats.isFile()) {
+          const sourceContent = await fs.readFile(sourcePath, 'utf8');
+          if (sourceContent.startsWith('# Retired')) continue;
           await fs.copy(sourcePath, destPath);
 
           // Set executable permissions (chmod +x) for .sh files
@@ -812,7 +841,7 @@ ${variables.EDITOR ? `using ${variables.EDITOR} as primary AI subagent` : ''}
   /**
    * Initialize Git repository and set up remote if Git URL is provided
    */
-  private async setupGitRepository(): Promise<void> {
+  private async setupGitRepository(skipInitialCommit = false): Promise<void> {
     if (!this.context.gitUrl) {
       return; // No Git URL provided, skip Git setup
     }
@@ -823,7 +852,7 @@ ${variables.EDITOR ? `using ${variables.EDITOR} as primary AI subagent` : ''}
       console.log(chalk.blue('🔧 Setting up Git repository...'));
 
       // Check if git is available
-      const { execSync } = await import('child_process');
+      const { execSync, spawnSync } = await import('child_process');
 
       try {
         execSync('git --version', { stdio: 'ignore' });
@@ -835,7 +864,12 @@ ${variables.EDITOR ? `using ${variables.EDITOR} as primary AI subagent` : ''}
 
       // Initialize git repository
       try {
-        execSync('git init', { cwd: targetDirectory, stdio: 'ignore' });
+        const requestedBranch = (this.context.targetBranch || process.env.YYLO_TARGET_BRANCH || 'main')
+          .replace(/^refs\/heads\//, '');
+        const branch = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(requestedBranch) &&
+          !requestedBranch.includes('..') ? requestedBranch : 'main';
+        // Array-form spawn: the branch name never passes through a shell string.
+        spawnSync('git', ['init', '-b', branch], { cwd: targetDirectory, stdio: 'ignore' });
         console.log(chalk.green('   ✓ Initialized Git repository'));
       } catch (error) {
         // Git repository might already exist, that's okay
@@ -855,7 +889,8 @@ ${variables.EDITOR ? `using ${variables.EDITOR} as primary AI subagent` : ''}
             console.log(chalk.yellow('   ⚠️  Git remote "origin" already exists'));
           } else {
             // Add origin remote
-            execSync(`git remote add origin "${this.context.gitUrl}"`, {
+            // Array-form spawn: the URL never passes through a shell string.
+            spawnSync('git', ['remote', 'add', 'origin', this.context.gitUrl], {
               cwd: targetDirectory,
               stdio: 'ignore',
             });
@@ -880,13 +915,14 @@ ${variables.EDITOR ? `using ${variables.EDITOR} as primary AI subagent` : ''}
           hasCommits = false;
         }
 
-        if (!hasCommits) {
+        if (!hasCommits && !skipInitialCommit) {
           // Add all files and create initial commit
           execSync('git add .', { cwd: targetDirectory, stdio: 'ignore' });
 
           const commitMessage = `Initial commit: ${this.context.task || 'Project initialization'}\n\n🤖 Generated with yylo using ${this.context.subagent} subagent\n🎯 Main Task: ${this.context.task}\n\n🚀 Generated with [yylo](https://github.com/yylo-dev/yylo)\n\nCo-Authored-By: Claude <noreply@anthropic.com>`;
 
-          execSync(`git commit -m "${commitMessage}"`, {
+          // Array-form spawn: the message is passed as a single argv element.
+          spawnSync('git', ['commit', '-m', commitMessage], {
             cwd: targetDirectory,
             stdio: 'ignore',
           });
@@ -928,6 +964,7 @@ class SimpleHeadlessInit {
       task,
       subagent: selectedSubagent,
       ...(gitUrl ? { gitUrl } : {}),
+      ...(this.options.targetBranch ? { targetBranch: this.options.targetBranch } : {}),
       variables,
       force: this.options.force || false,
       interactive: false,
@@ -1070,6 +1107,7 @@ export function configureInitCommand(program: Command): void {
     .option('-f, --force', 'Force overwrite existing files')
     .option('-i, --interactive', 'Force interactive mode (even if description is provided)')
     .option('--git-url <url>', 'Git repository URL (alias for --git-repo)')
+    .option('--target-branch <name>', 'Product default branch (env: YYLO_TARGET_BRANCH; default: main)')
     .option('-t, --task <description>', 'Task description (alias for positional description)')
     .action(async (description, options, command) => {
       // Determine task description from multiple possible sources
@@ -1081,6 +1119,7 @@ export function configureInitCommand(program: Command): void {
         force: options.force,
         task: taskDescription,
         gitUrl: options.gitRepo || options.gitUrl,
+        targetBranch: options.targetBranch,
         subagent: options.subagent,
         interactive: options.interactive,
         // Global options
@@ -1411,7 +1450,7 @@ function generateAgentDocContent(
 
 ## Kanban Task Management
 
-For comprehensive kanban usage (all commands, dependency management, best practices), use the \`kanban-workflow\` skill.
+For comprehensive kanban usage (all commands, dependency management, best practices), use the \`ledger-tasks-yylo\` skill.
 
 \`\`\`bash
 # List tasks

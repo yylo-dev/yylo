@@ -2,7 +2,7 @@
   "schema_version": "juno_task_workspace_config.v1",
   "repository": ".",
   "target_ref": "refs/heads/juno-mono-002",
-  "workspace_root": "/private/tmp/yylo/task-worktrees",
+  "workspace_root": "@state/yylo/task-worktrees",
   "branch_prefix": "refs/heads/juno/task-",
   "hydration_workflow": ".juno_task/config/worktree-hydration.yaml",
   "allowed_paths": [
@@ -22,7 +22,6 @@
     ".juno_task/scripts/operation_snapshot.py",
     ".juno_task/scripts/parallel_runner.sh",
     ".juno_task/scripts/release_gate.py",
-    ".juno_task/scripts/release_train.py",
     ".juno_task/scripts/risk_policy.py",
     ".juno_task/scripts/run_until_completion.sh",
     ".juno_task/scripts/target_runtime_provenance.py",
@@ -37,7 +36,6 @@
     ".juno_task/scripts/tests/test_merge_queue.py",
     ".juno_task/scripts/tests/test_metadata_controller.py",
     ".juno_task/scripts/tests/test_operation_snapshot.py",
-    ".juno_task/scripts/tests/test_release_train.py",
     ".juno_task/scripts/tests/test_risk_policy.py",
     ".juno_task/scripts/tests/test_task_workspace.py",
     ".juno_task/scripts/tests/test_task_workspace_decisions.py",
@@ -51,16 +49,26 @@
     "README.md",
     "juno-benchmark",
     "juno-code",
-    "scripts"
+    "juno-code/docs/lifecycle-simplification-acceptance.md",
+    "juno-code/docs/lifecycle-simplification-migration.md",
+    "scripts",
+    "telegram_bot"
   ],
   "selectable_paths": [
     "frontend",
-    "juno_kanban"
+    "juno_kanban",
+    "yylo-skills"
   ],
   "controller_private_paths": [
+    ".juno_task/archive",
+    ".juno_task/archive-receipts",
+    ".juno_task/artifact-ledger",
     ".juno_task/artifacts",
+    ".juno_task/document-ledger",
+    ".juno_task/documents",
     ".juno_task/ledger",
     ".juno_task/logs",
+    ".juno_task/objects",
     ".juno_task/receipts",
     ".juno_task/specs",
     ".juno_task/state",
@@ -89,12 +97,7 @@
         "python3",
         "test_task_workspace.py",
         "TaskWorkspaceTests.test_finish_queues_clean_committed_tip_without_merging_or_cleanup"
-      ],
-      "resource": {
-        "id": "yylo-real-git-managed-install",
-        "lock_path": "/tmp/yylo-focused-real-git-managed-install.lock",
-        "wait_timeout_seconds": 1200
-      }
+      ]
     },
     {
       "id": "integration-workspace",
@@ -105,6 +108,7 @@
         "npm",
         "test",
         "--",
+        "--no-cache",
         "src/utils/__tests__/integration-workspace.test.ts",
         "src/cli/__tests__/task-command.test.ts",
         "src/cli/__tests__/integration-command.test.ts"
@@ -119,6 +123,7 @@
         "npm",
         "test",
         "--",
+        "--no-cache",
         "src/utils/__tests__/script-installer.test.ts"
       ],
       "resource": {
@@ -149,6 +154,52 @@
     ]
   },
   "validation_profiles": [
+    {
+      "id": "telegram-bot-suite",
+      "path_roots": [
+        "telegram_bot"
+      ],
+      "commands": [
+        {
+          "id": "telegram-bot-test",
+          "cwd": "telegram_bot",
+          "argv": [
+            "python3",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests",
+            "-p",
+            "test_*.py",
+            "-v"
+          ],
+          "timeout_seconds": 300,
+          "max_output_bytes": 32768,
+          "input_paths": [
+            "telegram_bot"
+          ]
+        },
+        {
+          "id": "telegram-bot-compile",
+          "cwd": "telegram_bot",
+          "argv": [
+            "python3",
+            "-m",
+            "compileall",
+            "-q",
+            "telegram_tmux",
+            "run.py"
+          ],
+          "timeout_seconds": 60,
+          "max_output_bytes": 16384,
+          "input_paths": [
+            "telegram_bot/telegram_tmux",
+            "telegram_bot/run.py"
+          ]
+        }
+      ]
+    },
     {
       "id": "benchmark-suite",
       "path_roots": [
@@ -250,6 +301,7 @@
       "auth",
       "benchmark",
       "branches",
+      "capabilities",
       "cc",
       "clone",
       "completion",
@@ -270,7 +322,6 @@
       "merge",
       "migrate",
       "pi",
-      "release",
       "scripts",
       "services",
       "session",

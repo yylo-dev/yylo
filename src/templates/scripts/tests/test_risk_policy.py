@@ -101,15 +101,23 @@ class RiskPolicyTest(unittest.TestCase):
                                 "cited_contract": "PDR 2.2 reviewer-scope and anti-scope-creep gate"}
                                for i in range(findings)]}
         response_path, response_sha = self.object_file(f"response-{session}.json", result)
+        prompt_path, prompt_sha = self.object_file(
+            f"prompt-{session}.json", {"candidate": binding["candidate_sha"],
+                                        "policy": binding["policy_identity"],
+                                        "reviewer": role})
         receipt = {"schema_version": rp.MANAGED_RUNNER_SCHEMA, "mode": "reviewer",
                    "state": "succeeded", "semantic_outcome": "completed", "session_id": session,
                    "tool_id": tool_id or f"bolt_{role}",
                    "completed_at": f"2026-08-09T00:00:0{sequence}Z",
                    "identity": {"candidate_sha": binding["candidate_sha"]},
                    "review_binding": binding,
-                   "artifacts": {"response": {"path": response_path,
-                                                "bytes": Path(response_path).stat().st_size,
-                                                "sha256": response_sha}}}
+                   "artifacts": {
+                       "prompt": {"path": prompt_path,
+                                  "bytes": Path(prompt_path).stat().st_size,
+                                  "sha256": prompt_sha},
+                       "response": {"path": response_path,
+                                    "bytes": Path(response_path).stat().st_size,
+                                    "sha256": response_sha}}}
         path, mark = self.object_file(f"runner-{session}.json", receipt)
         return {"runner_receipt_path": path, "runner_receipt_sha256": mark}
 
@@ -230,6 +238,14 @@ class RiskPolicyTest(unittest.TestCase):
         self.assertEqual("high", plan["tier"])
         self.assertEqual(["docs/auth.md", "src/security/auth.ts"], plan["changed_paths"])
 
+    def test_lifecycle_infrastructure_requires_two_sequential_reviewers(self) -> None:
+        for path in (".juno_task/scripts/merge_queue.py",
+                     "juno-code/src/templates/scripts/merge_queue.py"):
+            plan = self.plan({path: "runtime\n"})
+            self.assertEqual("high", plan["tier"])
+            self.assertEqual(["reviewer_a", "reviewer_b"], plan["reviewer_sequence"])
+            self.assertEqual((2, 2), (plan["min_reviews"], plan["max_reviews"]))
+
     def test_docs_normal_high_and_release_are_derived(self) -> None:
         docs = self.plan({"docs/flow.md": "docs\n"})
         self.assertEqual(("low", 0), (docs["tier"], docs["max_reviews"]))
@@ -349,6 +365,12 @@ class RiskPolicyTest(unittest.TestCase):
                                severity="medium", impact_category="bounded_product_defect")
         accepted = self.finish(normal, [advisory])
         compact = accepted["reviews"][0]
+        self.assertEqual({"reviewer", "sequence", "verdict", "finding_count",
+                          "advisory_count", "blocking_count", "findings",
+                          "rejected_observation_count", "rejection_counters",
+                          "review_reference"}, set(compact))
+        self.assertEqual(rp.REVIEW_REFERENCE_SCHEMA,
+                         compact["review_reference"]["schema_version"])
         self.assertEqual(("passed", 1, 0),
                          (accepted["status"], compact["advisory_count"], compact["blocking_count"]))
         promoted = self.review(normal, "reviewer", 1, "promoted", findings=1,
@@ -477,6 +499,12 @@ class RiskPolicyTest(unittest.TestCase):
         self.assertEqual(reused["semantic_evidence_reused"]["origin_reviews"],
                          repeated["semantic_evidence_reused"]["origin_reviews"])
         receipt = json.loads(Path(reviews[0]["runner_receipt_path"]).read_text())
+        prompt_path = Path(receipt["artifacts"]["prompt"]["path"])
+        prompt_bytes = prompt_path.read_bytes()
+        prompt_path.write_text("{}\n")
+        with self.assertRaisesRegex(rp.RiskPolicyError, "request identity"):
+            self.finish(plan, previous=prior_ref, full_suite_admission=None)
+        prompt_path.write_bytes(prompt_bytes)
         Path(receipt["artifacts"]["response"]["path"]).write_text("{}\n")
         with self.assertRaisesRegex(rp.RiskPolicyError, "digest does not match"):
             self.finish(plan, previous=prior_ref, full_suite_admission=None)
@@ -599,6 +627,38 @@ class RiskPolicyTest(unittest.TestCase):
         output = self.temp / "bounded.json"; rp.atomic_receipt(output, receipt, self.policy)
         self.assertLess(output.stat().st_size, self.policy["limits"]["max_receipt_bytes"])
         self.assertNotIn("transcript", output.read_text())
+
+    def test_full_suite_command_provenance_accepts_bounded_input_paths(self) -> None:
+        plan = self.plan({"juno-benchmark/package.json": "{}\n"})
+        command = {"id": "benchmark-test", "cwd": "juno-benchmark",
+                   "argv": ["npm", "test"], "timeout_seconds": 900,
+                   "max_output_bytes": 32768,
+                   "input_paths": ["juno-benchmark/package.json",
+                                   "juno-benchmark/src"]}
+        rp._validate_command_row(command, plan)
+
+    def test_full_suite_command_provenance_rejects_invalid_input_paths(self) -> None:
+        plan = self.plan({"juno-benchmark/package.json": "{}\n"})
+        base = {"id": "benchmark-test", "cwd": "juno-benchmark",
+                "argv": ["npm", "test"], "timeout_seconds": 900,
+                "max_output_bytes": 32768}
+        invalid = ([], ["../package.json"], ["/tmp/package.json"],
+                   ["juno-benchmark/./src"], ["juno-benchmark/src"] * 2,
+                   [f"path-{index}" for index in range(65)])
+        for input_paths in invalid:
+            with self.subTest(input_paths=input_paths):
+                with self.assertRaisesRegex(
+                        rp.RiskPolicyError, "command row provenance is invalid"):
+                    rp._validate_command_row({**base, "input_paths": input_paths}, plan)
+
+    def test_lifecycle_infrastructure_requires_two_sequential_reviewers(self) -> None:
+        for path in (".juno_task/scripts/merge_queue.py",
+                     "juno-code/src/templates/scripts/merge_queue.py"):
+            plan = self.plan({path: "runtime\n"})
+            self.assertEqual("high", plan["tier"])
+            self.assertEqual(["reviewer_a", "reviewer_b"], plan["reviewer_sequence"])
+            self.assertEqual((2, 2), (plan["min_reviews"], plan["max_reviews"]))
+
 
 
 if __name__ == "__main__":

@@ -3,230 +3,92 @@ import path from 'node:path';
 import fs from 'fs-extra';
 import { Command } from 'commander';
 import { routeControlPlane } from '../../utils/control-plane-router.js';
-import { checkpointControllerAfterFinalization } from '../../utils/controller-checkpoint.js';
+import { addMachineOutputOptions, invokeMachineAwareChild, resolveMachineOutput } from '../machine-output.js';
 
-export type MergeQueueOperation = 'status' | 'drive' | 'arbiter-status' | 'arbiter-run' | 'plan' | 'next' | 'resolve' | 'review' | 'reopen' | 'reconcile' | 'refresh' | 'withdraw';
-export type MergeQueueInvoker = (
-  operation: MergeQueueOperation,
+export type MergeOperation = 'status' | 'land' | 'project';
+export type MergeInvoker = (
+  operation: MergeOperation,
   taskId?: string,
   extraArgs?: string[],
 ) => Promise<void>;
-export type MergeQueueCheckpointer = typeof checkpointControllerAfterFinalization;
 
-export function mergeQueueControlOperation(operation: MergeQueueOperation): 'kanban' | 'orchestration' {
-  return ['status', 'plan', 'arbiter-status'].includes(operation) ? 'kanban' : 'orchestration';
+export function mergeControlOperation(operation: MergeOperation): 'kanban' | 'orchestration' {
+  return operation === 'status' ? 'kanban' : 'orchestration';
 }
-
-export const MAX_MERGE_RESULT_LINE_CHARS = 1024 * 1024;
-
-/** Retain only one bounded terminal stdout line while all output is streamed. */
-export class TerminalMergeResultExtractor {
-  private pending = '';
-  private pendingOversized = false;
-  private terminal: unknown;
-
-  append(text: string): void {
-    for (let start = 0; start <= text.length;) {
-      const newline = text.indexOf('\n', start);
-      const end = newline === -1 ? text.length : newline;
-      if (!this.pendingOversized) {
-        const remaining = MAX_MERGE_RESULT_LINE_CHARS - this.pending.length;
-        const part = text.slice(start, Math.min(end, start + Math.max(remaining, 0)));
-        this.pending += part;
-        if (end - start > remaining) this.pendingOversized = true;
-      }
-      if (newline === -1) break;
-      this.completeLine();
-      start = newline + 1;
-    }
-  }
-
-  finish(): unknown {
-    if (this.pending.length > 0 || this.pendingOversized) this.completeLine();
-    return this.terminal;
-  }
-
-  private completeLine(): void {
-    if (this.pendingOversized) {
-      this.terminal = undefined;
-    } else if (this.pending.trim()) {
-      try {
-        this.terminal = JSON.parse(this.pending);
-      } catch {
-        this.terminal = undefined;
-      }
-    }
-    this.pending = '';
-    this.pendingOversized = false;
-  }
-}
-
-export async function checkpointMergeQueueAfterFinalization(
-  operation: MergeQueueOperation,
-  controllerRoot: string,
-  exitCode: number,
-  result: unknown,
-  checkpoint: MergeQueueCheckpointer = checkpointControllerAfterFinalization,
-): Promise<void> {
-  const payload = result && typeof result === 'object'
-    ? result as Record<string, unknown>
-    : undefined;
-  const postIntegration = payload?.post_integration;
-  const phases = postIntegration && typeof postIntegration === 'object'
-    ? postIntegration as Record<string, unknown>
-    : undefined;
-  const kanban = phases?.kanban_finalization;
-  const kanbanPhase = kanban && typeof kanban === 'object'
-    ? kanban as Record<string, unknown>
-    : undefined;
-  // Do not checkpoint successful intermediate review/admission transitions.
-  // MERGED is persisted only after the terminal Kanban mutation and readback.
-  if (!['next', 'resolve'].includes(operation) || exitCode !== 0
-      || payload?.outcome !== 'MERGED' || kanbanPhase?.status !== 'complete') return;
-  const checkpointTaskId = typeof payload?.task_id === 'string' ? payload.task_id : undefined;
-  if (checkpointTaskId) await checkpoint(controllerRoot, exitCode, checkpointTaskId);
-  else await checkpoint(controllerRoot, exitCode);
-}
-
-export async function invokeMergeQueueAtController(
-  operation: MergeQueueOperation,
+export async function invokeMergeAtController(
+  operation: MergeOperation,
   controllerRoot: string,
   env: NodeJS.ProcessEnv,
   taskId?: string,
-  checkpoint: MergeQueueCheckpointer = checkpointControllerAfterFinalization,
   extraArgs: string[] = [],
 ): Promise<void> {
   const script = path.join(controllerRoot, '.juno_task', 'scripts', 'merge_queue.py');
   if (!(await fs.pathExists(script))) {
-    throw new Error('Missing managed merge queue runtime. Run `yy scripts update` and retry.');
+    throw new Error('Missing managed native Git delivery adapter. Run `yy scripts update` and retry.');
   }
-  const scriptOperation = operation === 'arbiter-status'
-    ? ['arbiter', 'status']
-    : operation === 'arbiter-run' ? ['arbiter', 'run'] : [operation];
-  const args = [script, ...scriptOperation, ...(taskId ? [taskId] : []), ...extraArgs];
-  const extractor = new TerminalMergeResultExtractor();
+  const args = [script, operation, ...(taskId ? [taskId] : []), ...extraArgs];
+  const machine = resolveMachineOutput(process.argv.slice(2), { jsonFlag: true });
+  if (machine) {
+    const { exitCode } = await invokeMachineAwareChild({
+      executable: 'python3', args, cwd: controllerRoot, env,
+      command: `merge.${operation}`, machine,
+    });
+    if (exitCode !== 0) process.exitCode = exitCode;
+    return;
+  }
   const exitCode = await new Promise<number>((resolve, reject) => {
-    const child = spawn('python3', args, { cwd: controllerRoot, env, stdio: ['inherit', 'pipe', 'inherit'] });
-    child.stdout.on('data', (chunk: Buffer | string) => {
-      const text = chunk.toString();
-      extractor.append(text);
-      process.stdout.write(text);
+    const child = spawn('python3', args, {
+      cwd: controllerRoot,
+      env,
+      stdio: ['inherit', 'inherit', 'inherit'],
     });
     child.once('error', reject);
     child.once('close', (code, signal) => {
-      if (signal) reject(new Error(`Merge queue command terminated by signal ${signal}`));
+      if (signal) reject(new Error(`Native Git delivery terminated by signal ${signal}`));
       else resolve(code ?? 1);
     });
   });
-  const result = exitCode === 0 ? extractor.finish() : undefined;
-  await checkpointMergeQueueAfterFinalization(operation, controllerRoot, exitCode, result, checkpoint);
   if (exitCode !== 0) process.exitCode = exitCode;
 }
 
-export async function invokeMergeQueue(
-  operation: MergeQueueOperation,
+export async function invokeMerge(
+  operation: MergeOperation,
   taskId?: string,
   extraArgs: string[] = [],
 ): Promise<void> {
-  const route = routeControlPlane(
-    process.cwd(),
-    mergeQueueControlOperation(operation),
-  );
-  await invokeMergeQueueAtController(
-    operation, route.controllerRoot, route.env, taskId,
-    checkpointControllerAfterFinalization, extraArgs,
-  );
+  const route = routeControlPlane(process.cwd(), mergeControlOperation(operation));
+  await invokeMergeAtController(operation, route.controllerRoot, route.env, taskId, extraArgs);
 }
 
-export function configureMergeQueueCommand(
+export function configureMergeCommand(
   program: Command,
-  invoke: MergeQueueInvoker = invokeMergeQueue,
+  invoke: MergeInvoker = invokeMerge,
 ): void {
-  const merge = program.command('merge').description('Observe delivery or explicitly run one fenced target owner');
-  merge.command('status').description('Read-only queue and blocker observation').action(() => invoke('status'));
-  merge
-    .command('drive')
-    .description('Explicit mutation: run the controller-owned typed workflow for a frozen FIFO scope')
-    .option('--through <task-id>', 'Stop after this FIFO-authorized task')
-    .action((options: { through?: string }) => options.through
-      ? invoke('drive', undefined, ['--through', options.through])
-      : invoke('drive'));
-  const arbiter = merge.command('arbiter')
-    .description('Observe or explicitly run the one on-demand fenced owner for this protected target');
-  arbiter.command('status')
-    .description('Read-only arbiter ownership, eligible work, reason code, and next action')
-    .action(() => invoke('arbiter-status'));
-  arbiter.command('run')
-    .description('Explicit mutation: start only with authority, drain deterministically, then exit')
-    .option('--through <task-id>', 'Stop after this FIFO-authorized task')
-    .action((options: { through?: string }) => invoke(
-      'arbiter-run', undefined, [...(options.through ? ['--through', options.through] : [])],
-    ));
-  merge
-    .command('plan')
-    .description('Compute an offline, non-mutating candidate feasibility report')
-    .argument('<task-id>', 'Canonical YYLO Ledger task ID')
-    .option('--against <ref>', 'Plan against an exact alternate Git ref')
-    .option('--json', 'Emit the stable versioned JSON projection')
-    .action((taskId: string, options: { against?: string; json?: boolean }) => {
-      const args = [
-        ...(options.against ? ['--against', options.against] : []),
-        ...(options.json ? ['--json'] : []),
-      ];
-      return invoke('plan', taskId, args);
+  const merge = addMachineOutputOptions(program.command('merge')
+    .description('Land one task with native Git and atomically project lifecycle truth to Ledger'));
+
+  merge.command('status')
+    .description('Read-only status for independently landable tasks')
+    .argument('[task-id]', 'Optional task to inspect')
+    .action((taskId?: string) => taskId ? invoke('status', taskId) : invoke('status'));
+
+  merge.command('land')
+    .description('Compose and land one task, then project Ledger status; never runs tests, reviews, or models')
+    .argument('<task-id>', 'Queued task with one immutable source commit')
+    .option('--candidate <sha>', 'Explicit manually resolved candidate commit')
+    .option('--expected-target <sha>', 'Target observed when the explicit candidate was composed')
+    .action((taskId: string, options: { candidate?: string; expectedTarget?: string }) => {
+      if ((options.candidate === undefined) !== (options.expectedTarget === undefined)) {
+        throw new Error('--candidate and --expected-target must be supplied together');
+      }
+      const args = options.candidate
+        ? ['--candidate', options.candidate, '--expected-target', options.expectedTarget!]
+        : [];
+      return invoke('land', taskId, args);
     });
-  merge
-    .command('next')
-    .description('Explicit recovery mutation: advance once or continue paused evidence for TASK_ID')
-    .argument('[task-id]', 'Paused task whose evidence/review processing should continue')
-    .option('--plan-id <sha256>', 'Require this exact current feasibility identity')
-    .option('--train-plan <path>', 'Require this exact current release-train/FIFO identity')
-    .action((taskId: string | undefined, options: { planId?: string; trainPlan?: string }) => {
-      const args = [...(options.planId ? ['--plan-id', options.planId] : []),
-        ...(options.trainPlan ? ['--train-plan', options.trainPlan] : [])];
-      return args.length ? invoke('next', taskId, args)
-        : taskId === undefined ? invoke('next') : invoke('next', taskId);
-    });
-  merge.command('resolve').description('Explicit recovery mutation for one preserved conflict').argument('<task-id>', 'Canonical YYLO Ledger task ID')
-    .option('--plan-id <sha256>', 'Require this exact current feasibility identity')
-    .option('--train-plan <path>', 'Require this exact current release-train/FIFO identity')
-    .action((taskId: string, options: { planId?: string; trainPlan?: string }) => {
-      const args = [...(options.planId ? ['--plan-id', options.planId] : []),
-        ...(options.trainPlan ? ['--train-plan', options.trainPlan] : [])];
-      return args.length ? invoke('resolve', taskId, args) : invoke('resolve', taskId);
-    });
-  merge.command('review').argument('<task-id>', 'Canonical YYLO Ledger task ID').action((taskId: string) => invoke('review', taskId));
-  merge.command('reopen').argument('<task-id>', 'Task with review findings and a new committed tip')
-    .option('--plan-id <sha256>', 'Require this exact current feasibility identity')
-    .action((taskId: string, options: { planId?: string }) => options.planId
-      ? invoke('reopen', taskId, ['--plan-id', options.planId])
-      : invoke('reopen', taskId));
-  merge
-    .command('withdraw')
-    .description('Withdraw one queued task after proving no live producer owns its claims')
-    .argument('<task-id>', 'Canonical YYLO Ledger task ID')
-    .option('--reason <text>', 'Bounded operator reason recorded in the withdraw receipt')
-    .action((taskId: string, options: { reason?: string }) => options.reason
-      ? invoke('withdraw', taskId, ['--reason', options.reason])
-      : invoke('withdraw', taskId));
-  const reconcile = merge.command('reconcile')
-    .description('Reconcile terminal findings whose exact tip is already in the protected target');
-  reconcile.command('plan').argument('<task-id>', 'Terminal findings task to reconcile')
-    .action((taskId: string) => invoke('reconcile', undefined, ['plan', taskId]));
-  reconcile.command('apply').argument('<task-id>', 'Task bound by the reconciliation receipt')
-    .requiredOption('--receipt <path>', 'Canonical immutable reconciliation receipt')
-    .requiredOption('--receipt-sha256 <sha256>', 'Exact receipt byte identity')
-    .action((taskId: string, options: { receipt: string; receiptSha256: string }) =>
-      invoke('reconcile', undefined, ['apply', taskId, '--receipt', options.receipt,
-        '--receipt-sha256', options.receiptSha256]));
-  const refresh = merge.command('refresh')
-    .description('Safely admit exact protected-target bytes into a queued candidate');
-  refresh.command('plan').argument('<task-id>', 'Queued or reopen candidate')
-    .action((taskId: string) => invoke('refresh', undefined, ['plan', taskId]));
-  refresh.command('apply').argument('<task-id>', 'Candidate bound by the refresh receipt')
-    .requiredOption('--receipt <path>', 'Canonical immutable refresh receipt')
-    .requiredOption('--receipt-sha256 <sha256>', 'Exact receipt byte identity')
-    .action((taskId: string, options: { receipt: string; receiptSha256: string }) =>
-      invoke('refresh', undefined, ['apply', taskId, '--receipt', options.receipt,
-        '--receipt-sha256', options.receiptSha256]));
+
+  merge.command('project')
+    .description('Retry or repair Ledger projection for an already integrated Git result')
+    .argument('<task-id>', 'Task whose source ancestry is already in the target')
+    .action((taskId: string) => invoke('project', taskId));
 }

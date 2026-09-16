@@ -8,6 +8,7 @@ export const MANAGED_INSTALL_POOL_MATCH_GLOBS: [string, 'forks'][] = [
   ['src/utils/__tests__/managed-controller-recovery.test.ts', 'forks'],
   ['src/utils/__tests__/managed-project-assets.test.ts', 'forks'],
   ['src/utils/__tests__/script-installer.test.ts', 'forks'],
+  ['src/utils/__tests__/task-workspace-fixture-modes.test.ts', 'forks'],
   ['src/utils/__tests__/task-workspace.test.ts', 'forks'],
 ];
 

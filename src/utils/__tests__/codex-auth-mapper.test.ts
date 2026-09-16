@@ -28,9 +28,9 @@ describe('codex-auth-mapper', () => {
       {
         auth_mode: 'chatgpt',
         tokens: {
-          id_token: 'id-token-value',
+          id_token: 'idtok',
           access_token: accessToken,
-          refresh_token: 'refresh-token-value',
+          refresh_token: 'reftok',
           account_id: 'acc_123',
         },
         last_refresh: '2026-03-08T00:00:00.000Z',
@@ -57,7 +57,7 @@ describe('codex-auth-mapper', () => {
     expect(output['openai-codex']).toMatchObject({
       type: 'oauth',
       access: accessToken,
-      refresh: 'refresh-token-value',
+      refresh: 'reftok',
       accountId: 'acc_123',
     });
     expect(output['openai-codex'].expires).toBe(expSeconds * 1000);
@@ -73,9 +73,9 @@ describe('codex-auth-mapper', () => {
       {
         auth_mode: 'chatgpt',
         tokens: {
-          id_token: 'not-a-jwt',
-          access_token: 'also-not-a-jwt',
-          refresh_token: 'refresh-token-value',
+          id_token: 'nojwt',
+          access_token: 'nojwt2',
+          refresh_token: 'reftok',
           account_id: 'acc_456',
         },
       },

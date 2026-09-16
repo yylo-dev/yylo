@@ -694,10 +694,10 @@ class TestValidateSlackEnvironment:
 
     def test_valid_token(self):
         """Should pass with valid bot token."""
-        with patch.dict(os.environ, {'SLACK_BOT_TOKEN': 'xoxb-valid-token'}, clear=False):
+        with patch.dict(os.environ, {'SLACK_BOT_TOKEN': 'xoxb-ok'}, clear=False):
             token, errors = validate_slack_environment()
 
-            assert token == 'xoxb-valid-token'
+            assert token == 'xoxb-ok'
             assert errors == []
 
     def test_missing_token(self):

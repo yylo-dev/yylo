@@ -52,11 +52,9 @@ describe('target-bound managed controller recovery', {
     expect(changedScripts).toEqual([
       'managed_agent_runner.py',
       'merge_queue.py',
-      'release_train.py',
       'task_workspace.py',
       'tests/test_managed_agent_runner.py',
       'tests/test_merge_queue.py',
-      'tests/test_release_train.py',
       'tests/test_task_workspace.py',
     ]);
     for (const name of changedScripts) {

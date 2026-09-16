@@ -150,6 +150,7 @@ describe('Configuration Module', () => {
         mcpRetries: 5,
         interactive: false,
         headlessMode: true,
+        headlessUi: { turnCostDisplayThresholdUsd: 0.5 },
         workingDirectory: '/test/path',
         sessionDirectory: '/test/sessions',
         envFilePath: '.env.yylo',
@@ -169,6 +170,17 @@ describe('Configuration Module', () => {
       };
 
       expect(() => validateConfig(invalidConfig)).toThrow(/defaultSubagent/);
+    });
+
+    it('validates provider-neutral headless UI settings', () => {
+      expect(validateConfig({
+        ...DEFAULT_CONFIG,
+        headlessUi: { turnCostDisplayThresholdUsd: 0.75 },
+      }).headlessUi.turnCostDisplayThresholdUsd).toBe(0.75);
+      expect(() => validateConfig({
+        ...DEFAULT_CONFIG,
+        headlessUi: { turnCostDisplayThresholdUsd: -0.01 },
+      })).toThrow(/greater than or equal to 0/);
     });
 
     it('should accept per-subagent defaultModels overrides', () => {
@@ -1040,6 +1052,93 @@ logLevel: info
       await fs.remove(environment);
       await fs.symlink(target, environment);
       await expect(loadConfig({ baseDir: tempDir })).rejects.toThrow(/missing, unsafe, or unreadable/);
+    });
+
+    it('auto-loads a safe ambient controller .env.yylo without an explicit binding', async () => {
+      await fs.ensureDir(path.join(tempDir, '.juno_task', 'prompts'));
+      await fs.writeJson(path.join(tempDir, '.juno_task', 'config.json'), {
+        controllerWorkspace: {
+          mode: 'metadata-only', policy: '.juno_task/config/metadata-controller.json',
+        },
+      });
+      await fs.writeFile(path.join(tempDir, '.env.yylo'), 'YYLO_DEFAULT_MAX_ITERATIONS=7\n', { mode: 0o600 });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        const config = await loadConfig({ baseDir: tempDir });
+        expect(process.env.YYLO_DEFAULT_MAX_ITERATIONS).toBe('7');
+        expect(config.defaultMaxIterations).toBe(7);
+        expect(warnSpy).not.toHaveBeenCalled();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('skips an unsafe ambient controller .env.yylo with a warning instead of failing', async () => {
+      await fs.ensureDir(path.join(tempDir, '.juno_task', 'prompts'));
+      await fs.writeJson(path.join(tempDir, '.juno_task', 'config.json'), {
+        controllerWorkspace: {
+          mode: 'metadata-only', policy: '.juno_task/config/metadata-controller.json',
+        },
+      });
+      const ambient = path.join(tempDir, '.env.yylo');
+      await fs.writeFile(ambient, 'YYLO_DEFAULT_MAX_ITERATIONS=7\n', { mode: 0o644 });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        const config = await loadConfig({ baseDir: tempDir });
+        expect(config.defaultMaxIterations).toBe(DEFAULT_CONFIG.defaultMaxIterations);
+        expect(process.env.YYLO_DEFAULT_MAX_ITERATIONS).toBeUndefined();
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('mode 0600'));
+
+        warnSpy.mockClear();
+        const target = path.join(tempDir, 'ambient-target');
+        await fs.writeFile(target, 'YYLO_DEFAULT_MAX_ITERATIONS=7\n', { mode: 0o600 });
+        await fs.remove(ambient);
+        await fs.symlink(target, ambient);
+        const symlinkConfig = await loadConfig({ baseDir: tempDir });
+        expect(symlinkConfig.defaultMaxIterations).toBe(DEFAULT_CONFIG.defaultMaxIterations);
+        expect(process.env.YYLO_DEFAULT_MAX_ITERATIONS).toBeUndefined();
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(ambient));
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('treats a missing ambient controller .env.yylo as a silent no-op without creating it', async () => {
+      await fs.ensureDir(path.join(tempDir, '.juno_task', 'prompts'));
+      await fs.writeJson(path.join(tempDir, '.juno_task', 'config.json'), {
+        controllerWorkspace: {
+          mode: 'metadata-only', policy: '.juno_task/config/metadata-controller.json',
+        },
+      });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        const config = await loadConfig({ baseDir: tempDir });
+        expect(config.defaultMaxIterations).toBe(DEFAULT_CONFIG.defaultMaxIterations);
+        expect(warnSpy).not.toHaveBeenCalled();
+        expect(await fs.pathExists(path.join(tempDir, '.env.yylo'))).toBe(false);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('keeps an explicit environment binding authoritative over the ambient controller .env.yylo', async () => {
+      const environment = path.join(tempDir, 'controller.env');
+      await fs.writeFile(environment, 'YYLO_DEFAULT_MAX_ITERATIONS=11\n', { mode: 0o600 });
+      await fs.writeFile(path.join(tempDir, '.env.yylo'), 'YYLO_DEFAULT_MAX_ITERATIONS=12\n', { mode: 0o600 });
+      await fs.ensureDir(path.join(tempDir, '.juno_task', 'prompts'));
+      await fs.writeJson(path.join(tempDir, '.juno_task', 'config.json'), {
+        controllerWorkspace: {
+          mode: 'metadata-only', policy: '.juno_task/config/metadata-controller.json',
+        },
+        agentProfile: {
+          version: 1, promptAssetRoot: '.juno_task/prompts',
+          environmentBinding: { source: environment, authorized: true },
+        },
+      });
+      process.env.YYLO_PROJECT_BOOTSTRAP_WRITES = '0';
+      expect((await loadConfig({ baseDir: tempDir })).defaultMaxIterations).toBe(11);
     });
 
     it('should load from specific config file', async () => {

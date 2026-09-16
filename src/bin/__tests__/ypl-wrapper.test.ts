@@ -315,8 +315,11 @@ describe('ypl wrapper', () => {
         cwd: controller, reject: false,
       env: { ...process.env, PATH: `${launcherBin}${path.delimiter}${process.env.PATH ?? ''}` },
       });
-      expect(localController.exitCode).toBe(98);
-      expect(localController.stdout).toBe('');
+      expect(localController.exitCode).toBe(0);
+      expect(JSON.parse(localController.stdout)).toMatchObject({
+        argv0: 'yy', args: ['merge', 'status'], cwd: await fs.realpath(controller),
+        env: { effective: await fs.realpath(controller), asserted: 'controller', enforcement: 'strict' },
+      });
 
       await execa('git', ['config', '--worktree', 'juno.controller.runtimeExecutable', path.join(controller, 'missing-runtime.mjs')], { cwd: controller });
       const invalidRuntime = await execa(path.join(launcherBin, 'yy'), ['merge', 'status'], {
@@ -441,12 +444,11 @@ describe('ypl wrapper', () => {
     { args: ['task', 'status', 'T1'], operation: 'kanban' },
     { args: ['task', 'preflight', 'T1'], operation: 'kanban' },
     { args: ['task', 'doctor'], operation: 'kanban' },
-    { args: ['task', 'recovery-plan', 'T1'], operation: 'kanban' },
     { args: ['evidence', 'status', 'T1'], operation: 'kanban' },
     { args: ['merge', 'status'], operation: 'kanban' },
-    { args: ['merge', 'plan', 'T1'], operation: 'kanban' },
     { args: ['task', 'start', 'T1'], operation: 'orchestration' },
     { args: ['task', 'run', 'T1'], operation: 'orchestration' },
+    { args: ['task', 'resume', 'T1'], operation: 'orchestration' },
     { args: ['task', 'recover-predispatch', 'T1', '--run-id', 'run-12345678'], operation: 'orchestration' },
     { args: ['task', 'recover-wall-budget', 'T1', '--run-id', 'run-12345678', '--attempt', '1', '--predispatch-receipt-sha256', 'a'.repeat(64), '--original-deadline-unix-ns', '1787895956343575000'], operation: 'orchestration' },
     { args: ['task', 'hydrate', 'T1'], operation: 'orchestration' },
@@ -455,18 +457,11 @@ describe('ypl wrapper', () => {
     { args: ['task', 'sync', 'T1'], operation: 'orchestration' },
     { args: ['evidence', 'run', 'T1'], operation: 'orchestration' },
     { args: ['evidence', 'await', 'T1'], operation: 'orchestration' },
-    { args: ['merge', 'next'], operation: 'orchestration' },
-    { args: ['merge', 'drive'], operation: 'orchestration' },
-    { args: ['merge', 'drive', '--through', 'T1'], operation: 'orchestration' },
-    { args: ['merge', 'withdraw', 'T1'], operation: 'orchestration' },
-    { args: ['merge', 'next'], operation: 'orchestration' },
-    { args: ['merge', 'resolve', 'T1'], operation: 'orchestration' },
-    { args: ['merge', 'review', 'T1'], operation: 'orchestration' },
-    { args: ['merge', 'reopen', 'T1'], operation: 'orchestration' },
-    { args: ['merge', 'reconcile', 'plan', 'T1'], operation: 'orchestration' },
-    { args: ['merge', 'refresh', 'plan', 'T1'], operation: 'orchestration' },
+    { args: ['merge', 'land', 'T1'], operation: 'orchestration' },
+    { args: ['merge', 'project', 'T1'], operation: 'orchestration' },
     { args: ['integration', 'status'], operation: 'kanban' },
     { args: ['integration', 'sync'], operation: 'orchestration' },
+    { args: ['integration', 'runtime-adopt-source', '--previous-sha', 'a'.repeat(40), '--target-sha', 'b'.repeat(40), '--install-prefix', '/tmp/runtime', '--output', '/tmp/adoption.json'], operation: 'orchestration' },
     { args: ['integration', 'runtime-doctor'], operation: 'orchestration' },
     { args: ['integration', 'runtime-refresh', '--previous-sha', 'a'.repeat(40)], operation: 'orchestration' },
     { args: ['task', 'runtime-bootstrap', '--dry-run'], operation: 'orchestration' },
@@ -525,7 +520,7 @@ describe('ypl wrapper', () => {
       if (operation === null) {
         expect(await fs.pathExists(operationMarker)).toBe(false);
         expect(result.stderr).toContain(
-          `control-plane routing refused unknown ${args[0]} subcommand 'mystery'`,
+          `control-plane routing refused unknown ${args[0]} subcommand '${args[1]}'`,
         );
       } else {
         expect(await fs.readFile(operationMarker, 'utf8')).toBe(operation);
@@ -537,7 +532,7 @@ describe('ypl wrapper', () => {
     }
   });
 
-  it('forwards the effective task policy to the pinned controller runtime', async () => {
+  it('forwards source adoption through a stale launcher to the pinned controller runtime', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'juno-wrapper-forwarded-policy-'));
     try {
       const controller = path.join(tempDir, 'controller');
@@ -574,13 +569,56 @@ describe('ypl wrapper', () => {
       await fs.symlink('yylo', path.join(launcherBin, 'yy'));
       await fs.writeFile(path.join(launcherBin, 'cli.mjs'), 'process.exit(98)\n');
 
-      const result = await execa(path.join(launcherBin, 'yy'), ['task', 'finish', 'T1'], {
+      const result = await execa(path.join(launcherBin, 'yy'), [
+        'integration', 'runtime-adopt-source',
+        '--previous-sha', 'a'.repeat(40), '--target-sha', 'b'.repeat(40),
+        '--install-prefix', '/tmp/runtime', '--output', '/tmp/adoption.json',
+      ], {
         cwd: integration,
         reject: false,
-      env: { ...process.env, PATH: `${launcherBin}${path.delimiter}${process.env.PATH ?? ''}` },
+        env: { ...process.env, PATH: `${launcherBin}${path.delimiter}${process.env.PATH ?? ''}` },
       });
       expect(result.exitCode).toBe(0);
       expect(await fs.readFile(runtimeMarker, 'utf8')).toBe('orchestration');
+    } finally {
+      await fs.remove(tempDir);
+    }
+  });
+
+  it('uses the selected controller runtime for a fresh public yy merge --help process', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'juno-wrapper-controller-help-'));
+    try {
+      const controller = path.join(tempDir, 'controller');
+      const launcherBin = path.join(tempDir, 'launcher-bin');
+      const packagedScripts = path.join(tempDir, 'templates', 'scripts');
+      await fs.ensureDir(controller);
+      await fs.ensureDir(launcherBin);
+      await fs.ensureDir(packagedScripts);
+      await execa('git', ['init', '-b', 'controller'], { cwd: controller });
+      const runtime = path.join(controller, 'adopted-runtime.mjs');
+      await fs.writeFile(runtime, "process.stdout.write('Commands: status land project\\n')\n");
+      await execa('git', ['config', 'extensions.worktreeConfig', 'true'], { cwd: controller });
+      await execa('git', ['config', '--worktree', 'juno.controller.runtimeExecutable', runtime], {
+        cwd: controller,
+      });
+      await fs.writeFile(
+        path.join(packagedScripts, 'controller_resolver.py'),
+        [
+          'import json',
+          `print(json.dumps({'path': ${JSON.stringify(controller)}, 'current_root': ${JSON.stringify(controller)}, 'role': 'controller', 'expected_branch': 'refs/heads/controller', 'source': 'registration'}))`,
+        ].join('\n'),
+      );
+      await fs.copy(YYLO_SOURCE, path.join(launcherBin, 'yylo'));
+      await fs.chmod(path.join(launcherBin, 'yylo'), 0o755);
+      await fs.symlink('yylo', path.join(launcherBin, 'yy'));
+      await fs.writeFile(path.join(launcherBin, 'cli.mjs'), 'process.exit(98)\n');
+
+      const result = await execa(path.join(launcherBin, 'yy'), ['merge', '--help'], {
+        cwd: controller, reject: false,
+        env: { ...process.env, PATH: `${launcherBin}${path.delimiter}${process.env.PATH ?? ''}` },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('Commands: status land project');
     } finally {
       await fs.remove(tempDir);
     }

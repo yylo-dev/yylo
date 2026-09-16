@@ -755,7 +755,15 @@ def policy_bundle(args: argparse.Namespace) -> dict[str, Any]:
         disposition = decision_rows.get(path)
         if disposition and ((path in copied) != (disposition == "keep")):
             raise InventoryError(f"disposition for {path} contradicts copied_metadata")
-    recursive = [path for path in (".juno_task/ledger", ".juno_task/tasks") if path in copied]
+    durable_recursive_roots = (
+        ".juno_task/archive", ".juno_task/archive-receipts",
+        ".juno_task/artifact-ledger", ".juno_task/artifacts",
+        ".juno_task/config/umbrella-admissions",
+        ".juno_task/document-ledger", ".juno_task/documents",
+        ".juno_task/ledger", ".juno_task/objects", ".juno_task/task-scopes",
+        ".juno_task/tasks", ".juno_task/wiki",
+    )
+    recursive = [path for path in durable_recursive_roots if path in copied]
     top_level = [".juno_task/receipts"] + ([".juno_task/specs"] if ".juno_task/specs" in copied else [])
     exact_copied = [path for path in copied if path not in recursive and path not in top_level]
     metadata = {

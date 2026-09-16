@@ -295,14 +295,14 @@ describe('normalized workspace topology', () => {
         taskId: 'T1',
         candidateSha: candidate,
         firstIncompletePhase: 'managed_runtime_refresh',
-        recoveryCommand: 'yy merge next',
+        recoveryCommand: 'yy merge project T1',
       }),
     ]);
     expect(report.findings).toContainEqual(
       expect.objectContaining({
         code: 'post-integration-incomplete',
         severity: 'error',
-        nextCommand: 'yy merge next',
+        nextCommand: 'yy merge project T1',
       }),
     );
     expect(report.healthy).toBe(false);

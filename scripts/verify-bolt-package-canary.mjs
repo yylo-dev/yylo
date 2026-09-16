@@ -52,6 +52,9 @@ try {
     'dist/templates/scripts/integration_candidate.py',
     'dist/templates/scripts/integration_owner_preflight.py',
     'dist/templates/scripts/worktree_lifecycle.py',
+    'dist/templates/scripts/release_train.py',
+    'dist/templates/scripts/tests/test_release_train.py',
+    'dist/templates/wiki/controller/sealed_release_epochs.md',
     'dist/templates/config/lifecycle.json',
     'dist/templates/config/controller-workspace.json',
   ]) {
@@ -59,12 +62,17 @@ try {
   }
 
   const instructionFiles = [
+    'dist/templates/controller-agent/AGENTS.md',
+    'dist/templates/controller-agent/CLAUDE.md',
     'dist/templates/prompts/new_task_workflow.md',
     'dist/templates/prompts/clean_worktree.md',
     'dist/templates/prompts/run_workflow.md',
   ];
   for (const relative of instructionFiles) {
     const instruction = readFileSync(path.join(installed, relative), 'utf8');
+    assert.doesNotMatch(instruction, /release[-_ ]train|sealed release epoch/iu,
+      `packed retired release-train instruction: ${relative}`);
+    if (relative.includes('/controller-agent/')) continue;
     assert.match(instruction, /yy task preflight TASK_ID/u, `missing task preflight: ${relative}`);
     assert.match(instruction, /\.\.\/wiki\/controller\/task_dependency_hydration\.md/u,
       `stale controller wiki link: ${relative}`);
@@ -89,13 +97,13 @@ try {
       'TaskWorkspaceTests.test_finish_refuses_failed_focused_validation_without_state_advance',
     ],
     merge_queue: [
-      'MergeQueueTests.test_parallel_x_y_then_moved_target_uses_one_two_parent_composition',
-      'MergeQueueTests.test_real_a_b_text_conflict_is_preserved_then_resolved_without_feature_recreation',
-      'MergeQueueTests.test_reviewer_a_pass_b_transport_failure_retries_only_b_in_fresh_namespace',
-      'MergeQueueTests.test_nonblocking_target_lock_refuses_duplicate_worker_without_state_or_ref_change',
-      'MergeQueueTests.test_failed_validation_and_target_movement_do_zero_queue_cas',
-      'MergeQueueTests.test_cleanup_refuses_dirty_reachable_checkout_and_target_readback_is_exact',
-      'MergeQueueTests.test_cleanup_refuses_unreachable_candidate',
+      'NativeDeliveryTests.test_clean_divergent_merge_preserves_both_sides_and_separates_projection',
+      'NativeDeliveryTests.test_conflict_is_private_and_does_not_block_unrelated_task',
+      'NativeDeliveryTests.test_competing_expected_old_update_rejects_stale_candidate',
+      'NativeDeliveryTests.test_target_move_requires_recomposition',
+      'NativeDeliveryTests.test_dirty_source_bytes_and_already_contained_retry_are_preserved',
+      'NativeDeliveryTests.test_ledger_failure_occurs_after_git_and_does_not_repeat_integration',
+      'NativeDeliveryTests.test_checked_out_target_is_refused_without_mutation',
     ],
     metadata_controller: [
       'MetadataControllerTest.test_prepare_creates_unrelated_metadata_only_controller_and_preserves_product',
@@ -106,6 +114,17 @@ try {
     run('python3', [path.join(scripts, `tests/test_${suite}.py`), ...tests], installed,
       { JUNO_TASK_ROOT: installed });
   }
+
+  const profilerReceipt = path.join(temporary, 'task-workspace-profile.json');
+  run(process.execPath, [
+    path.join(installed, 'scripts/test-task-workspace.mjs'),
+    '--mode', 'seeded',
+    '--test-id', 'SemVerValidationTests.test_rejects_malformed_versions',
+    '--receipt', profilerReceipt,
+  ], installed);
+  const profiler = JSON.parse(readFileSync(profilerReceipt, 'utf8'));
+  assert.equal(profiler.eligible, true, 'packed task-workspace profiler must be eligible');
+  assert.equal(profiler.counts.selected, 1, 'packed task-workspace profiler selected count');
 
   const dependencies = path.resolve('node_modules');
   assert.ok(existsSync(dependencies), 'build dependencies are required for the packed CLI canary');
@@ -137,6 +156,7 @@ try {
       expected_refusals: 7,
       metadata_prepare_verify_cutover_rollback: true,
       retired_entrypoints_refused: 2,
+      packed_task_workspace_profiler: true,
     },
     orchestration: {
       model_calls: 0,

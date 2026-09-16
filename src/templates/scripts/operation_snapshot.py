@@ -24,6 +24,12 @@ REQUIRED_PHASES = frozenset({
 PHASE_ORDER = {name: index for index, name in enumerate(
     ("validation", "risk", "documentation", "review", "integration"))}
 OID_RE = re.compile(r"[0-9a-f]{40,64}")
+SUBMISSION_FIELDS = frozenset({
+    "task_id", "requirements_sha256", "admitted_scope_sha256",
+    "generated_scope_sha256", "base_sha", "tip_sha", "tree_sha",
+    "origin_projection_sha256", "hydration_sha256", "dependency_sha256",
+    "runtime_sha256", "validation_sha256", "risk_sha256",
+})
 
 
 class OperationSnapshotError(RuntimeError):
@@ -98,11 +104,25 @@ def _commands(values: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda row: row["id"])
 
 
+def _submission(value: Mapping[str, Any]) -> dict[str, str]:
+    if not isinstance(value, Mapping) or set(value) != SUBMISSION_FIELDS:
+        raise OperationSnapshotError("immutable task submission is incomplete or contains unknown fields")
+    normalized = _bounded_strings(value, "immutable task submission")
+    if (not OID_RE.fullmatch(normalized["base_sha"])
+            or not OID_RE.fullmatch(normalized["tip_sha"])
+            or not OID_RE.fullmatch(normalized["tree_sha"])
+            or any(not re.fullmatch(r"[0-9a-f]{64}", normalized[field])
+                   for field in SUBMISSION_FIELDS - {"task_id", "base_sha", "tip_sha", "tree_sha"})):
+        raise OperationSnapshotError("immutable task submission identity is malformed")
+    return normalized
+
+
 def compile_operation_snapshot(*, root: Path, candidate: str, target: str,
                                commands: Iterable[Mapping[str, Any]],
                                routing: Mapping[str, Any], environment: Mapping[str, Any],
                                read_sets: Iterable[Mapping[str, Any]],
                                managed_outputs: Mapping[str, Any], discovery: Mapping[str, Any],
+                               submission: Mapping[str, Any],
                                observed_controller_head: str | None = None,
                                controller_status: Iterable[str] | None = None) -> dict[str, Any]:
     """Compile exact admitted operation bytes; checkout observations are ignored.
@@ -180,8 +200,10 @@ def compile_operation_snapshot(*, root: Path, candidate: str, target: str,
         "environment": normalized_environment,
         "discovery": {"complete": True, "kind": "exact-import-closure"},
         "managed_outputs": normalized_managed,
+        "submission": _submission(submission),
         "read_sets": units,
     }
+    body["submission_sha256"] = _digest(body["submission"])
     return {**body, "snapshot_sha256": _digest(body)}
 
 
@@ -194,6 +216,15 @@ def verify_operation_snapshot(snapshot: Any) -> dict[str, Any]:
         reasons.append({"code": "SNAPSHOT_SCHEMA_UNSUPPORTED"})
     if snapshot.get("snapshot_sha256") != _digest(body):
         reasons.append({"code": "SNAPSHOT_DIGEST_MISMATCH"})
+    submission = snapshot.get("submission")
+    # Finite compatibility reader for v1 snapshots produced before immutable
+    # submissions were added. New compilers always emit the bound submission;
+    # a partially present or malformed addition is never interpreted as legacy.
+    legacy_submission = "submission" not in snapshot and "submission_sha256" not in snapshot
+    if (not legacy_submission
+            and (not isinstance(submission, dict) or set(submission) != SUBMISSION_FIELDS
+                 or snapshot.get("submission_sha256") != _digest(submission))):
+        reasons.append({"code": "SUBMISSION_MISSING_OR_TAMPERED"})
     units = snapshot.get("read_sets")
     if not isinstance(units, list):
         reasons.append({"code": "READ_SETS_MISSING"})
@@ -283,8 +314,9 @@ def phase_invalidation(previous: Any, current: Any) -> list[dict[str, Any]]:
         reasons = (previous_check["reasons"] + current_check["reasons"])[:MAX_ATTRIBUTION_ROWS]
         return [{"phase": "validation", "unit_id": "unknown", "reason": "snapshot_invalid",
                  "attribution": reasons}]
-    if previous["candidate_sha"] != current["candidate_sha"] or previous["target_sha"] != current["target_sha"]:
-        return [{"phase": "validation", "unit_id": "all", "reason": "candidate_or_target_drift"}]
+    if previous["candidate_sha"] != current["candidate_sha"]:
+        return [{"phase": "validation", "unit_id": "all", "reason": "candidate_drift"}]
+    target_drift = previous["target_sha"] != current["target_sha"]
     old, new = _units(previous), _units(current)
     rows: list[dict[str, Any]] = []
     for identity in sorted(set(old) | set(new), key=lambda item: (PHASE_ORDER.get(item[0], 99), item[1])):
@@ -310,6 +342,19 @@ def phase_invalidation(previous: Any, current: Any) -> list[dict[str, Any]]:
         rows.append({"phase": "validation", "unit_id": "all", "reason": "environment_drift"})
     if previous["managed_outputs"] != current["managed_outputs"]:
         rows.append({"phase": "integration", "unit_id": "managed-outputs", "reason": "managed_output_drift"})
+    if previous.get("submission_sha256") != current.get("submission_sha256"):
+        before = previous.get("submission", {})
+        after = current.get("submission", {})
+        changed = sorted(key for key in SUBMISSION_FIELDS if before.get(key) != after.get(key))
+        phase = ("validation" if set(changed) & {
+            "admitted_scope_sha256", "generated_scope_sha256", "base_sha", "tip_sha",
+            "tree_sha", "origin_projection_sha256", "hydration_sha256",
+            "dependency_sha256", "runtime_sha256", "validation_sha256"} else "risk")
+        rows.append({"phase": phase, "unit_id": "task-submission",
+                     "reason": "submission_drift", "changed_fields": changed})
+    if target_drift:
+        rows.append({"phase": "integration", "unit_id": "live-target",
+                     "reason": "target_drift"})
     if any(row["phase"] == "documentation" for row in rows) and not any(row["phase"] == "review" for row in rows):
         rows.append({"phase": "review", "unit_id": "documentation-dependent",
                      "reason": "active_documentation_drift"})
@@ -323,7 +368,8 @@ def compile_identity_operation_snapshot(*, candidate: str, target: str,
                                         environment: Mapping[str, Any],
                                         phase_units: Iterable[Mapping[str, Any]],
                                         managed_outputs: Mapping[str, Any],
-                                        discovery: Mapping[str, Any]) -> dict[str, Any]:
+                                        discovery: Mapping[str, Any],
+                                        submission: Mapping[str, Any]) -> dict[str, Any]:
     """Compile a snapshot from already content-addressed lifecycle inputs.
 
     This adapter is for Git/runtime closures whose bytes were discovered by the
@@ -371,7 +417,8 @@ def compile_identity_operation_snapshot(*, candidate: str, target: str,
             "environment": _bounded_strings(environment, "admitted environment"),
             "discovery": {"complete": True, "kind": "exact-import-closure"},
             "managed_outputs": _bounded_strings(managed_outputs, "managed-output identity"),
-            "read_sets": units}
+            "submission": _submission(submission), "read_sets": units}
+    body["submission_sha256"] = _digest(body["submission"])
     if not OID_RE.fullmatch(candidate) or not OID_RE.fullmatch(target):
         raise OperationSnapshotError("candidate or target identity is malformed")
     return {**body, "snapshot_sha256": _digest(body)}

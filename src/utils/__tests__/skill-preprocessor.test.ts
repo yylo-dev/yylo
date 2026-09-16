@@ -417,9 +417,9 @@ describe('Pi input handler argument preservation', () => {
   });
 
   it('preserves the multiline ypl payload after shortcut rewriting byte-for-byte', async () => {
-    skill('ralph-loop', 'Instructions only');
+    skill('ralph-loop-yylo', 'Instructions only');
     const heredoc = '## oD5g4o\nWhat is the root cause of 504\n@@no_code';
-    const rewritten = `/skill:ralph-loop ${heredoc}`;
+    const rewritten = `/skill:ralph-loop-yylo ${heredoc}`;
     expect(expandSkillInvocation(rewritten, tmpDir)!.split('</skill>\n\n')[1]).toBe(heredoc);
 
     let handler: ((event: { text: string }) => unknown) | undefined;

@@ -42,7 +42,7 @@ describe('explicit command preflight', () => {
     [['future-command', 'status'], 'prompt'],
     [['future-command', '--dry-run'], 'prompt'],
     [['@@close_loop'], 'prompt'],
-    [['/skill:ralph-loop', '##T1'], 'prompt'],
+    [['/skill:ralph-loop-yylo', '##T1'], 'prompt'],
     [['--', 'integration', 'sync'], 'prompt'],
     [['-p', 'integration sync'], 'prompt'],
     [['--prompt-file', 'prompt.md'], 'prompt'],
@@ -62,7 +62,7 @@ describe('explicit command preflight', () => {
 
   it('reports executable and version identity with prompt recovery syntax', () => {
     expect(formatExplicitInvocationError(
-      { kind: 'unknown-command', token: 'integration' },
+      { kind: 'unknown-command', token: 'integ' },
       '/candidate/dist/bin/cli.mjs',
       '2.1.2',
     )).toContain('effective executable: /candidate/dist/bin/cli.mjs\neffective version: 2.1.2');

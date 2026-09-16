@@ -8,11 +8,12 @@ import {
   type TaskWorkspaceOperation,
 } from '../../cli/commands/task.js';
 import {
-  configureMergeQueueCommand,
-  mergeQueueControlOperation,
-  type MergeQueueOperation,
+  configureMergeCommand,
+  mergeControlOperation,
+  type MergeOperation,
 } from '../../cli/commands/merge.js';
 import { configureEvidenceCommand } from '../../cli/commands/evidence.js';
+import { configureIntegrationCommand } from '../../cli/commands/integration.js';
 
 const PROJECT_ROOT = path.resolve(__dirname, '../../..');
 const YYLO_SOURCE = path.join(PROJECT_ROOT, 'src/bin/yylo.sh');
@@ -28,7 +29,7 @@ function parseRouterAllowlist(source: string): Map<string, ControlOperation> {
   const classification = new Map<string, ControlOperation>();
   for (const line of source.split('\n')) {
     const match = line.match(
-      /^\s*((?:task|merge|evidence):[^\s|)]*(?:\|(?:task|merge|evidence):[^\s|)]*)*)\)\s+effective_operation=(kanban|orchestration)\s+;;/,
+      /^\s*((?:task|merge|evidence|integration):[^\s|)]*(?:\|(?:task|merge|evidence|integration):[^\s|)]*)*)\)\s+effective_operation=(kanban|orchestration)\s+;;/,
     );
     if (!match) continue;
     for (const alternative of match[1].split('|')) {
@@ -50,7 +51,7 @@ function registeredSubcommands(
 }
 
 describe('yylo.sh router allowlist contract', () => {
-  it('classifies every registered task, merge, and evidence subcommand exactly like the CLI', async () => {
+  it('classifies every registered control-plane subcommand exactly like the CLI', async () => {
     const router = parseRouterAllowlist(await fs.readFile(YYLO_SOURCE, 'utf8'));
 
     const taskOperations = registeredSubcommands(
@@ -58,12 +59,16 @@ describe('yylo.sh router allowlist contract', () => {
       'task',
     );
     const mergeOperations = registeredSubcommands(
-      (program) => configureMergeQueueCommand(program, async () => undefined),
+      (program) => configureMergeCommand(program, async () => undefined),
       'merge',
     );
     const evidenceOperations = registeredSubcommands(
       (program) => configureEvidenceCommand(program, async () => undefined),
       'evidence',
+    );
+    const integrationOperations = registeredSubcommands(
+      (program) => configureIntegrationCommand(program, async () => undefined),
+      'integration',
     );
 
     const expected = new Map<string, ControlOperation>();
@@ -76,7 +81,7 @@ describe('yylo.sh router allowlist contract', () => {
     for (const operation of mergeOperations) {
       expected.set(
         `merge:${operation}`,
-        mergeQueueControlOperation(operation as MergeQueueOperation),
+        mergeControlOperation(operation as MergeOperation),
       );
     }
     for (const operation of evidenceOperations) {
@@ -84,6 +89,9 @@ describe('yylo.sh router allowlist contract', () => {
         `evidence:${operation}`,
         taskWorkspaceControlOperation(`evidence-${operation}` as TaskWorkspaceOperation),
       );
+    }
+    for (const operation of integrationOperations) {
+      expected.set(`integration:${operation}`, operation === 'status' ? 'kanban' : 'orchestration');
     }
 
     const missing = [...expected.keys()].filter((key) => !router.has(key));
@@ -98,7 +106,7 @@ describe('yylo.sh router allowlist contract', () => {
     expect(mismatches, 'the wrapper must classify control commands identically to the CLI').toEqual([]);
 
     const helpForms = new Set<string>();
-    for (const prefix of ['task', 'merge', 'evidence']) {
+    for (const prefix of ['task', 'merge', 'evidence', 'integration']) {
       helpForms.add(`${prefix}:`);
       helpForms.add(`${prefix}:-h`);
       helpForms.add(`${prefix}:--help`);
@@ -116,10 +124,10 @@ describe('yylo.sh router allowlist contract', () => {
     }
   });
 
-  it('keeps task, merge, and evidence classified before checkout bootstrap', async () => {
+  it('keeps control commands and local tmux utilities classified before checkout bootstrap', async () => {
     const source = await fs.readFile(YYLO_SOURCE, 'utf8');
     expect(source).toMatch(
-      /-V\|--version\|info\|where\|benchmark\|ledger\|kanban\|task\|merge\|integration\|evidence\) return 0/,
+      /-V\|--version\|info\|where\|capabilities\|benchmark\|ledger\|kanban\|task\|merge\|integration\|evidence\|tmux\) return 0/,
     );
     expect(source).toMatch(/case "\$operation" in ledger\|kanban\|task\|merge\|integration\|evidence\) ;; \*\) return 1 ;; esac/);
   });

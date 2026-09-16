@@ -1111,11 +1111,12 @@ exec "$ROOT/.juno_task/scripts/git-flow.sh" "$@"
           console.log('Running install_requirements.sh --force-update...');
         }
 
-        const { execSync } = await import('child_process');
         try {
+          const { spawnSync } = await import('child_process');
+          // Array-form spawn: no shell interpolation of paths into a command string.
           const localVenv = path.join(projectDir, '.venv_juno');
           const inheritedPath = process.env.PATH ?? '';
-          const output = execSync(`${JSON.stringify(installScript)} --force-update`, {
+          const scan = spawnSync('bash', [installScript, '--force-update'], {
             cwd: projectDir,
             encoding: 'utf8',
             stdio: 'pipe',
@@ -1128,6 +1129,14 @@ exec "$ROOT/.juno_task/scripts/git-flow.sh" "$@"
                 : inheritedPath,
             },
           });
+          const output = scan.stdout ?? '';
+          if (scan.status !== 0) {
+            const failure: NodeJS.ErrnoException & { stdout?: string; stderr?: string } =
+              new Error(`install_requirements.sh --force-update failed with exit code ${scan.status}`);
+            failure.stdout = scan.stdout ?? '';
+            failure.stderr = scan.stderr ?? '';
+            throw failure;
+          }
 
           if (output && output.trim() && (debug || !silent)) {
             console.log(output);
@@ -1140,13 +1149,7 @@ exec "$ROOT/.juno_task/scripts/git-flow.sh" "$@"
           if (error.stdout && error.stdout.trim() && (debug || !silent)) {
             console.log(error.stdout);
           }
-          if (error.status !== 0) {
-            throw new Error(
-              `install_requirements.sh failed: ${error.message || error.stderr}`,
-              { cause: error },
-            );
-          }
-          throw error;
+          throw error instanceof Error ? error : new Error(String(error));
         }
       }
 

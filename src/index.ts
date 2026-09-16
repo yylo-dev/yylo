@@ -9,7 +9,14 @@ export * from './core/config';
 export * from './templates/default-hooks';
 export * from './core/engine';
 export * from './core/execution-envelope';
+export {
+  MACHINE_RESPONSE_SCHEMA,
+  type MachineFormat,
+  type MachineOutputRequest,
+  type MachineResponse,
+} from './cli/machine-output';
 export * from './core/session';
+export * from './core/tmux-workspace';
 // Utility exports (excluding validateConfig to avoid conflicts)
 export * from './utils/environment';
 export {

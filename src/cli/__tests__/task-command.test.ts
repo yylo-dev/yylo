@@ -25,8 +25,10 @@ describe('task workspace CLI', () => {
 
   it.each([
     { operation: 'run', expected: undefined },
+    { operation: 'resume', expected: undefined },
     { operation: 'start', expected: [] },
     { operation: 'status', expected: undefined },
+    { operation: 'admission', expected: undefined },
     { operation: 'hydrate', expected: [] },
     { operation: 'preflight', expected: undefined },
     { operation: 'checkpoint', expected: [] },
@@ -47,18 +49,18 @@ describe('task workspace CLI', () => {
     },
   );
 
-  it('exposes preflight, kanban sync, fencing leases, bounded umbrella recovery, and guarded runtime bootstrap below task', () => {
+  it('exposes one ordinary task surface without legacy umbrella commands', () => {
     const program = new Command();
     configureTaskWorkspaceCommand(program, async () => undefined);
     const task = program.commands.find((command) => command.name() === 'task');
     expect(task?.commands.map((command) => command.name())).toEqual([
-      'run', 'recover-predispatch', 'recover-wall-budget', 'start', 'preflight', 'checkpoint',
-      'child-checkpoint', 'hydrate', 'status', 'finish', 'doctor', 'sync', 'lease-status',
+      'run', 'resume', 'recover-predispatch', 'recover-wall-budget', 'start', 'admission', 'preflight', 'checkpoint',
+      'hydrate', 'status', 'finish', 'doctor', 'sync', 'lease-status',
       'lease-heartbeat', 'lease-handoff', 'lease-successor', 'lease-revoke', 'lease-release',
-      'recovery-plan', 'recovery-authorize', 'recovery-apply', 'runtime-bootstrap',
+      'state-archive-plan', 'state-archive-apply', 'state-archive-verify', 'state-archive-get',
+      'state-archive-rollback', 'runtime-bootstrap',
     ]);
-    expect(task?.commands.find((command) => command.name() === 'child-checkpoint')
-      ?.registeredArguments).toHaveLength(2);
+    expect(task?.helpInformation()).not.toContain('umbrella');
     expect(task?.commands.find((command) => command.name() === 'doctor')
       ?.registeredArguments[0]?.required).toBe(false);
     expect(task?.commands.find((command) => command.name() === 'runtime-bootstrap')
@@ -78,7 +80,7 @@ describe('task workspace CLI', () => {
     expect(bootstrap).toHaveBeenCalledWith(expected);
   });
 
-  it('documents baseline scope separately from repeatable selectable product roots', () => {
+  it('documents repeatable exact files while retaining legacy baseline omission', () => {
     const program = new Command();
     configureTaskWorkspaceCommand(program, async () => undefined);
     const task = program.commands.find((command) => command.name() === 'task');
@@ -86,12 +88,12 @@ describe('task workspace CLI', () => {
     const pathOption = start?.options.find((option) => option.long === '--path');
 
     expect(pathOption?.description).toBe(
-      'Additional selectable product root; omit for baseline/default paths',
+      'Exact authored file (including one policy-declared new file) or selectable product root; repeat for exact scope',
     );
     const help = start?.helpInformation();
     expect(help).toContain('--path <path>');
-    expect(help).toContain('Additional selectable product root; omit for');
-    expect(help).toContain('baseline/default paths (default: [])');
+    expect(help).toMatch(/policy-declared new\s+file/);
+    expect(help).toMatch(/repeat for exact\s+scope/);
   });
 
   it('uses baseline paths by default and forwards repeatable additional roots only for task start', async () => {
@@ -108,7 +110,7 @@ describe('task workspace CLI', () => {
     expect(invoke).toHaveBeenLastCalledWith('start', 'EXTRA', ['juno_kanban', 'frontend'], []);
   });
 
-  it('forwards umbrella admission and exact recovery plan/apply arguments', async () => {
+  it('forwards receipt-bound task-run recovery arguments without legacy umbrella options', async () => {
     const invoke = vi.fn(async () => undefined);
     const program = new Command().exitOverride().configureOutput({ writeOut: () => undefined });
     configureTaskWorkspaceCommand(program, invoke);
@@ -125,33 +127,16 @@ describe('task workspace CLI', () => {
       '--predispatch-receipt-sha256', 'a'.repeat(64),
       '--original-deadline-unix-ns', '1787895956343575000',
     ]);
-    await program.parseAsync(['node', 'yy', 'task', 'start', 'U1',
-      '--umbrella-admission', '/tmp/umbrella.json']);
-    expect(invoke).toHaveBeenLastCalledWith('start', 'U1', [],
-      ['--umbrella-admission', '/tmp/umbrella.json']);
-    await program.parseAsync(['node', 'yy', 'task', 'recovery-plan', 'U1',
-      '--umbrella-admission', '/tmp/umbrella.json', '--output', '/tmp/plan.json']);
-    expect(invoke).toHaveBeenLastCalledWith('recovery-plan', 'U1', [], [
-      '--umbrella-admission', '/tmp/umbrella.json', '--output', '/tmp/plan.json',
-    ]);
-    await program.parseAsync(['node', 'yy', 'task', 'recovery-authorize', 'U1',
-      '--umbrella-admission', '/tmp/umbrella.json', '--plan', '/tmp/plan.json']);
-    expect(invoke).toHaveBeenLastCalledWith('recovery-authorize', 'U1', [], [
-      '--umbrella-admission', '/tmp/umbrella.json', '--plan', '/tmp/plan.json',
-    ]);
-    await program.parseAsync(['node', 'yy', 'task', 'recovery-apply', 'U1',
-      '--umbrella-admission', '/tmp/umbrella.json', '--plan', '/tmp/plan.json',
-      '--authorization-receipt', '/tmp/authorization.json']);
-    expect(invoke).toHaveBeenLastCalledWith('recovery-apply', 'U1', [], [
-      '--umbrella-admission', '/tmp/umbrella.json', '--plan', '/tmp/plan.json',
-      '--authorization-receipt', '/tmp/authorization.json',
-    ]);
-    await program.parseAsync(['node', 'yy', 'task', 'child-checkpoint', 'U1', 'C1']);
-    expect(invoke).toHaveBeenLastCalledWith('child-checkpoint', 'U1', [], ['--child', 'C1']);
+    const task = program.commands.find((command) => command.name() === 'task');
+    const start = task?.commands.find((command) => command.name() === 'start');
+    expect(start?.options.map((option) => option.long)).not.toContain('--umbrella-admission');
+    expect(task?.commands.map((command) => command.name())).not.toContain('recovery-plan');
+    expect(task?.commands.map((command) => command.name())).not.toContain('child-checkpoint');
   });
 
   it('routes recovery planning through read-only kanban policy and apply through orchestration', () => {
     expect(taskWorkspaceControlOperation('recovery-plan')).toBe('kanban');
+    expect(taskWorkspaceControlOperation('recovery-verify')).toBe('kanban');
     expect(taskWorkspaceControlOperation('status')).toBe('kanban');
     expect(taskWorkspaceControlOperation('doctor')).toBe('kanban');
     expect(taskWorkspaceControlOperation('lease-status')).toBe('kanban');
@@ -163,6 +148,41 @@ describe('task workspace CLI', () => {
     expect(taskWorkspaceControlOperation('recovery-apply')).toBe('orchestration');
     expect(taskWorkspaceControlOperation('recover-predispatch')).toBe('orchestration');
     expect(taskWorkspaceControlOperation('recover-wall-budget')).toBe('orchestration');
+    expect(taskWorkspaceControlOperation('state-archive-plan')).toBe('kanban');
+    expect(taskWorkspaceControlOperation('state-archive-get')).toBe('kanban');
+    expect(taskWorkspaceControlOperation('state-archive-apply')).toBe('orchestration');
+    expect(taskWorkspaceControlOperation('state-archive-rollback')).toBe('orchestration');
+  });
+
+  it('forwards explicit state archive operations without inventing a task identity', async () => {
+    const invoke = vi.fn(async () => undefined);
+    const program = new Command().exitOverride().configureOutput({ writeOut: () => undefined });
+    configureTaskWorkspaceCommand(program, invoke);
+    await program.parseAsync(['node', 'yy', 'task', 'state-archive-plan', '--output', '/tmp/plan.json']);
+    expect(invoke).toHaveBeenLastCalledWith('state-archive-plan', '', [],
+      ['--output', '/tmp/plan.json']);
+    await program.parseAsync(['node', 'yy', 'task', 'state-archive-get', 'OLD']);
+    expect(invoke).toHaveBeenLastCalledWith('state-archive-get', 'OLD', [], []);
+    await program.parseAsync(['node', 'yy', 'task', 'state-archive-apply',
+      '--plan', '/tmp/plan.json', '--output', '/tmp/apply.json', '--authorize-state-compaction']);
+    expect(invoke).toHaveBeenLastCalledWith('state-archive-apply', '', [], [
+      '--plan', '/tmp/plan.json', '--output', '/tmp/apply.json', '--authorize-state-compaction',
+    ]);
+  });
+
+  it('documents token-bearing manual recovery separately from managed execution', async () => {
+    const program = new Command().exitOverride();
+    let help = '';
+    program.configureOutput({ writeOut: (text) => { help += text; } });
+    configureTaskWorkspaceCommand(program, async () => undefined);
+    await expect(program.parseAsync(['node', 'yy', 'task', 'lease-successor', '--help']))
+      .rejects.toMatchObject({ code: 'commander.helpDisplayed' });
+    expect(help).toContain('yy task start TASK_ID --lease-token <returned-token>');
+    expect(help).toContain('remains valid after this helper exits');
+    expect(help).toContain('do not repeat successor');
+    expect(help).toContain('yy task run TASK_ID (or resume)');
+    expect(help).toContain('lifecycle blockers and budgets still apply');
+    expect(help).toContain('never include them in logs or task evidence');
   });
 
   it('forwards the fencing lease token and lease command arguments exactly', async () => {
@@ -175,8 +195,15 @@ describe('task workspace CLI', () => {
     await program.parseAsync(['node', 'yy', 'task', 'checkpoint', 'T1',
       '--lease-token', 'tok-1']);
     expect(invoke).toHaveBeenLastCalledWith('checkpoint', 'T1', [], ['--lease-token', 'tok-1']);
+    await program.parseAsync(['node', 'yy', 'task', 'checkpoint', 'T1',
+      '--accept', 'final', '--lease-token', 'tok-1']);
+    expect(invoke).toHaveBeenLastCalledWith('checkpoint', 'T1', [], [
+      '--accept-checkpoint', 'final', '--lease-token', 'tok-1',
+    ]);
     await program.parseAsync(['node', 'yy', 'task', 'finish', 'T1']);
     expect(invoke).toHaveBeenLastCalledWith('finish', 'T1', [], []);
+    await program.parseAsync(['node', 'yy', 'task', 'finish', 'T1', '--lease-token', 'tok-1']);
+    expect(invoke).toHaveBeenLastCalledWith('finish', 'T1', [], ['--lease-token', 'tok-1']);
     await program.parseAsync(['node', 'yy', 'task', 'lease-heartbeat', 'T1',
       '--lease-token', 'tok-1']);
     expect(invoke).toHaveBeenLastCalledWith('lease-heartbeat', 'T1', [], ['--lease-token', 'tok-1']);
@@ -195,7 +222,7 @@ describe('task workspace CLI', () => {
     expect(invoke).toHaveBeenLastCalledWith('lease-status', 'T1', []);
   });
 
-  it.each(['run', 'start', 'hydrate', 'finish', 'recovery-authorize', 'recovery-apply',
+  it.each(['run', 'resume', 'start', 'hydrate', 'finish', 'recovery-authorize', 'recovery-apply',
            'lease-heartbeat', 'lease-handoff', 'lease-successor', 'lease-revoke', 'lease-release'] as const)(
     'checkpoints durable controller state after task %s without replacing its outcome',
     async (operation) => {
@@ -206,7 +233,7 @@ describe('task workspace CLI', () => {
     },
   );
 
-  it.each(['status', 'preflight', 'recovery-plan', 'checkpoint', 'evidence-run', 'evidence-status', 'evidence-await', 'doctor', 'lease-status'] as const)(
+  it.each(['status', 'preflight', 'recovery-plan', 'recovery-verify', 'checkpoint', 'evidence-run', 'evidence-status', 'evidence-await', 'doctor', 'lease-status'] as const)(
     'does not checkpoint after read-only task %s',
     async (operation) => {
     const checkpoint = vi.fn(async () => ({ attempted: true, ok: true }));

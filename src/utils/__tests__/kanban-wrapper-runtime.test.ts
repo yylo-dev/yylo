@@ -209,13 +209,13 @@ python3 -c 'import os, kanban; print(kanban.RUNTIME + "|" + os.environ["JUNO_TAS
     );
   });
 
-  it('prefers the canonical yylo-ledger runtime and rejects malformed identity', async () => {
+  it('prefers the canonical yylo-ledger runtime silently and rejects malformed identity', async () => {
     const venvBin = path.join(projectRoot, '.venv_juno', 'bin');
     await fs.writeFile(
       path.join(venvBin, 'yylo-ledger'),
       `#!/usr/bin/env bash
 if [[ "${'$'}{1:-}" == "--version" ]]; then
-  printf 'yylo-ledger 0.1.0rc1\\n'
+  printf 'yylo-ledger 0.3.1\\n'
   exit 0
 fi
 printf 'yylo-ledger-runtime\\n'
@@ -238,7 +238,8 @@ printf 'yylo-ledger-runtime\\n'
     });
     expect(selected.status, selected.stderr).toBe(0);
     expect(selected.stdout.trim()).toBe('yylo-ledger-runtime');
-    expect(selected.stderr).toContain('policy=>=0.1.0,<0.2.0');
+    expect(selected.stderr).not.toContain('juno-kanban identity:');
+    expect(selected.stderr).not.toContain('policy=');
 
     await fs.writeFile(
       path.join(venvBin, 'yylo-ledger'),

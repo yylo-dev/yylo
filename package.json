@@ -1,6 +1,6 @@
 {
   "name": "@yylo/cli",
-  "version": "0.2.1-rc.4",
+  "version": "0.2.3-rc.3",
   "description": "YYLO (why-lo): task-driven AI subagent orchestration.",
   "keywords": [
     "Ralph",
@@ -37,27 +37,35 @@
   },
   "files": [
     "dist",
+    "scripts/test-task-workspace.mjs",
+    "scripts/test-support/task_workspace_test_runner.py",
+    "scripts/test-support/task_workspace_fixture.py",
+    "scripts/test-performance/task-workspace-duration-weights.v1.json",
     "README.md",
     "CHANGELOG.md",
     "assets/yylo-logo-square-neon-green.png"
   ],
   "scripts": {
     "dev": "tsx src/bin/cli.ts",
-    "build": "npm run test:skill-contracts && npm run generate:implementation-contract -- --check && tsup && npm run build:copy-templates && npm run build:copy-services && npm run build:copy-skills && npm run build:copy-extensions && npm run build:copy-wrapper && node scripts/clean-template-bytecode.mjs dist/templates",
+    "build": "npm run generate:implementation-contract -- --check && tsup && npm run build:copy-templates && npm run build:copy-services && npm run build:copy-extensions && npm run build:copy-wrapper && node scripts/clean-template-bytecode.mjs dist/templates",
     "generate:implementation-contract": "node scripts/generate-implementation-contract.mjs",
     "test:implementation-contract": "node scripts/generate-implementation-contract.mjs --check",
-    "build:copy-templates": "node -e \"const fs = require('fs-extra'); const path = require('path'); for (const dir of ['scripts','prompts','wiki','config','controller-agent','workflows']) { const src = path.join('src/templates', dir); const dest = path.join('dist/templates', dir); if (!fs.existsSync(src)) throw new Error('Missing managed template directory: ' + src); fs.copySync(src, dest, { recursive: true }); } fs.copyFileSync('src/templates/managed-assets.json', 'dist/templates/managed-assets.json'); fs.removeSync('dist/templates/scripts/logs'); fs.readdirSync('dist/templates/scripts').filter(f => f.endsWith('.sh')).forEach(f => fs.chmodSync(path.join('dist/templates/scripts', f), 0o755));\"",
+    "build:copy-templates": "node scripts/copy-templates.mjs",
     "build:copy-services": "node -e \"const fs = require('fs-extra'); const path = require('path'); const src = 'src/templates/services'; const dest = 'dist/templates/services'; fs.copySync(src, dest, { recursive: true }); const required = ['codex.py','claude.py','gemini.py','pi.py','environment_boundary.py']; const missing = required.filter(file => !fs.existsSync(path.join(dest, file))); if (missing.length) { throw new Error('Missing required service scripts in dist: ' + missing.join(', ')); } required.forEach(file => fs.chmodSync(path.join(dest, file), 0o755));\"",
-    "build:copy-skills": "node -e \"const fs = require('fs-extra'); const src = 'src/templates/skills'; const dest = 'dist/templates/skills'; fs.copySync(src, dest, { recursive: true, dereference: true });\"",
     "build:copy-extensions": "node -e \"const fs = require('fs-extra'); const src = 'src/templates/extensions'; const dest = 'dist/templates/extensions'; if (fs.existsSync(src)) { fs.copySync(src, dest, { recursive: true }); }\"",
     "build:copy-wrapper": "node -e \"const fs = require('fs-extra'); fs.copySync('src/bin/yylo.sh', 'dist/bin/yylo.sh'); fs.copySync('src/bin/ypl.sh', 'dist/bin/ypl.sh'); fs.chmodSync('dist/bin/yylo.sh', 0o755); fs.chmodSync('dist/bin/ypl.sh', 0o755);\"",
     "build:watch": "tsup --watch",
-    "test": "vitest run -c ./vitest.fast.config.ts",
+    "test": "vitest run -c ./vitest.fast.config.ts --reporter=dot --silent",
     "test:full": "vitest run",
+    "test:task-workspace:affected": "node scripts/test-task-workspace.mjs --mode affected",
+    "test:task-workspace:seeded": "node scripts/test-task-workspace.mjs --mode seeded",
+    "test:task-workspace:hermetic": "node scripts/test-task-workspace.mjs --mode hermetic",
+    "test:task-workspace:complete": "node scripts/test-task-workspace.mjs --mode complete",
     "test:managed-assets": "node scripts/verify-managed-assets.mjs",
     "test:skill-contracts": "node scripts/verify-skill-argument-contracts.mjs",
     "test:template-bytecode-package": "node scripts/verify-template-bytecode-cleanup.mjs",
     "test:installed-test-fixture-package": "node scripts/verify-installed-test-fixture.mjs",
+    "test:fresh-init-package": "node scripts/verify-fresh-init-package.mjs",
     "test:config-migration-package": "node scripts/verify-config-migration.mjs",
     "test:bolt-package-canary": "node scripts/verify-bolt-package-canary.mjs",
     "test:benchmark-release-artifacts": "node scripts/verify-benchmark-release-artifacts.mjs",
@@ -87,7 +95,9 @@
     "deploy:minor": "bash scripts/publish-all.sh minor",
     "deploy:major": "bash scripts/publish-all.sh major",
     "deploy:dry-run": "bash scripts/publish-all.sh patch --dry-run",
-    "test:ledger-release-artifacts": "node scripts/verify-ledger-release-artifacts.mjs"
+    "test:ledger-release-artifacts": "node scripts/verify-ledger-release-artifacts.mjs",
+    "test:path-portability": "node scripts/check-path-portability.mjs ..",
+    "workspace:relocate": "node scripts/workspace-relocation.mjs"
   },
   "dependencies": {
     "chalk": "^5.3.0",
@@ -145,9 +155,9 @@
     "access": "public"
   },
   "yyloBenchmark": {
-    "version": "0.1.0-rc.8"
+    "version": "0.1.1-rc.2"
   },
   "yyloLedger": {
-    "version": "0.1.0rc1"
+    "version": "0.3.1"
   }
 }

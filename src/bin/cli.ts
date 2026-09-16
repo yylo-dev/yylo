@@ -31,6 +31,7 @@ import {
   formatExplicitInvocationError,
 } from '../utils/explicit-command.js';
 import { migrateLegacyEnvironment } from '../core/identity-migration.js';
+import { writeCurrentMachineError } from '../cli/machine-output.js';
 
 const executableLaunchSurface = (() => {
   const executable = basename(process.argv0);
@@ -88,15 +89,16 @@ import { createSkillsCommand } from '../cli/commands/skills.js';
 import { createAuthCommand } from '../cli/commands/auth.js';
 import { configureTaskWorkspaceCommand } from '../cli/commands/task.js';
 import { configureIntegrationCommand } from '../cli/commands/integration.js';
-import { configureMergeQueueCommand } from '../cli/commands/merge.js';
+import { configureMergeCommand } from '../cli/commands/merge.js';
 import { configureWatchCommand } from '../cli/commands/watch.js';
 import { configureEvidenceCommand } from '../cli/commands/evidence.js';
-import { configureReleaseTrainCommand } from '../cli/commands/release.js';
 import { configureKanbanCommand } from '../cli/commands/kanban.js';
 import { configureMigrationCommand } from '../cli/commands/migrate.js';
 import { configureWorkspaceCommands } from '../cli/commands/workspace.js';
 import { configureWikiCommand } from '../cli/commands/wiki.js';
 import { configureLoopCommand } from '../cli/commands/loop.js';
+import { configureCapabilitiesCommand } from '../cli/commands/capabilities.js';
+import { configureTmuxCommand } from '../cli/commands/tmux.js';
 import {
   configureBenchmarkCommand,
   forwardBenchmarkSignal,
@@ -212,6 +214,26 @@ function isConnectionLikeError(err: unknown): boolean {
 /**
  * Global error handler for CLI operations
  */
+function writeSelectedMachineError(error: unknown, exitCode: number): void {
+  if (writeCurrentMachineError(error, exitCode)) return;
+  if (!process.argv.includes('--execution-envelope')) return;
+  process.stdout.write(`${JSON.stringify({
+    schema_version: 'juno_execution_envelope.v1',
+    command: { name: 'managed.run', version: 1 },
+    status: 'failure',
+    session_id: null,
+    provider: null,
+    model: null,
+    juno_version: VERSION,
+    error: {
+      code: 'EXECUTION_FAILED',
+      message: (error instanceof Error ? error.message : String(error)).slice(0, 4096),
+      exit_code: exitCode,
+    },
+    cost: { completeness: 'unavailable', usd: null },
+  })}\n`);
+}
+
 function handleCLIError(error: unknown, verbose: number = 0): void {
   if (error instanceof Error && error.name.startsWith('SessionContinuity')) {
     console.error(chalk.red.bold('\n❌ Branch Registry Error'));
@@ -219,6 +241,7 @@ function handleCLIError(error: unknown, verbose: number = 0): void {
     console.error(chalk.yellow('\n💡 Suggestions:'));
     console.error(chalk.yellow("   • Run ypl 'init' or yylo pi 'init' first to create the main branch"));
     console.error(chalk.yellow('   • Inspect branches with: yylo branches'));
+    writeSelectedMachineError(error, 1);
     process.exit(1);
     return;
   }
@@ -244,6 +267,7 @@ function handleCLIError(error: unknown, verbose: number = 0): void {
       ? (error as any).code
       : EXIT_CODES.UNEXPECTED_ERROR;
 
+    writeSelectedMachineError(error, exitCode);
     process.exit(exitCode);
     return;
   }
@@ -257,6 +281,7 @@ function handleCLIError(error: unknown, verbose: number = 0): void {
     console.error(error.stack);
   }
 
+  writeSelectedMachineError(error, EXIT_CODES.UNEXPECTED_ERROR);
   process.exit(EXIT_CODES.UNEXPECTED_ERROR);
 }
 
@@ -1285,12 +1310,10 @@ function setupScriptManagementCommands(program: Command): void {
     const [
       { ScriptInstaller },
       { ManagedProjectAssets },
-      { SkillInstaller },
       { withManagedUpdateRollback },
     ] = await Promise.all([
       import('../utils/script-installer.js'),
       import('../utils/managed-project-assets.js'),
-      import('../utils/skill-installer.js'),
       import('../utils/managed-update-transaction.js'),
     ]);
 
@@ -1300,7 +1323,6 @@ function setupScriptManagementCommands(program: Command): void {
     const recovery = await ScriptInstaller.preflightUpdate(
       workingDirectory, Boolean(options.force),
     );
-    await SkillInstaller.preflightInstall(workingDirectory);
     const metadataOnlyController = await ScriptInstaller.isMetadataOnlyController(workingDirectory);
 
     if (options.force) {
@@ -1320,23 +1342,17 @@ function setupScriptManagementCommands(program: Command): void {
         const scriptsUpdated = recovery
           ? false
           : await ScriptInstaller.forceUpdateAll(workingDirectory, true);
-        const skillsUpdated = recovery
-          ? false
-          : await SkillInstaller.install(workingDirectory, true, true, true);
         if (metadataOnlyController) {
           await ScriptInstaller.assertMetadataControllerUpdateComplete(
             workingDirectory, recovery ?? undefined,
           );
-          if (!recovery && await SkillInstaller.needsUpdate(workingDirectory)) {
-            throw new Error('Metadata-controller agent surface remains incomplete after update');
-          }
         }
-        return { scriptsUpdated, skillsUpdated, assets };
+        return { scriptsUpdated, assets };
       });
       console.log(chalk.green(recovery
         ? `✓ Recovered exact target-bound controller bundle at ${recovery.targetSha}`
         : '✓ Force updated scripts, requirements, and managed project assets'));
-      if (!outcome.scriptsUpdated && !outcome.skillsUpdated &&
+      if (!outcome.scriptsUpdated &&
           outcome.assets.installed.length + outcome.assets.updated.length === 0) {
         console.log(chalk.yellow('No project assets updated. Is this an initialized yylo project with .juno_task/?'));
       }
@@ -1352,19 +1368,15 @@ function setupScriptManagementCommands(program: Command): void {
       }
       const assets = await ManagedProjectAssets.update(workingDirectory, { silent: false });
       const scriptsUpdated = await ScriptInstaller.autoUpdate(workingDirectory, false);
-      const skillsUpdated = await SkillInstaller.install(workingDirectory, true);
       if (metadataOnlyController) {
         await ScriptInstaller.assertMetadataControllerUpdateComplete(workingDirectory);
-        if (await SkillInstaller.needsUpdate(workingDirectory)) {
-          throw new Error('Metadata-controller agent surface remains incomplete after update');
-        }
       }
-      return { scriptsUpdated, skillsUpdated, assets };
+      return { scriptsUpdated, assets };
     };
-    const { scriptsUpdated, skillsUpdated, assets } = metadataOnlyController
+    const { scriptsUpdated, assets } = metadataOnlyController
       ? await withManagedUpdateRollback(workingDirectory, update)
       : await update();
-    if (!scriptsUpdated && !skillsUpdated && assets.installed.length + assets.updated.length === 0 && assets.conflicts.length === 0) {
+    if (!scriptsUpdated && assets.installed.length + assets.updated.length === 0 && assets.conflicts.length === 0) {
       console.log(chalk.green(metadataOnlyController
         ? '✓ Metadata-controller runtime scripts and agent surface are already up to date'
         : '✓ Managed project assets are already up to date'));
@@ -1401,26 +1413,23 @@ ${chalk.gray('This updates scripts from the currently installed yylo package/tem
     .action(async (options: { cwd?: string }) => {
       const argvCwd = extractOptionValueFromArgv(process.argv.slice(2), '--cwd', '-w');
       const workingDirectory = options.cwd?.trim() || argvCwd?.trim() || process.cwd();
-      const [{ ManagedProjectAssets }, { ScriptInstaller }, { SkillInstaller }] = await Promise.all([
+      const [{ ManagedProjectAssets }, { ScriptInstaller }] = await Promise.all([
         import('../utils/managed-project-assets.js'),
         import('../utils/script-installer.js'),
-        import('../utils/skill-installer.js'),
       ]);
       if (await ScriptInstaller.isMetadataOnlyController(workingDirectory)) {
-        await SkillInstaller.assertInstallAllowed(workingDirectory);
         const recovery = await ScriptInstaller.assertManagedControllerPackageUpdateAllowed(
           workingDirectory,
         );
         await ScriptInstaller.assertMetadataControllerUpdateComplete(
           workingDirectory, recovery ?? undefined,
         );
-        const [generation, agentSurfaceStale, bundle] = await Promise.all([
+        const [generation, bundle] = await Promise.all([
           ScriptInstaller.inspectManagedControllerGeneration(workingDirectory),
-          recovery ? false : SkillInstaller.needsUpdate(workingDirectory),
           ManagedProjectAssets.inspectGeneration(workingDirectory, recovery ?? undefined),
         ]);
         if (generation.present) {
-          if (generation.healthy && !agentSurfaceStale) {
+          if (generation.healthy) {
             console.log(chalk.green(
               `✓ Receipt-bound controller scripts and instruction bundle ` +
               `${bundle.instructionBundle?.bundleSha256} are coherent at ${generation.targetSha} ` +
@@ -1430,7 +1439,6 @@ ${chalk.gray('This updates scripts from the currently installed yylo package/tem
           }
           console.error(chalk.red('✗ Receipt-bound controller script generation is unhealthy'));
           for (const finding of generation.findings) console.error(`  ${finding}`);
-          if (agentSurfaceStale) console.error('  incomplete or stale: ignored controller agent surface');
           if (generation.targetSha) console.error(chalk.yellow(
             `Recover explicitly with \`yy integration runtime-refresh --previous-sha ${generation.targetSha} ` +
             `--target-sha ${generation.targetSha}\`.`,
@@ -1442,7 +1450,7 @@ ${chalk.gray('This updates scripts from the currently installed yylo package/tem
           ScriptInstaller.getMissingScripts(workingDirectory),
           ScriptInstaller.getOutdatedScripts(workingDirectory),
         ]);
-        if (missing.length === 0 && outdated.length === 0 && !agentSurfaceStale) {
+        if (missing.length === 0 && outdated.length === 0) {
           console.log(chalk.green(
             `✓ Schema-2 instruction bundle ${bundle.instructionBundle?.bundleSha256} and ` +
             'bootstrap controller scripts are coherent (no integration generation receipt)',
@@ -1452,7 +1460,6 @@ ${chalk.gray('This updates scripts from the currently installed yylo package/tem
         console.error(chalk.red('✗ Bootstrap controller scripts are incomplete or stale'));
         for (const entry of missing) console.error(`  missing: .juno_task/scripts/${entry}`);
         for (const entry of outdated) console.error(`  outdated: .juno_task/scripts/${entry}`);
-        if (agentSurfaceStale) console.error('  incomplete or stale: ignored controller agent surface');
         console.error(chalk.yellow('Run `yy scripts update` only for this unbound bootstrap state.'));
         process.exitCode = 1;
         return;
@@ -1491,7 +1498,7 @@ function setupTaskLifecycleCommand(program: Command): void {
       .allowUnknownOption(true)
       .option('--task <task-id>', 'Legacy task ID (ignored)')
       .action(() => {
-        console.error('The legacy lifecycle executor was removed. Use `yy task start|status|finish` and `yy merge status|next|resolve`.');
+        console.error('The legacy lifecycle executor was removed. Use `yy task start|status|finish` and `yy merge status|land|project`.');
         process.exitCode = 2;
       });
   }
@@ -1601,7 +1608,8 @@ ${chalk.blue('Model Shorthands:')}
   ${chalk.gray('# OpenAI / OpenAI Codex')}
   :luna                openai-codex/gpt-5.6-luna
   :sol                 openai-codex/gpt-5.6-sol
-  :gpt                 :sol ${chalk.gray('(default)')}
+  :gpt                 openai-codex/gpt-6-astra ${chalk.gray('(default)')}
+  :astra               openai-codex/gpt-6-astra
   :gpt5.5              openai-codex/gpt-5.5
   :mini                openai-codex/gpt-5.6-terra
   :gpt-5               openai/gpt-5
@@ -1635,7 +1643,7 @@ ${chalk.blue('Service-Specific Options:')}
   --live                    Run Pi in interactive TUI mode (auto-exits on non-aborted completion)
 
 ${chalk.blue('Environment Variables:')}
-  PI_MODEL                  Model override (default: :gpt → openai-codex/gpt-5.6-sol)
+  PI_MODEL                  Model override (default: :gpt → openai-codex/gpt-6-astra)
   PI_PROVIDER               Provider override
   PI_PROJECT_PATH           Project directory
   PI_THINKING               Thinking level
@@ -1645,6 +1653,8 @@ ${chalk.blue('Environment Variables:')}
   PI_AUTO_INSTRUCTION       Auto-instruction text
   PI_NO_SESSION             Disable sessions (true/false)
   PI_PRETTY                 Pretty-print JSON output (true/false)
+  HEADLESS_UI_TURN_COST_DISPLAY_THRESHOLD_USD
+                            Show authoritative per-turn cost above this threshold (default: 0.5)
   PI_VERBOSE                Verbose mode (true/false)
 
 ${chalk.blue('Examples:')}
@@ -1666,8 +1676,8 @@ ${chalk.blue('Examples:')}
   ypl --resume <session-id> '@@close_loop'  ${chalk.gray('# live resume; do not prefix with "clone C"')}
 
   ${chalk.gray('# Interactive live TUI mode')}
-  yylo pi --live -p '/skill:ralph-loop' -i 1
-  ypl '/skill:ralph-loop' -i 1     ${chalk.gray('# shortcut for: yy pi --live ...')}
+  yylo pi --live -p '/skill:ralph-loop-yylo' -i 1
+  ypl '/skill:ralph-loop-yylo' -i 1     ${chalk.gray('# shortcut for: yy pi --live ...')}
 
   ${chalk.gray('# Named Pi session branches (per shell/pane continue scope)')}
   ypl 'init'                       ${chalk.gray('# creates/resets the main branch from a root Pi run')}
@@ -2085,14 +2095,15 @@ function configureCommandSurface(program: Command): void {
   configureKanbanCommand(program);
   configureTaskWorkspaceCommand(program);
   configureIntegrationCommand(program);
-  configureMergeQueueCommand(program);
+  configureMergeCommand(program);
   configureWatchCommand(program);
   configureEvidenceCommand(program);
-  configureReleaseTrainCommand(program);
   configureMigrationCommand(program);
   configureWorkspaceCommands(program, VERSION);
   configureWikiCommand(program);
   configureLoopCommand(program);
+  configureCapabilitiesCommand(program);
+  configureTmuxCommand(program);
   configureBenchmarkCommand(program);
   setupCompletion(program);
   setupAliases(program);
@@ -2121,7 +2132,9 @@ async function main(): Promise<void> {
     return;
   }
   if (explicitInvocation.kind === 'unknown-command' || explicitInvocation.kind === 'unknown-option') {
-    console.error(formatExplicitInvocationError(explicitInvocation, process.argv[1] ?? __filename, VERSION));
+    const message = formatExplicitInvocationError(explicitInvocation, process.argv[1] ?? __filename, VERSION);
+    console.error(message);
+    writeSelectedMachineError(new Error(message), 2);
     process.exitCode = 2;
     return;
   }
@@ -2166,9 +2179,10 @@ async function main(): Promise<void> {
   const isReadOnlyLifecycleStatus = isLifecycleCommand && commandArgs[1] === 'status';
   const isReadOnlyTaskStatus = isTaskWorkspaceCommand && commandArgs[1] === 'status';
   const isScriptsDoctor = commandArgs[0] === 'scripts' && commandArgs[1] === 'doctor';
-  const isWorkspaceDiscovery = commandArgs[0] === 'info' || commandArgs[0] === 'where' || (commandArgs[0] === 'doctor' && commandArgs[1] === 'workspace');
+  const isWorkspaceDiscovery = commandArgs[0] === 'info' || commandArgs[0] === 'where' || commandArgs[0] === 'capabilities' || (commandArgs[0] === 'doctor' && commandArgs[1] === 'workspace');
+  const isTmuxCommand = commandArgs[0] === 'tmux';
   const isControlPlaneCommand = ['ledger', 'kanban', 'task', 'merge', 'integration'].includes(commandArgs[0] ?? '');
-  const isReadOnlyIdentityRequest = isReadOnlyVersionRequest || isReadOnlyLifecycleStatus || isReadOnlyTaskStatus || isMigrationCommand || isScriptsDoctor || isWorkspaceDiscovery || isControlPlaneCommand;
+  const isReadOnlyIdentityRequest = isReadOnlyVersionRequest || isReadOnlyLifecycleStatus || isReadOnlyTaskStatus || isMigrationCommand || isScriptsDoctor || isWorkspaceDiscovery || isTmuxCommand || isControlPlaneCommand;
   const isForceUpdate = process.argv.includes('--force-update');
   const isExplicitProjectAssetUpdate =
     isForceUpdate ||
@@ -2256,33 +2270,6 @@ async function main(): Promise<void> {
     if (process.env.YYLO_DEBUG === '1') {
       console.error(
         '[DEBUG] Script auto-update failed:',
-        error instanceof Error ? error.message : String(error),
-      );
-    }
-  }
-
-  // Auto-update agent skill files in .agents/skills/ and .claude/skills/
-  // Skills are installed for ALL agents regardless of which subagent is selected
-  try {
-    if (mayAutoUpdateProjectAssets) {
-      const { SkillInstaller } = await import('../utils/skill-installer.js');
-
-    if (isForceUpdate) {
-      console.log(chalk.blue('🔄 Force updating agent skill files...'));
-      await SkillInstaller.autoUpdate(process.cwd(), true);
-      console.log(chalk.green('✓ Agent skill files updated'));
-    } else {
-      const updated = await SkillInstaller.autoUpdate(process.cwd());
-
-      if (updated && process.env.YYLO_DEBUG === '1') {
-        console.error('[DEBUG] Agent skill files auto-updated');
-      }
-    }
-    }
-  } catch (error) {
-    if (process.env.YYLO_DEBUG === '1') {
-      console.error(
-        '[DEBUG] Skill auto-update failed:',
         error instanceof Error ? error.message : String(error),
       );
     }
@@ -2445,9 +2432,18 @@ ${chalk.blue.bold('Support:')}
 `,
   );
 
+  // Commander treats the root --version option as global even after a nested
+  // command. Preserve the documented skills --version spelling by routing it
+  // to that command's hidden, unambiguous internal option before parsing.
+  const commandArgv = [...process.argv];
+  if (commandArgv[2] === 'skills' && ['install', 'update'].includes(commandArgv[3] ?? '')) {
+    const versionIndex = commandArgv.indexOf('--version', 4);
+    if (versionIndex >= 0) commandArgv[versionIndex] = '--skill-version';
+  }
+
   // Parse and execute
   try {
-    await program.parseAsync(process.argv);
+    await program.parseAsync(commandArgv);
   } catch (error) {
     handleCLIError(error, isVerbose);
   }
@@ -2477,6 +2473,7 @@ process.on('unhandledRejection', async (reason, promise) => {
   console.error(chalk.red('   This is likely a bug. Please report it.'));
   console.error(chalk.gray('   Promise:'), promise);
   console.error(chalk.gray('   Reason:'), reason);
+  writeSelectedMachineError(reason, EXIT_CODES.UNEXPECTED_ERROR);
   process.exit(EXIT_CODES.UNEXPECTED_ERROR);
 });
 
@@ -2500,6 +2497,7 @@ process.on('uncaughtException', async (error) => {
   console.error(chalk.red('   This is likely a bug. Please report it.'));
   console.error(chalk.gray('   Error:'), error.message);
   console.error(chalk.gray('   Stack:'), error.stack);
+  writeSelectedMachineError(error, EXIT_CODES.UNEXPECTED_ERROR);
   process.exit(EXIT_CODES.UNEXPECTED_ERROR);
 });
 
@@ -2547,6 +2545,7 @@ export { main, handleCLIError };
 const reportFatalError = (error: unknown) => {
   console.error(chalk.red.bold('\n💥 Fatal Error'));
   console.error(chalk.red(`   ${error instanceof Error ? error.message : String(error)}`));
+  writeSelectedMachineError(error, EXIT_CODES.UNEXPECTED_ERROR);
   process.exit(EXIT_CODES.UNEXPECTED_ERROR);
 };
 

@@ -21,9 +21,9 @@ Purity is enforced, not merely documented:
 against a strict allowlist and executes every pure table with ``open`` and
 process creation poisoned, in addition to bounding total wall time.
 
-Wave 3 pilot scope: task-workspace only. Whether the merge queue justifies
-the same extraction is a measured follow-up decision recorded in
-``docs/test-performance.md``; it is not silently absorbed here.
+This module remains task-workspace-only. Native delivery is implemented by the
+separate one-task Git adapter and does not import task validation or evidence
+planning into merge.
 """
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ HYDRATABLE_STATES = frozenset({WORKING, HYDRATION_FAILED, HYDRATING, REVIEW_FIND
 # Handoff phase projection: durable lifecycle state -> agent-facing phase.
 HANDOFF_PHASES = {
     "NOT_STARTED": "planned", "WORKING": "working", "QUEUED": "queued",
-    "AWAITING_RISK": "validating", "AWAITING_RELEASE": "awaiting-release",
+    "AWAITING_RISK": "validating",
     "REVIEWING": "reviewing", "REVIEW_FINDINGS": "findings",
     "REVIEW_FINDINGS_EXHAUSTED": "exhausted", "CONFLICT": "conflict",
     "CONFLICT_RESOLVED": "resolved", "REOPENING": "reopening",
@@ -82,8 +82,8 @@ class TaskSnapshot:
     """Immutable lifecycle facts the shell observed before requesting a plan.
 
     ``state`` is ``None`` when no task record exists. ``tracking_owner`` is
-    the umbrella owner recorded in child reservations (``None`` when the task
-    is not a tracking-only umbrella child).
+    the ordinary delivery owner (or a finite legacy umbrella owner) recorded
+    for a reporting-only related task.
     """
 
     task_id: str
@@ -119,6 +119,17 @@ class StatusProjection:
     state: str
     umbrella_owner_task_id: Optional[str] = None
     next_action: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class MutationEligibility:
+    """One observational, code-owned lifecycle mutation decision."""
+
+    operation: Optional[str]
+    eligible: bool
+    reason_code: str
+    invalidating_change: str
+    safe_next_action: str
 
 
 @dataclass(frozen=True)
@@ -185,6 +196,75 @@ def handoff_phase(state: str) -> str:
 def path_within(path: str, roots: list[str]) -> bool:
     """Admit one repository path under an exact root set (no prefix games)."""
     return any(path == root or path.startswith(root + "/") for root in roots)
+
+
+PATH_ORIGIN_PROJECTION_SCHEMA = "juno_path_origin_projection.v1"
+
+
+def project_path_origins(*, base_tree: dict[str, Optional[str]],
+                         source_tree: dict[str, Optional[str]],
+                         target_tree: dict[str, Optional[str]],
+                         candidate_tree: dict[str, Optional[str]],
+                         admitted_paths: list[str],
+                         generated_bindings: list[dict[str, Any]],
+                         conflict_paths: list[str]) -> dict[str, Any]:
+    """Classify frozen Git blob maps without ancestry-order shortcuts.
+
+    Admitted legacy ``changed_paths`` are evidence only when the source blob
+    actually differs from the immutable base.  An inherited target blob is
+    target-derived only while it remains byte-identical to the target; altered
+    inherited bytes are authored.  Every consumer receives this same versioned
+    projection and must fail closed on ``ambiguous_paths``.
+    """
+    admitted = set(admitted_paths)
+    conflicts = set(conflict_paths)
+    generated = {
+        row.get("destination") for row in generated_bindings
+        if isinstance(row, dict) and isinstance(row.get("destination"), str)
+    }
+    paths = sorted(set(base_tree) | set(source_tree) | set(target_tree)
+                   | set(candidate_tree) | admitted | conflicts | generated)
+    rows: list[dict[str, Any]] = []
+    authored: list[str] = []
+    target_derived: list[str] = []
+    generated_paths: list[str] = []
+    candidate_delta: list[str] = []
+    ambiguous: list[str] = []
+    for path in paths:
+        base = base_tree.get(path); source = source_tree.get(path)
+        target = target_tree.get(path); candidate = candidate_tree.get(path)
+        labels: list[str] = []
+        source_changed = source != base
+        target_changed = target != base
+        if path in admitted and not source_changed:
+            labels.append("ambiguous-legacy-admission")
+            ambiguous.append(path)
+        if source_changed:
+            if target_changed and source == target and path not in admitted:
+                labels.append("target-derived")
+                target_derived.append(path)
+            else:
+                labels.append("authored")
+                authored.append(path)
+        if path in generated:
+            labels.append("generated")
+            generated_paths.append(path)
+        if path in conflicts:
+            labels.append("conflict")
+        if candidate != target:
+            labels.append("candidate-delta")
+            candidate_delta.append(path)
+        if labels:
+            rows.append({"path": path, "origins": labels, "base_blob": base,
+                         "source_blob": source, "target_blob": target,
+                         "candidate_blob": candidate})
+    return {"schema_version": PATH_ORIGIN_PROJECTION_SCHEMA,
+            "authored_paths": authored,
+            "target_derived_paths": target_derived,
+            "generated_paths": generated_paths,
+            "conflict_paths": sorted(conflicts),
+            "candidate_delta_paths": candidate_delta,
+            "ambiguous_paths": ambiguous, "paths": rows}
 
 
 def validation_profile_selection(config: dict[str, Any],
@@ -276,7 +356,7 @@ def plan_command_transition(request: CommandRequest,
     if command == "start":
         if owner is not None and owner != task_id:
             return _refuse(command, task_id, state, "tracking_only_child",
-                           f"task {task_id} is tracking-only under umbrella {owner}")
+                           f"task {task_id} is reporting-only under delivery owner {owner}")
         return TransitionDecision(command, task_id, True, state or NOT_STARTED,
                                   handoff_phase(state or NOT_STARTED),
                                   idempotent=state is not None)
@@ -295,9 +375,8 @@ def plan_command_transition(request: CommandRequest,
         if state != WORKING:
             if owner is not None:
                 return _refuse(command, task_id, state, "tracking_only_child",
-                               f"task {task_id} is tracking-only under umbrella {owner}; "
-                               f"checkpoint the umbrella child instead: "
-                               f"yy task child-checkpoint {owner} {task_id}")
+                               f"task {task_id} is reporting-only under delivery owner {owner}; "
+                               f"checkpoint the ordinary delivery instead: yy task checkpoint {owner}")
             return _refuse(command, task_id, state, "requires_working_task",
                            "standing checkpoint requires a WORKING task")
         return TransitionDecision(command, task_id, True, WORKING, handoff_phase(WORKING))
@@ -316,8 +395,8 @@ def plan_command_transition(request: CommandRequest,
         if state is None:
             if owner is not None:
                 return _refuse(command, task_id, state, "tracking_only_child",
-                               f"task {task_id} is tracking-only under umbrella {owner}; "
-                               f"preflight the umbrella instead: yy task preflight {owner}")
+                               f"task {task_id} is reporting-only under delivery owner {owner}; "
+                               f"preflight the delivery instead: yy task preflight {owner}")
             return _refuse(command, task_id, state, "not_started",
                            "task has not been started")
         if state != WORKING:
@@ -329,8 +408,8 @@ def plan_command_transition(request: CommandRequest,
         if state is None:
             if owner is not None:
                 return _refuse(command, task_id, state, "tracking_only_child",
-                               f"task {task_id} is tracking-only under umbrella {owner}; "
-                               f"finish the umbrella instead: yy task finish {owner}")
+                               f"task {task_id} is reporting-only under delivery owner {owner}; "
+                               f"finish the delivery instead: yy task finish {owner}")
             return _refuse(command, task_id, state, "not_started",
                            "task has not been started")
         if state == QUEUED:
@@ -357,9 +436,46 @@ def status_projection(snapshot: TaskSnapshot) -> StatusProjection:
         return StatusProjection(
             state=TRACKING_ONLY,
             umbrella_owner_task_id=owner,
-            next_action=("implement inside the umbrella worktree; "
-                         f"record progress with: yy task child-checkpoint {owner} {snapshot.task_id}"))
+            next_action=("report through the ordinary delivery owner; "
+                         f"inspect progress with: yy task status {owner}"))
     return StatusProjection(state=NOT_STARTED)
+
+
+def task_mutation_eligibility(task_id: str, state: Optional[str], *,
+                              tracking_owner: Optional[str] = None) -> MutationEligibility:
+    """Project one supported action without granting caller or lease authority."""
+    if tracking_owner is not None and tracking_owner != task_id:
+        return MutationEligibility(
+            None, False, "tracking_only_child",
+            "the ordinary delivery owner must advance its checkpoint",
+            f"yy task status {tracking_owner}")
+    if state is None:
+        return MutationEligibility(
+            "start", True, "task_not_started", "create the exact-base task workspace",
+            f"yy task start {task_id}")
+    if state == WORKING:
+        return MutationEligibility(
+            "finish", True, "working_task", "commit an admitted clean task tip",
+            f"yy task preflight {task_id}")
+    if state == HYDRATION_FAILED:
+        return MutationEligibility(
+            "hydrate", True, "hydration_failed", "repair the reported hydration prerequisite",
+            f"yy task hydrate {task_id}")
+    if state == KANBAN_SYNC_STATE:
+        return MutationEligibility(
+            "sync", True, "kanban_sync_required", "restore the exact board projection",
+            f"yy task sync {task_id}")
+    if state == QUEUED:
+        return MutationEligibility(
+            None, False, "task_already_queued", "native Git delivery owns this task",
+            f"yy merge land {task_id}")
+    if state == "GIT_INTEGRATED":
+        return MutationEligibility(
+            None, False, "git_integrated", "Git succeeded and Ledger projection is pending",
+            f"yy merge project {task_id}")
+    return MutationEligibility(
+        None, False, "task_state_ineligible", f"lifecycle state must leave {state}",
+        f"yy task status {task_id}")
 
 
 def plan_evidence_reuse(commands: list[dict[str, Any]],
@@ -437,20 +553,6 @@ def validation_failure_message(row: dict[str, Any], result: dict[str, Any]) -> s
     return f"focused validation failed ({row['id']}, exit {result['exit_code']}): {detail}"
 
 
-def next_enqueue_sequence(meta: Any) -> int:
-    """Validate the FIFO sequence section and decide the next sequence value.
-
-    Pure decision half of ``assign_enqueue_sequence``: the shell owns the
-    state mutation, this planner owns the admission contract.
-    """
-    if (not isinstance(meta, dict) or set(meta) != {"schema_version", "next"}
-            or meta.get("schema_version") != "juno_task_workspace_fifo.v1"
-            or not isinstance(meta.get("next"), int) or isinstance(meta.get("next"), bool)
-            or not 1 <= meta["next"] <= 2**63 - 1):
-        raise ValueError("task FIFO sequence state is invalid")
-    return meta["next"]
-
-
 def shared_queue_delta(before: Any, after: Any) -> list[str]:
     """Deterministic dotted paths for changed non-task queue state.
 
@@ -512,6 +614,83 @@ LEASE_CODE_PRODUCER_UNKNOWN = "lease_producer_unknown"
 LEASE_CODE_NOT_ACTIVE = "lease_not_active"
 LEASE_CODE_RELEASED = "lease_released"
 
+# One vocabulary shared by task-run attempts and the protected-target arbiter.
+# These are classifications, not new durable workflow states.
+RESUME_LAUNCH_NOT_STARTED = "launch_not_started"
+RESUME_EXACT_TERMINAL_CAPTURE = "exact_terminal_capture"
+RESUME_DETERMINISTIC_PHASE = "resumable_deterministic_phase"
+RESUME_REAL_CONFLICT = "real_conflict"
+RESUME_STALE_AUTHORITY = "stale_authority"
+RESUME_UNKNOWN_OUTCOME = "unknown_outcome"
+RESUME_BUDGET_EXHAUSTED = "budget_exhausted"
+RESUME_LIVE_AUTHORITY = "live_authority"
+
+
+@dataclass(frozen=True)
+class ResumeFacts:
+    """Verified facts supplied by an existing task or target execution owner."""
+
+    owner: str  # "task" | "target"
+    producer_status: str = "inactive"  # "alive" | "dead" | "unknown" | "inactive"
+    launch_observed: bool = False
+    exact_terminal: bool = False
+    resumable_stage: Optional[str] = None
+    conflict: bool = False
+    stale_authority: bool = False
+    ambiguous: bool = False
+    budget_remaining: bool = True
+    explicit_handoff: bool = False
+
+
+@dataclass(frozen=True)
+class ResumeDecision:
+    """Earliest safe continuation under the already-fenced execution owner."""
+
+    classification: str
+    admitted: bool
+    owner_command: str
+    restart_stage: Optional[str]
+    reason_code: str
+
+
+def plan_resume(facts: ResumeFacts) -> ResumeDecision:
+    """Classify one resume without granting authority from elapsed time.
+
+    The caller must verify receipts, Git bytes, process-instance anchors, and
+    handoff evidence before constructing ``facts``. This planner only chooses
+    the smallest safe stage; it never creates another worker or target owner.
+    """
+    if facts.owner not in {"task", "target"}:
+        raise ValueError(f"unknown resume owner: {facts.owner!r}")
+    command = "yy task run" if facts.owner == "task" else "yy merge status"
+    if facts.ambiguous or facts.producer_status == "unknown":
+        return ResumeDecision(RESUME_UNKNOWN_OUTCOME, False, command, None,
+                              "material_outcome_ambiguity")
+    if facts.conflict:
+        return ResumeDecision(RESUME_REAL_CONFLICT, False, command, None,
+                              "explicit_conflict_resolution_required")
+    if facts.stale_authority:
+        return ResumeDecision(RESUME_STALE_AUTHORITY, False, command, None,
+                              "stale_fence_refused")
+    if not facts.budget_remaining:
+        return ResumeDecision(RESUME_BUDGET_EXHAUSTED, False, command, None,
+                              "bounded_attempt_budget_exhausted")
+    if facts.producer_status == "alive":
+        return ResumeDecision(RESUME_LIVE_AUTHORITY, False, command, None,
+                              "existing_owner_live")
+    if facts.exact_terminal:
+        return ResumeDecision(RESUME_EXACT_TERMINAL_CAPTURE, True, command,
+                              facts.resumable_stage, "reuse_exact_terminal")
+    if not facts.launch_observed:
+        return ResumeDecision(RESUME_LAUNCH_NOT_STARTED, True, command,
+                              facts.resumable_stage or "DISPATCH",
+                              "dispatch_under_existing_owner")
+    if facts.producer_status == "dead" or facts.explicit_handoff:
+        return ResumeDecision(RESUME_DETERMINISTIC_PHASE, True, command,
+                              facts.resumable_stage, "resume_verified_stage")
+    return ResumeDecision(RESUME_UNKNOWN_OUTCOME, False, command, None,
+                          "material_outcome_ambiguity")
+
 
 @dataclass(frozen=True)
 class LeaseObservation:
@@ -555,7 +734,7 @@ def plan_lease_authority(command: str, task_id: str, lease: Any,
        continuity (in-process workers and scenario suites).
 
     Everything else fails closed with one actionable code: a provably dead
-    producer names the successor command; a wrong token is a stale fence; an
+    producer names token-bearing recovery; a wrong token is a stale fence; an
     unrelated live or unprovable producer demands token/handoff/revoke.
     """
     if not isinstance(lease, dict) or lease.get("state") != LEASE_ACTIVE:
@@ -580,14 +759,20 @@ def plan_lease_authority(command: str, task_id: str, lease: Any,
         return _lease_refusal(
             command, task_id, LEASE_CODE_FENCE_STALE,
             f"task {task_id} fencing token is stale for attempt {lease.get('attempt')}; "
-            "obtain the current token from its holder, an explicit handoff, or "
-            f"yy task lease-successor {task_id}")
+            "obtain the current token from its holder; if the predecessor is proven ended, "
+            f"run yy task lease-successor {task_id} once and retry the original gated "
+            "command with --lease-token <returned-token>")
     if observation.status == "dead":
         return _lease_refusal(
             command, task_id, LEASE_CODE_PRODUCER_DEAD,
             f"task {task_id} holds fencing attempt {lease.get('attempt')} whose producer is "
-            f"provably ended ({observation.detail}); obtain a receipt-bound successor with: "
-            f"yy task lease-successor {task_id}")
+            f"provably ended ({observation.detail}); its current token still admits manual "
+            "gated commands: retry with --lease-token <current-token>. If the token is lost, "
+            f"run yy task lease-successor {task_id} once, then retry the original gated "
+            "command with --lease-token <returned-token>; do not repeat successor when "
+            "you have its token. For authorized managed execution instead, "
+            f"yy task run {task_id} (or yy task resume {task_id}) acquires its own fence; "
+            "existing lifecycle blockers and budgets still apply")
     if observation.status == "alive":
         return _lease_refusal(
             command, task_id, LEASE_CODE_PRODUCER_MISMATCH,
@@ -598,8 +783,9 @@ def plan_lease_authority(command: str, task_id: str, lease: Any,
         command, task_id, LEASE_CODE_TOKEN_REQUIRED,
         f"task {task_id} holds fencing attempt {lease.get('attempt')} whose producer cannot be "
         f"proven ended ({observation.detail}); present the current --lease-token, obtain an "
-        f"explicit handoff, or recover with: yy task lease-revoke {task_id} --reason <why> && "
-        f"yy task lease-successor {task_id}")
+        f"explicit handoff, or request operator-authorized yy task lease-revoke {task_id} "
+        f"--reason <why>, then yy task lease-successor {task_id} once and retry the "
+        "original gated command with --lease-token <returned-token>")
 
 
 @dataclass(frozen=True)

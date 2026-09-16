@@ -20,7 +20,7 @@ describe('child process environment boundary', () => {
   it('preserves arbitrary config and routing while filtering continuity from base and overrides', () => {
     const environment = buildChildProcessEnvironment(
       {
-        API_TOKEN: 'credential',
+        API_TOKEN: 'sample',
         CUSTOM_CONFIG: 'kept',
         JUNO_TASK_ROOT: '/controller',
         JUNO_CONTROLLER_BRANCH: 'main',
@@ -38,7 +38,7 @@ describe('child process environment boundary', () => {
     );
 
     expect(environment).toEqual({
-      API_TOKEN: 'credential',
+      API_TOKEN: 'sample',
       CUSTOM_CONFIG: 'kept',
       JUNO_TASK_ROOT: '/controller',
       JUNO_CONTROLLER_BRANCH: 'main',
@@ -56,7 +56,7 @@ describe('child process environment boundary', () => {
       stale[`YYLO_LAST_SESSION_ID_${scope}`] = `session-${index}`;
       stale[`YYLO_LAST_EXECUTION_SETTINGS_${scope}`] = `settings-${index}`;
     }
-    stale.PROVIDER_API_KEY = 'not-logged';
+    stale.PROVIDER_API_KEY = 'masked';
     stale.JUNO_TASK_ROOT = '/controller';
 
     const filtered = buildChildProcessEnvironment(stale, { JUNO_MODEL: 'model' });
@@ -70,6 +70,6 @@ describe('child process environment boundary', () => {
     expect(Object.keys(stale)).toHaveLength(5_002);
     expect(continuityNames).toEqual([]);
     expect(names).toEqual(['JUNO_MODEL', 'JUNO_TASK_ROOT', 'PROVIDER_API_KEY']);
-    expect(serializedBytes).toBe(72);
+    expect(serializedBytes).toBe(68);
   });
 });

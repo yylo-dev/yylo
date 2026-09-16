@@ -42,6 +42,21 @@ describe('Juno 2 Kanban compatibility policy', () => {
     );
     expect(result.status === 0).toBe(accepted);
   });
+
+  it.each([
+    ['yylo-ledger 0.3.1', true],
+    ['yylo-ledger 0.3.0', false],
+    ['yylo-ledger 0.2.0', false],
+    ['yylo-ledger 0.3.1rc1', false],
+    ['yylo-ledger 0.4.0', false],
+  ])('validates exact Ledger identity %j', (output, accepted) => {
+    const result = spawnSync(
+      'bash',
+      ['-c', 'source "$1"; yylo_ledger_parse_compatible_version "$2"', 'test', policy, output],
+      { encoding: 'utf8' },
+    );
+    expect(result.status === 0).toBe(accepted);
+  });
 });
 
 describe('Juno 2 shipped guidance', () => {
@@ -80,15 +95,15 @@ describe('Juno 2 shipped guidance', () => {
       expect(prompt).not.toContain('../wiki/task_dependency_hydration.md');
       expect(prompt).toMatch(/never (switches|silently switch)|never clean or switch/i);
     }
-    for (const guidance of [cleanWorktree, parallelReview, reviewPrompt, agents]) {
+    for (const guidance of [cleanWorktree, parallelReview, reviewPrompt]) {
       expect(guidance).toContain('yy pi');
       expect(guidance).toMatch(/bare `pi`|bare pi/i);
       expect(guidance).toMatch(/provider\/model|provider and model/);
     }
+    expect(agents).toContain('Tests and semantic reviews are explicit project checks outside merge');
+    expect(agents).toContain('yy task preflight TASK_ID');
 
     const skillPaths = [
-      '.pi/skills/kanban-workflow/SKILL.md',
-      '.claude/skills/kanban-workflow/SKILL.md',
       'juno-code/src/templates/skills/pi/kanban-workflow/SKILL.md',
       'juno-code/src/templates/skills/claude/kanban-workflow/SKILL.md',
       'juno-code/src/templates/skills/codex/kanban-workflow/SKILL.md',
@@ -99,6 +114,24 @@ describe('Juno 2 shipped guidance', () => {
       expect(skill).toContain('explicit `JUNO_TASK_ROOT`, repository-local registration, then the current project root');
       expect(skill).toContain('JUNO_WORKSPACE_ENFORCEMENT');
       expect(skill).toContain('product checkout separately as `TASK_ROOT`');
+      expect(skill).toContain('native ID-first `record|task|wiki|workflow|artifact` groups');
+      expect(skill).toContain('belong in typed Artifact Records');
+      expect(skill).toContain('fail closed and request a Ledger upgrade');
+    }
+
+    const operationalSkillPaths = [
+      'juno-code/src/templates/skills/pi/plan-kanban-tasks/SKILL.md',
+      'juno-code/src/templates/skills/claude/plan-kanban-tasks/SKILL.md',
+      'juno-code/src/templates/skills/codex/plan-kanban-tasks/SKILL.md',
+      'juno-code/src/templates/skills/pi/understand-project/SKILL.md',
+      'juno-code/src/templates/skills/claude/understand-project/SKILL.md',
+      'juno-code/src/templates/skills/codex/understand-project/SKILL.md',
+    ];
+    for (const skill of await Promise.all(operationalSkillPaths.map(read))) {
+      expect(skill).toContain('yy ledger artifact');
+      expect(skill).toContain('immutable `report` Artifact Record');
+      expect(skill).toContain('never fall back to product `docs/`');
+      expect(skill).toMatch(/Product (documentation|`docs\/`)/);
     }
 
     for (const name of [

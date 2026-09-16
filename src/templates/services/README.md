@@ -241,7 +241,10 @@ npm install -g @mariozechner/pi-coding-agent
 - Multi-provider support (Anthropic, OpenAI, Google, Groq, xAI, etc.)
 - Model shorthand aliases (`:pi`, `:sonnet`, `:opus`, `:luna`, `:sol`, `:gpt`, `:gpt5.5`, `:mini`, `:gpt-5`, `:api-codex`, `:gemini-pro`, etc.)
 - Support for inline prompts or prompt files
-- Headless JSON mode (default) for structured automation output
+- Non-live headless mode emits ordered `[THINKING]`, `[TOOL]`, `[INPUT]`, `[TOOL_RESPONSE]`, `[ANSWER]`, and notable `[STATUS]` blocks; ordinary lifecycle noise is hidden
+- Fast tools emit one complete block; tools still running after 500 ms emit an append-only running block followed by a correlated completion block without repeated input
+- Tool responses retain the first 15 lines, an exact omitted-middle marker, and the final 2 lines; long input uses an explicit truncation marker
+- TTYs use subtle semantic color, `NO_COLOR` and pipes preserve the same plain layout, and `PI_PRETTY=false` preserves untouched raw Pi NDJSON
 - Live interactive mode via `--live` (Pi TUI + auto-exit on non-aborted `agent_end`)
 - Temporary live extension capture (`JUNO_SUBAGENT_CAPTURE_PATH`) for iteration summaries/cost
 - Verbose mode for debugging
@@ -252,8 +255,9 @@ npm install -g @mariozechner/pi-coding-agent
 # Basic headless JSON-mode usage with Anthropic model
 ~/.yylo/services/pi.py -p "Write a hello world function" -m :sonnet
 
-# Use with Codex Sol shortcut (:gpt aliases to :sol)
+# Use the Astra default through either shortcut
 ~/.yylo/services/pi.py -p "Refactor code" -m :gpt
+~/.yylo/services/pi.py -p "Refactor code" -m :astra
 
 # Use with Codex Terra or older Codex GPT 5.5 shortcuts
 ~/.yylo/services/pi.py -p "Implement focused fix" -m :mini
@@ -280,11 +284,13 @@ npm install -g @mariozechner/pi-coding-agent
 - `-p, --prompt <text>`: Prompt text (required, mutually exclusive with --prompt-file)
 - `-pp, --prompt-file <path>`: Path to prompt file (required if no --prompt)
 - `--cd <path>`: Project path (default: current directory)
-- `-m, --model <name>`: Model name (supports shorthand aliases, including `:luna` → `openai-codex/gpt-5.6-luna`, `:sol` → `openai-codex/gpt-5.6-sol`, `:gpt` → `:sol`, `:gpt5.5` → `openai-codex/gpt-5.5`, `:mini` → `openai-codex/gpt-5.6-terra`, `:codex` → `openai-codex/gpt-5.3-codex`, and `:api-codex` → `openai/gpt-5.3-codex`)
+- `-m, --model <name>`: Model name (supports shorthand aliases, including `:gpt` and `:astra` → `openai-codex/gpt-6-astra`, `:luna` → `openai-codex/gpt-5.6-luna`, `:sol` → `openai-codex/gpt-5.6-sol`, `:gpt5.5` → `openai-codex/gpt-5.5`, `:mini` → `openai-codex/gpt-5.6-terra`, `:codex` → `openai-codex/gpt-5.3-codex`, and `:api-codex` → `openai/gpt-5.3-codex`)
 - `--thinking <level>`: Thinking level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`); GPT-5.6 models support `max`
 - `--live`: Run Pi in interactive mode (no `--mode json`, prompt passed positionally)
 - `--no-extensions`: Disable Pi extensions (incompatible with `--live`)
 - `--verbose`: Enable verbose output
+
+Headless turn cost display is provider-neutral. Set `headlessUi.turnCostDisplayThresholdUsd` in `.juno_task/config.json` (default `0.5`), or override it with `HEADLESS_UI_TURN_COST_DISPLAY_THRESHOLD_USD`. Authoritative per-turn cost is shown as a `[STATUS]` block only when it is strictly above the threshold; unavailable cost and ordinary `turn_end` events are omitted. Tool failures are colored red only when Pi supplies structured `isError:true`; words such as `error`, `failed`, or `blocked` in successful output do not alter styling.
 
 #### Via yylo
 
@@ -293,7 +299,7 @@ npm install -g @mariozechner/pi-coding-agent
 yylo -b shell -s pi -m :sonnet -i 1 -v -p "your task"
 
 # Run Pi in live interactive mode (auto-exits on non-aborted completion)
-yylo pi --live -p '/skill:ralph-loop' -i 1
+yylo pi --live -p '/skill:ralph-loop-yylo' -i 1
 
 # Override the :gpt default when a different provider or model is required
 yylo pi --live -m :sonnet -p "your task" -i 1

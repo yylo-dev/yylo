@@ -27,7 +27,7 @@ def _service(module_name, class_name):
         ("cursor", "claude", "ClaudeService", ":sonnet", "claude-sonnet-4-6"),
         ("codex", "codex", "CodexService", ":codex", "gpt-5.3-codex"),
         ("gemini", "gemini", "GeminiService", ":pro", "gemini-2.5-pro"),
-        ("pi", "pi", "PiService", ":gpt", "openai-codex/gpt-5.6-sol"),
+        ("pi", "pi", "PiService", ":gpt", "openai-codex/gpt-6-astra"),
     ],
 )
 def test_project_shortcuts_are_subagent_specific_and_keep_shipped_fallbacks(

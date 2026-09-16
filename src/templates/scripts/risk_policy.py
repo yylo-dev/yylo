@@ -25,6 +25,7 @@ RELEASE_TOOL_ID = "yylo.release-gate"
 MANAGED_RUNNER_SCHEMA = "juno_managed_agent_runner.v1"
 REVIEW_BINDING_SCHEMA = "juno_managed_review_binding.v1"
 REVIEW_RESULT_SCHEMA = "juno_managed_review_result.v3"
+REVIEW_REFERENCE_SCHEMA = "juno_queue_review_reference.v1"
 FINDING_POLICY_REVISION = "yy_review_finding_policy.v2"
 ADMITTED_SCOPE_CLASSIFICATIONS = {
     "requirement_gap", "candidate_bug", "candidate_regression",
@@ -280,6 +281,12 @@ def _normalize_paths(paths: Any, maximum: int) -> tuple[list[str], bool]:
     return sorted(set(normalized)), ambiguous or not normalized
 
 
+LIFECYCLE_INFRASTRUCTURE_PREFIXES = (
+    ".juno_task/scripts/",
+    "juno-code/src/templates/scripts/",
+)
+
+
 def _classify_paths(policy: dict[str, Any], identity: dict[str, Any],
                     changed_paths: Any, flags: Any = None) -> dict[str, Any]:
     paths, ambiguous = _normalize_paths(changed_paths, policy["limits"]["max_changed_paths"])
@@ -291,8 +298,14 @@ def _classify_paths(policy: dict[str, Any], identity: dict[str, Any],
     known_flags = set(policy["high_risk_flags"]) | set(policy["release_flags"])
     unknown = sorted(set(flags) - known_flags)
     release = bool(set(flags) & set(policy["release_flags"]))
-    high_paths = [p for p in paths if _matches(p, policy["high_risk_paths"])]
-    shared_paths = [p for p in paths if _matches(p, policy["shared_infrastructure_paths"])]
+    lifecycle_paths = [p for p in paths
+                       if p.startswith(LIFECYCLE_INFRASTRUCTURE_PREFIXES)]
+    high_paths = sorted(set(
+        [p for p in paths if _matches(p, policy["high_risk_paths"])]
+        + lifecycle_paths))
+    shared_paths = sorted(set(
+        [p for p in paths if _matches(p, policy["shared_infrastructure_paths"])]
+        + lifecycle_paths))
     low_only = bool(paths) and all(_matches(p, policy["low_risk_paths"]) for p in paths)
     reasons: list[str] = []
     if ambiguous or unknown:
@@ -535,9 +548,14 @@ def _validate_full_suite_execution(receipt: dict[str, Any], command: dict[str, A
     states = timing.get("states") if isinstance(timing, dict) else None
     phase_names = [item.get("state") for item in states] if isinstance(states, list) else []
     terminal = {"PASSED", "FAILED", "TIMED_OUT", "INTERRUPTED", "SETUP_FAILED"}
+    legacy_timing_keys = {"schema_version", "states", "wall_duration_ms",
+                          "critical_path_contribution_ms"}
+    phase_timing_keys = legacy_timing_keys | {
+        "resource_wait_ms", "setup_ms", "execution_ms", "settlement_ms",
+        "first_failure_ms", "overall_elapsed_ms"}
+    timing_keys = frozenset(timing) if isinstance(timing, dict) else frozenset()
     if (not isinstance(timing, dict)
-            or set(timing) != {"schema_version", "states", "wall_duration_ms",
-                               "critical_path_contribution_ms"}
+            or timing_keys not in {frozenset(legacy_timing_keys), frozenset(phase_timing_keys)}
             or timing.get("schema_version") != VALIDATION_TIMING_SCHEMA
             or phase_names[:4] != ["WAITING_FOR_RESOURCE", "SETUP", "RUNNING", "TEARDOWN"]
             or len(phase_names) != 5 or phase_names[-1] not in terminal
@@ -548,6 +566,19 @@ def _validate_full_suite_execution(receipt: dict[str, Any], command: dict[str, A
             or not isinstance(timing.get("wall_duration_ms"), int)
             or timing["wall_duration_ms"] < 0
             or timing.get("critical_path_contribution_ms") != timing["wall_duration_ms"]
+            or (timing_keys == phase_timing_keys and (
+                timing.get("overall_elapsed_ms") != timing["wall_duration_ms"]
+                or timing.get("resource_wait_ms") != states[0]["duration_ms"]
+                or timing.get("setup_ms") != states[1]["duration_ms"]
+                or timing.get("execution_ms") != states[2]["duration_ms"]
+                or timing.get("settlement_ms") != states[3]["duration_ms"]
+                or (timing.get("first_failure_ms") is not None
+                    and (not isinstance(timing.get("first_failure_ms"), int)
+                         or isinstance(timing.get("first_failure_ms"), bool)
+                         or not 0 <= timing["first_failure_ms"] <= timing["overall_elapsed_ms"]))
+                or (phase_names[-1] == "PASSED" and timing.get("first_failure_ms") is not None)
+                or (phase_names[-1] != "PASSED"
+                    and timing.get("first_failure_ms") != timing["overall_elapsed_ms"])))
             or not isinstance(resource, dict)
             or set(resource) != {"id", "lock_identity_sha256", "wait_timeout_seconds",
                                  "owner_diagnostics"}
@@ -759,8 +790,10 @@ def verify_full_suite_admission(admission: Any, plan: dict[str, Any],
 
 def _validate_command_row(command: Any, plan: dict[str, Any]) -> None:
     command_keys = {"id", "cwd", "argv", "timeout_seconds", "max_output_bytes"}
+    optional_keys = {"resource", "input_paths"}
     if (not isinstance(command, dict)
-            or set(command) not in (command_keys, command_keys | {"resource"})
+            or not command_keys.issubset(command)
+            or set(command) - command_keys - optional_keys
             or not isinstance(command.get("id"), str) or not command["id"]
             or not isinstance(command.get("cwd"), str)
             or not isinstance(command.get("argv"), list) or not command["argv"]
@@ -773,6 +806,18 @@ def _validate_command_row(command: Any, plan: dict[str, Any]) -> None:
             or command["max_output_bytes"] <= 0
             or command["max_output_bytes"] > plan["evidence_limits"]["max_receipt_bytes"]):
         raise RiskPolicyError("full-suite command row provenance is invalid")
+    input_paths = command.get("input_paths")
+    if input_paths is not None:
+        if (not isinstance(input_paths, list) or not input_paths or len(input_paths) > 64
+                or any(not isinstance(path, str) or not path
+                       or len(path.encode()) > 1024 for path in input_paths)
+                or len(set(input_paths)) != len(input_paths)):
+            raise RiskPolicyError("full-suite command row provenance is invalid")
+        for path in input_paths:
+            value = PurePosixPath(path)
+            if value.is_absolute() or str(value) != path or any(
+                    part in {"", ".", ".."} for part in value.parts):
+                raise RiskPolicyError("full-suite command row provenance is invalid")
 
 
 def _validate_command_suite(commands: Any, plan: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1012,17 +1057,14 @@ def verify_full_suite_admission_any(admission: Any, plan: dict[str, Any],
 
 def _validate_persisted_review(value: Any, candidate_sha: str, sequence: int,
                                reviewer: str, max_string_bytes: int) -> None:
-    keys = {"reviewer", "sequence", "candidate_sha", "session_id", "verdict",
-            "finding_count", "advisory_count", "blocking_count", "findings",
-            "rejected_observation_count", "rejection_counters",
-            "finding_policy_revision", "review_result_sha256", "tool_id", "completed_at",
-            "managed_runner", "review_binding"}
+    """Validate the compact decision plus its one immutable source reference."""
+    keys = {"reviewer", "sequence", "verdict", "finding_count", "advisory_count",
+            "blocking_count", "findings", "rejected_observation_count",
+            "rejection_counters", "review_reference"}
     if not isinstance(value, dict) or set(value) != keys:
         raise RiskPolicyError("persisted review schema is unsupported or contains unknown fields")
-    runner = value.get("managed_runner")
-    binding = value.get("review_binding")
+    reference = value.get("review_reference")
     if (value.get("reviewer") != reviewer or value.get("sequence") != sequence
-            or value.get("candidate_sha") != candidate_sha
             or value.get("verdict") not in {"pass", "findings"}
             or not isinstance(value.get("finding_count"), int)
             or isinstance(value.get("finding_count"), bool) or value["finding_count"] < 0
@@ -1042,26 +1084,14 @@ def _validate_persisted_review(value: Any, candidate_sha: str, sequence: int,
             or sum(value["rejection_counters"].values()) != value["rejected_observation_count"]
             or not isinstance(value.get("findings"), list)
             or len(value["findings"]) != value["finding_count"]
-            or value.get("finding_policy_revision") != FINDING_POLICY_REVISION
-            or not isinstance(value.get("review_result_sha256"), str)
-            or not DIGEST_RE.fullmatch(value["review_result_sha256"])
-            or not isinstance(value.get("session_id"), str) or not value["session_id"]
-            or len(value["session_id"].encode()) > max_string_bytes
-            or not isinstance(value.get("tool_id"), str) or not value["tool_id"]
-            or len(value["tool_id"].encode()) > max_string_bytes
-            or not isinstance(value.get("completed_at"), str) or not value["completed_at"]
-            or len(value["completed_at"].encode()) > max_string_bytes
-            or not isinstance(runner, dict)
-            or set(runner) != {"schema_version", "receipt_path", "receipt_sha256"}
-            or runner.get("schema_version") != MANAGED_RUNNER_SCHEMA
-            or not isinstance(runner.get("receipt_path"), str) or not runner["receipt_path"]
-            or len(runner["receipt_path"].encode()) > max_string_bytes
-            or not isinstance(runner.get("receipt_sha256"), str)
-            or not DIGEST_RE.fullmatch(runner["receipt_sha256"])
-            or not isinstance(binding, dict)
-            or set(binding) != {"binding_sha256", "predecessor"}
-            or not isinstance(binding.get("binding_sha256"), str)
-            or not DIGEST_RE.fullmatch(binding["binding_sha256"])):
+            or not isinstance(reference, dict)
+            or set(reference) != {"schema_version", "receipt_path", "receipt_sha256"}
+            or reference.get("schema_version") != REVIEW_REFERENCE_SCHEMA
+            or not isinstance(reference.get("receipt_path"), str)
+            or not reference["receipt_path"]
+            or len(reference["receipt_path"].encode()) > max_string_bytes
+            or not isinstance(reference.get("receipt_sha256"), str)
+            or not DIGEST_RE.fullmatch(reference["receipt_sha256"])):
         raise RiskPolicyError("persisted review provenance is invalid")
 
 
@@ -1127,8 +1157,8 @@ def _validate_previous(previous: Any, plan: dict[str, Any], identity: dict[str, 
                                    plan["reviewer_sequence"][index],
                                    plan["evidence_limits"]["max_string_bytes"])
         rebuilt = _compact_review(
-            {"runner_receipt_path": review["managed_runner"]["receipt_path"],
-             "runner_receipt_sha256": review["managed_runner"]["receipt_sha256"]},
+            {"runner_receipt_path": review["review_reference"]["receipt_path"],
+             "runner_receipt_sha256": review["review_reference"]["receipt_sha256"]},
             plan["reviewer_sequence"][index], index + 1, evidence_candidate,
             plan["policy_identity"], plan,
         )
@@ -1248,10 +1278,23 @@ def _compact_review(value: Any, expected_reviewer: str, sequence: int,
         raise RiskPolicyError("review session identity exceeds compact evidence limit")
     artifacts = receipt.get("artifacts")
     response = artifacts.get("response") if isinstance(artifacts, dict) else None
+    prompt = artifacts.get("prompt") if isinstance(artifacts, dict) else None
     if (not isinstance(response, dict) or set(response) != {"path", "bytes", "sha256"}
             or not isinstance(response.get("bytes"), int)
-            or isinstance(response.get("bytes"), bool)):
-        raise RiskPolicyError("managed runner response artifact evidence is missing")
+            or isinstance(response.get("bytes"), bool)
+            or not isinstance(prompt, dict)
+            or not {"path", "bytes", "sha256"} <= set(prompt)
+            or not isinstance(prompt.get("bytes"), int)
+            or isinstance(prompt.get("bytes"), bool)):
+        raise RiskPolicyError("managed runner request/result artifact evidence is missing")
+    try:
+        prompt_bytes = Path(prompt["path"]).read_bytes()
+    except OSError as exc:
+        raise RiskPolicyError("managed runner review request is missing") from exc
+    if (not prompt_bytes or len(prompt_bytes) > 524288
+            or prompt["bytes"] != len(prompt_bytes)
+            or hashlib.sha256(prompt_bytes).hexdigest() != prompt["sha256"]):
+        raise RiskPolicyError("managed runner review request identity is invalid")
     result = _bounded_object(response.get("path"), response.get("sha256"), plan,
                              "managed runner review result")
     result_keys = {"schema_version", "candidate_sha", "policy_identity", "reviewer_role",
@@ -1326,20 +1369,14 @@ def _compact_review(value: Any, expected_reviewer: str, sequence: int,
             or len(completed_at.encode()) > plan["evidence_limits"]["max_string_bytes"]):
         raise RiskPolicyError("managed runner tool/timestamp provenance is missing")
     return {"reviewer": expected_reviewer, "sequence": sequence,
-            "candidate_sha": candidate_sha, "session_id": session_id,
-            "tool_id": tool_id, "completed_at": completed_at,
             "verdict": result["verdict"], "finding_count": len(normalized_findings),
             "advisory_count": len(normalized_findings) - blocking_count,
             "blocking_count": blocking_count, "findings": normalized_findings,
             "rejected_observation_count": sum(result["rejection_counters"].values()),
             "rejection_counters": dict(sorted(result["rejection_counters"].items())),
-            "finding_policy_revision": FINDING_POLICY_REVISION,
-            "review_result_sha256": response["sha256"],
-            "managed_runner": {"schema_version": MANAGED_RUNNER_SCHEMA,
-                               "receipt_path": str(Path(value["runner_receipt_path"]).resolve()),
-                               "receipt_sha256": value["runner_receipt_sha256"]},
-            "review_binding": {"binding_sha256": binding["binding_sha256"],
-                               "predecessor": binding["predecessor"]}}
+            "review_reference": {"schema_version": REVIEW_REFERENCE_SCHEMA,
+                                 "receipt_path": str(Path(value["runner_receipt_path"]).resolve()),
+                                 "receipt_sha256": value["runner_receipt_sha256"]}}
 
 
 def _time(value: str) -> dt.datetime:
@@ -1350,23 +1387,41 @@ def _time(value: str) -> dt.datetime:
     return parsed
 
 
+def _review_provenance(review: dict[str, Any]) -> dict[str, Any]:
+    """Read ordering provenance from the single immutable review reference."""
+    reference = review["review_reference"]
+    try:
+        data = Path(reference["receipt_path"]).read_bytes()
+        receipt = json.loads(data)
+    except (OSError, KeyError, json.JSONDecodeError) as exc:
+        raise RiskPolicyError("review reference is missing or unreadable") from exc
+    binding = receipt.get("review_binding") if isinstance(receipt, dict) else None
+    if (hashlib.sha256(data).hexdigest() != reference["receipt_sha256"]
+            or not isinstance(binding, dict)):
+        raise RiskPolicyError("review reference provenance is invalid")
+    return {"receipt_sha256": reference["receipt_sha256"],
+            "tool_id": receipt.get("tool_id"), "session_id": receipt.get("session_id"),
+            "completed_at": receipt.get("completed_at"),
+            "binding_sha256": binding.get("binding_sha256"),
+            "predecessor": binding.get("predecessor")}
+
+
 def _validate_review_chain(reviews: list[dict[str, Any]]) -> None:
-    if len({review["session_id"] for review in reviews}) != len(reviews):
+    provenance = [_review_provenance(review) for review in reviews]
+    if len({row["session_id"] for row in provenance}) != len(provenance):
         raise RiskPolicyError("review sessions must be distinct and ordered")
-    if len({review["tool_id"] for review in reviews}) != len(reviews):
+    if len({row["tool_id"] for row in provenance}) != len(provenance):
         raise RiskPolicyError("review tool identities must be distinct")
-    if not reviews:
+    if not provenance:
         return
-    if reviews[0]["review_binding"]["predecessor"] is not None:
+    if provenance[0]["predecessor"] is not None:
         raise RiskPolicyError("first review must not declare a predecessor")
-    _time(reviews[0]["completed_at"])
-    for prior, current in zip(reviews, reviews[1:]):
-        predecessor = current["review_binding"]["predecessor"]
-        expected = {"receipt_sha256": prior["managed_runner"]["receipt_sha256"],
-                    "tool_id": prior["tool_id"], "session_id": prior["session_id"],
-                    "completed_at": prior["completed_at"],
-                    "binding_sha256": prior["review_binding"]["binding_sha256"]}
-        if predecessor != expected or _time(current["completed_at"]) < _time(prior["completed_at"]):
+    _time(provenance[0]["completed_at"])
+    for prior, current in zip(provenance, provenance[1:]):
+        expected = {key: prior[key] for key in (
+            "receipt_sha256", "tool_id", "session_id", "completed_at", "binding_sha256")}
+        if (current["predecessor"] != expected
+                or _time(current["completed_at"]) < _time(prior["completed_at"])):
             raise RiskPolicyError("review predecessor/order provenance is invalid")
 
 
@@ -1418,8 +1473,8 @@ def _revalidate_evidence_reviews(evidence: dict[str, Any], plan: dict[str, Any],
                                    plan["reviewer_sequence"][index],
                                    plan["evidence_limits"]["max_string_bytes"])
         compact = _compact_review(
-            {"runner_receipt_path": review["managed_runner"]["receipt_path"],
-             "runner_receipt_sha256": review["managed_runner"]["receipt_sha256"]},
+            {"runner_receipt_path": review["review_reference"]["receipt_path"],
+             "runner_receipt_sha256": review["review_reference"]["receipt_sha256"]},
             plan["reviewer_sequence"][index], index + 1, candidate_sha,
             plan["policy_identity"], plan,
         )

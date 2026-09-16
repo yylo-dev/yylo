@@ -7,7 +7,7 @@ import { execa } from 'execa';
 import { afterEach, describe, expect, it } from 'vitest';
 import { useSharedHeavyWorkloadLock } from '../../test-utils/resource-lock.js';
 import packageJson from '../../../package.json';
-import { inspect, inspectPackedTarball, runSyntheticLeakageCanaries } from '../../../scripts/scan-benchmark-release-artifacts.mjs';
+import { inspect, inspectPackedTarball, isSensitiveEnvironmentName, runSyntheticLeakageCanaries } from '../../../scripts/scan-benchmark-release-artifacts.mjs';
 import { MAX_BENCHMARK_RELEASE_COMMAND_TIMEOUT_MS, runBoundedReleaseCommand } from '../../../scripts/bounded-release-command.mjs';
 import {
   BENCHMARK_VERSION_RANGE,
@@ -44,14 +44,15 @@ if (process.argv[2] === '--version') {
     process.stdout.write(process.env.FAKE_BENCHMARK_VERSION || 'yylo-benchmark ${requiredBenchmarkVersion}');
     process.exit(Number(process.env.FAKE_VERSION_EXIT || 0));
   }
+} else {
+  fs.writeFileSync(process.env.FAKE_RECORD, JSON.stringify({
+    argv: process.argv.slice(2), cwd: process.cwd(), marker: process.env.DELEGATE_MARKER,
+    preflightPresent: Object.prototype.hasOwnProperty.call(process.env, 'YYLO_PREFLIGHT_ONLY')
+  }));
+  process.stdout.write('delegate stdout\\n');
+  process.stderr.write('delegate stderr\\n');
+  process.exit(Number(process.env.FAKE_EXIT || 0));
 }
-fs.writeFileSync(process.env.FAKE_RECORD, JSON.stringify({
-  argv: process.argv.slice(2), cwd: process.cwd(), marker: process.env.DELEGATE_MARKER,
-  preflightPresent: Object.prototype.hasOwnProperty.call(process.env, 'YYLO_PREFLIGHT_ONLY')
-}));
-process.stdout.write('delegate stdout\\n');
-process.stderr.write('delegate stderr\\n');
-process.exit(Number(process.env.FAKE_EXIT || 0));
 `);
   await chmod(executable, 0o755);
   return { root, bin: binDirectory, record };
@@ -62,6 +63,14 @@ afterEach(async () => {
 });
 
 describe('benchmark release leakage canaries', () => {
+  it('scans private path and credential variables without treating generic XDG session metadata as a secret', () => {
+    for (const name of ['HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'NPM_TOKEN', 'API_KEY']) {
+      expect(isSensitiveEnvironmentName(name), name).toBe(true);
+    }
+    for (const name of ['XDG_SESSION_CLASS', 'XDG_CURRENT_DESKTOP', 'PATH']) {
+      expect(isSensitiveEnvironmentName(name), name).toBe(false);
+    }
+  });
   it('runs every canary through the production rejection path and hashes its actual failure', () => {
     const failures = new Map<string, Error & { detectedClasses: string[] }>();
     const calls: Array<{ label: string; count: boolean }> = [];
@@ -416,7 +425,7 @@ describe('benchmark delegate', () => {
     }
   });
 
-  it.each(['yylo-benchmark 0.1.0', 'yylo-benchmark 1.0.0', 'yylo-benchmark 0.1.1-alpha.1'])(
+  it.each(['yylo-benchmark 0.1.0-rc.9', 'yylo-benchmark 1.0.0', 'yylo-benchmark 0.1.1-alpha.1'])(
     'refuses incompatible version %s before forwarding user arguments',
     async (reportedVersion) => {
       const { root, bin, record } = await fixture();

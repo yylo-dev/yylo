@@ -1,5 +1,8 @@
 # YYLO CLI
 
+[![Mentioned in Awesome Coding Agents](https://awesome.re/mentioned-badge.svg)](https://github.com/kailiu42/awesome-coding-agents) [![Mentioned in Awesome Gemini CLI](https://awesome.re/mentioned-badge.svg)](https://github.com/Piebald-AI/awesome-gemini-cli) [![Mentioned in Collective AI Tools](https://awesome.re/mentioned-badge.svg)](https://github.com/hanishrao/collective-ai-tools) [![Mentioned in Awesome Agent Orchestrators](https://awesome.re/mentioned-badge.svg)](https://github.com/andyrewlee/awesome-agent-orchestrators) [![Mentioned in Site for Developers](https://awesome.re/mentioned-badge.svg)](https://github.com/currenjin/site-for-developers) [![Mentioned in Awesome Vibe Coding Resources](https://awesome.re/mentioned-badge.svg)](https://github.com/acvnace/awesome-vibe-coding-resources) [![Mentioned in Awesome AI Governance](https://awesome.re/mentioned-badge.svg)](https://github.com/agentrust-io/awesome-ai-governance) [![Mentioned in Awesome Local First](https://awesome.re/mentioned-badge.svg)](https://github.com/alantriesagain/awesome-local-first) [![Mentioned in Awesome Opensource AI](https://awesome.re/mentioned-badge.svg)](https://github.com/alvinreal/awesome-opensource-ai) [![Mentioned in Awesome AI Agents 2026](https://awesome.re/mentioned-badge.svg)](https://github.com/ARUNAGIRINATHAN-K/awesome-ai-agents-2026) [![Mentioned in AI Tools Directory](https://awesome.re/mentioned-badge.svg)](https://github.com/Aurelius77/AI-TOOLS-DIRECTORY) [![Mentioned in Awesome GPT](https://awesome.re/mentioned-badge.svg)](https://github.com/awesome-gptX/awesome-gpt) [![Mentioned in Awesome AI Agents](https://awesome.re/mentioned-badge.svg)](https://github.com/brandonhimpfen/awesome-ai-agents) [![Mentioned in Awesome AI Tools (Charles Teh)](https://awesome.re/mentioned-badge.svg)](https://github.com/charlesteh/awesome-ai-tools) [![Mentioned in AI Agent Infra List](https://awesome.re/mentioned-badge.svg)](https://github.com/chgaowei/ai-agent-infra-list) [![Mentioned in Awesome Agents Team](https://awesome.re/mentioned-badge.svg)](https://github.com/CiferaTeam/awesome-agents-team) [![Mentioned in Ultimate NodeJs Resources](https://awesome.re/mentioned-badge.svg)](https://github.com/DhanushNehru/Ultimate-NodeJs-Resources) [![Mentioned in Awesome AI Tools Resources](https://awesome.re/mentioned-badge.svg)](https://github.com/dr-mushtaq/Awesome-AI-Tools-Resources) [![Mentioned in Awesome Efficient Devtools](https://awesome.re/mentioned-badge.svg)](https://github.com/ejboy/awesome-efficient-devtools) [![Mentioned in Awesome Spec Driven Development](https://awesome.re/mentioned-badge.svg)](https://github.com/Engineering4AI/awesome-spec-driven-development) [![Mentioned in Awesome AI Agents (Frangel Barrera)](https://awesome.re/mentioned-badge.svg)](https://github.com/frangelbarrera/awesome-ai-agents) [![Mentioned in Awesome Autonomus AI Agents](https://awesome.re/mentioned-badge.svg)](https://github.com/HA2345567/awesome-autonomus-ai-agents) [![Mentioned in Awesome Codex](https://awesome.re/mentioned-badge.svg)](https://github.com/ichangyou/awesome-codex) [![Mentioned in Awesome Agent Orchestration Platforms](https://awesome.re/mentioned-badge.svg)](https://github.com/ishandutta2007/Awesome-Agent-Orchestration-Platforms) [![Mentioned in Awesome AI Tools (ishandutta2007)](https://awesome.re/mentioned-badge.svg)](https://github.com/ishandutta2007/awesome-ai-tools) [![Mentioned in Awesome Multi-Agent AI Harnesses](https://awesome.re/mentioned-badge.svg)](https://github.com/ishandutta2007/Awesome-Multi-Agent-AI-Harnesses) [![Mentioned in AI Landscape](https://awesome.re/mentioned-badge.svg)](https://github.com/kiliczsh/ailandscape.org) [![Mentioned in Awesome CLI TUI Software](https://awesome.re/mentioned-badge.svg)](https://github.com/lgaggini/awesome-cli-tui-software) [![Mentioned in Awesome AI (LinuxSuRen)](https://awesome.re/mentioned-badge.svg)](https://github.com/LinuxSuRen/awesome-ai) [![Mentioned in LLM Agents Devtools](https://awesome.re/mentioned-badge.svg)](https://github.com/M1n9X/llm_agents_devtools) [![Mentioned in Awesome AI Agent Tools](https://awesome.re/mentioned-badge.svg)](https://github.com/michielhdoteth/awesome-ai-agent-tools) [![Mentioned in Awesome ChatGPT Claude Agents](https://awesome.re/mentioned-badge.svg)](https://github.com/milisp/awesome-chatgpt-claude-agents) [![Mentioned in Awesome Codex CLI](https://awesome.re/mentioned-badge.svg)](https://github.com/milisp/awesome-codex-cli) [![Mentioned in Rise of Machine](https://awesome.re/mentioned-badge.svg)](https://github.com/planetabhi/riseofmachine) [![Mentioned in Awesome Agent Loops](https://awesome.re/mentioned-badge.svg)](https://github.com/rudy2steiner/awesome-agent-loops) [![Mentioned in Best of Agent Harnesses](https://awesome.re/mentioned-badge.svg)](https://github.com/RyanAlberts/best-of-Agent-Harnesses) [![Mentioned in Awesome AI Tools (sajadh76)](https://awesome.re/mentioned-badge.svg)](https://github.com/sajadh76/awesome-AI-tools) [![Mentioned in Awesome Pi Coding Agent](https://awesome.re/mentioned-badge.svg)](https://github.com/shaftoe/awesome-pi-coding-agent) [![Mentioned in Awesome Platform Engineering (shospodarets)](https://awesome.re/mentioned-badge.svg)](https://github.com/shospodarets/awesome-platform-engineering) [![Mentioned in Awesome AI Agent Governance](https://awesome.re/mentioned-badge.svg)](https://github.com/systempromptio/awesome-ai-agent-governance) [![Mentioned in Tool Directory](https://awesome.re/mentioned-badge.svg)](https://github.com/tejas-singh-0212/tool-directory) [![Mentioned in Awesome Vibe Coding (tysoncung)](https://awesome.re/mentioned-badge.svg)](https://github.com/tysoncung/awesome-vibe-coding) [![Mentioned in Awesome Agentic AI](https://awesome.re/mentioned-badge.svg)](https://github.com/yadavanujkumar/awesome-agentic-ai) [![Mentioned in Awesome AI Devtools](https://awesome.re/mentioned-badge.svg)](https://github.com/yeaight7/awesome-ai-devtools) [![Mentioned in Awesome AI Coding](https://awesome.re/mentioned-badge.svg)](https://github.com/youxufkhan/awesome-ai-coding) [![Mentioned in Awesome macOS](https://awesome.re/mentioned-badge.svg)](https://github.com/sraodev/awesome-macOS) [![Mentioned in Awesome AI Agents (Jenqyang)](https://awesome.re/mentioned-badge.svg)](https://github.com/Jenqyang/Awesome-AI-Agents) [![Mentioned in AI Tools Catalogue](https://awesome.re/mentioned-badge.svg)](https://github.com/robertsmrek/AI-Tools-Catalogue) [![Mentioned in Artificial Intelligence Universe](https://awesome.re/mentioned-badge.svg)](https://github.com/frangelbarrera/Artificial-Intelligence-Universe) [![Mentioned in Awesome AI Agents (NipunaRanasinghe)](https://awesome.re/mentioned-badge.svg)](https://github.com/NipunaRanasinghe/awesome-ai-agents) [![Mentioned in Awesome Gemini CLI Extensions](https://awesome.re/mentioned-badge.svg)](https://github.com/Piebald-AI/awesome-gemini-cli-extensions) [![Mentioned in Awesome AI Coding (dalisoft)](https://awesome.re/mentioned-badge.svg)](https://github.com/dalisoft/awesome-ai-coding) [![Mentioned in Awesome Windows](https://awesome.re/mentioned-badge.svg)](https://github.com/thechampagne/awesome-windows) [![Mentioned in Awesome Agent Workspaces](https://awesome.re/mentioned-badge.svg)](https://github.com/jimy-r/awesome-agent-workspaces) [![Mentioned in Awesome AI ML DL](https://awesome.re/mentioned-badge.svg)](https://github.com/neomatrix369/awesome-ai-ml-dl) [![Mentioned in Awesome Opensource](https://awesome.re/mentioned-badge.svg)](https://github.com/hadez8877/awesome-opensource) [![Mentioned in Awesome Antigravity Skills](https://awesome.re/mentioned-badge.svg)](https://github.com/ishandutta2007/Awesome-Antigravity-Skills) [![Mentioned in AI Tools Manager](https://awesome.re/mentioned-badge.svg)](https://github.com/ArshdeepGrover/ai-tools-manager) [![Mentioned in Awesome Agent Trust](https://awesome.re/mentioned-badge.svg)](https://github.com/CodeSigils/awesome-agent-trust) [![Mentioned in Awesome Mac](https://awesome.re/mentioned-badge.svg)](https://github.com/abordage/awesome-mac) [![Mentioned in Awesome Solo AI](https://awesome.re/mentioned-badge.svg)](https://github.com/yerdaulet-damir/awesome-solo-ai) [![Mentioned in Which Coding Tools](https://awesome.re/mentioned-badge.svg)](https://github.com/benjamincanac/whichcodingtools) [![Mentioned in Awesome Agent Tools](https://awesome.re/mentioned-badge.svg)](https://github.com/Awakehsh/awesome-agent-tools) [![Mentioned in Jump Skills](https://awesome.re/mentioned-badge.svg)](https://github.com/fabricioctelles/jump-skills) [![Mentioned in Awesome SRE Agents](https://awesome.re/mentioned-badge.svg)](https://github.com/last9/awesome-sre-agents)
+
+
 YYLO is a command-line orchestrator for coding agents, repeatable workflows, and receipt-backed repository changes. It is for developers who want a quick agent loop and for project operators who need typed task, validation, merge, and release-readiness boundaries.
 
 - npm package: [`@yylo/cli`](https://www.npmjs.com/package/%40yylo%2Fcli)
@@ -7,6 +10,16 @@ YYLO is a command-line orchestrator for coding agents, repeatable workflows, and
 - Source: [yylo-dev/yylo](https://github.com/yylo-dev/yylo)
 
 YYLO orchestrates work. [YYLO Ledger](https://github.com/yylo-dev/yylo-ledger) is the independent Git-native Record/task store, and [YYLO Benchmark](https://github.com/yylo-dev/yylo-benchmark) is the independent evaluation/evidence package. `yy ledger` and `yy benchmark` delegate to those separately installed CLIs; they are not bundled alternate implementations.
+
+## Terminal
+
+**Live agent session** — `ypl` (`yy pi --live`) runs an interactive terminal agent; tool calls, streamed output, and the status bar render in the terminal:
+
+![yylo live terminal session](assets/yylo-tui-live-session.png)
+
+**Execution summary** — after each run the orchestrator prints iterations, tool calls, cost, and session ids:
+
+![yylo execution summary](assets/yylo-execution-summary.png)
 
 ## Quick start: install to first successful command
 
@@ -23,7 +36,7 @@ yy init --task "Document the onboarding path" --subagent pi
 yy watch exec pwd
 ```
 
-A successful run prints the installed YYLO version, initializes `.juno_task/`, then emits a watch receipt with `"state":"COMPLETED"`, `"exit_code":0`, and nonzero `log_bytes`. This canary does not contact a model provider.
+A successful run prints the installed YYLO version, initializes `.juno_task/`, then emits a watch receipt with `"state":"COMPLETED"`, `"exit_code":0`, and nonzero `log_bytes`. This canary does not contact a model provider. In an empty, unborn Git repository, `yy init` creates the initial workspace commit, keeps the original branch as the product target, and creates a detached protected integration-owner worktree under the user state directory. Existing or dirty repositories are never committed or rearranged by this bootstrap.
 
 Inspect the initialized workspace and exact command surface:
 
@@ -37,7 +50,7 @@ yy --help
 
 ### Stable and prerelease channels
 
-The stable npm channel is `@latest` (`0.2.0` when this README was audited). The current prerelease is on `@next` (`0.2.1-rc.3`), not `latest`:
+The stable npm channel is `@latest` (`0.2.2`). Prereleases remain on `@next`:
 
 ```bash
 # Stable
@@ -45,8 +58,8 @@ npm install --global '@yylo/cli@latest'
 
 # Explicit prerelease
 npm install --global '@yylo/cli@next'
-# Exact prerelease for reproducible installs
-npm install -g @yylo/cli@0.2.1-rc.3
+# Exact local/prerelease candidate for reproducible installs
+npm install -g @yylo/cli@0.2.3-rc.3
 
 npm view '@yylo/cli' version dist-tags --json
 yy --version
@@ -56,6 +69,31 @@ Pin an exact version in CI. Installing `@next` is an intentional prerelease choi
 The first guarded release-helper checkpoint is exact `--set v0.1.0-rc.1`; later releases must use their separately authorized exact SemVer.
 
 Next: [run an agent](#beginner-agent-workflow), [manage a typed task](#typed-task-and-merge-flow), or [build a managed workflow](#managed-workflows-and-evidence).
+
+### Install agent skills explicitly
+
+YYLO skill content is versioned independently in the public
+[`yylo-dev/yylo-skills`](https://github.com/yylo-dev/yylo-skills) repository and
+is not bundled in `@yylo/cli`. Install the latest stable release, or pin an exact
+stable version:
+
+```bash
+yy skills install
+yy skills install --version 2.0.0
+yy skills update --force
+yy skills status
+```
+
+Only `skills install` and `skills update` access the network. Acquisition is
+staged through `npx skills add` first and falls back to a shallow exact-tag Git
+clone. The seven user-intent-first skills (`artifact-yylo`, `ledger-tasks-yylo`,
+`plan-ledger-tasks-yylo`, `ralph-loop-yylo`, `understand-project-yylo`,
+`wiki-yylo`, and `workflow-yylo`) are copied to `.agents/skills`,
+`.claude/skills`, and `.pi/skills`. Differing canonical directories are refused
+unless `--force` is supplied. An explicit install/update retires a legacy YYLO
+skill only when its local install record and current digest prove it unchanged;
+customized legacy and unrelated skills are preserved with a warning. `skills
+list` and `skills status` use only the local install record.
 
 ## What YYLO owns
 
@@ -67,11 +105,15 @@ Next: [run an agent](#beginner-agent-workflow), [manage a typed task](#typed-tas
 | Validation evidence | `evidence run|status|await` | Content-addressed task evidence tied to exact inputs. |
 | Repository topology | `info`, `where`, `doctor workspace`, `integration` | Read-only discovery is separate from guarded sync/repair/push. |
 | Feature lifecycle | `task start|run|status|checkpoint|preflight|finish` | Implementation belongs in the returned exact-base task worktree. |
-| Protected delivery | `merge status|plan|arbiter|drive|next|resolve` | One fenced target owner and expected-old-SHA CAS; dirt is preserved. |
-| Release epoch | `release train ...` | Readiness only; tag, publish, push, deploy, and cleanup need separate authority. |
+| Protected delivery | `merge status [TASK_ID]`, `merge land TASK_ID`, `merge project TASK_ID` | One-task native Git composition plus expected-old ref update; Ledger projection is separate and retryable. |
+| Maintainer release | repository `scripts/release-cli.sh` | Prepare is read-only; publish needs separate authority. |
 | Records/evaluation | `ledger`, `benchmark` | Transparent delegation to independently installed canonical packages. |
 
 Run `yy --help` for the complete top-level inventory of your installed version; each listed command prints its own usage when invoked with `-h`. The old `lifecycle` command is removed; use typed `task` and `merge` commands.
+
+### Stable machine output
+
+Use `--format json|ndjson --raw` on task, merge, and integration commands, or Ledger's `-f json|ndjson --raw`, for a strict stdout-only data channel. The `capabilities` command publishes command-specific projections in either machine format. See [Machine output contract](docs/machine-output.md) for the versioned envelope and migration policy.
 
 ## Beginner agent workflow
 
@@ -150,7 +192,8 @@ Every step receives one-based loop metadata through `YYLO_LOOP_ID`,
 | --- | --- |
 | `:luna` | `openai-codex/gpt-5.6-luna` |
 | `:sol` | `openai-codex/gpt-5.6-sol` |
-| `:gpt` | `:sol` (Pi default) |
+| `:gpt` | `openai-codex/gpt-6-astra` (Pi default) |
+| `:astra` | `openai-codex/gpt-6-astra` |
 | `:mini` | `openai-codex/gpt-5.6-terra` |
 | `:sonnet` | `anthropic/claude-sonnet-4-6` |
 | `:opus` | `anthropic/claude-opus-4-6` |
@@ -246,10 +289,13 @@ This section is for repositories initialized with the current controller/task po
 
 ```bash
 yy task run TASK_ID
-yy merge drive --through TASK_ID
+yy merge land TASK_ID
+yy merge project TASK_ID
 ```
 
-`TASK_ID` is a Ledger task ID. `task run` executes the controller-owned workflow through `QUEUED`; `merge drive` is an explicit fenced target mutation.
+`TASK_ID` is a Ledger task ID. `task run` executes the controller-owned workflow
+through `QUEUED`. `merge land` composes and lands exactly that task with native
+Git; `merge project` separately records an already successful Git result.
 
 ### Manual implementation path
 
@@ -259,47 +305,56 @@ yy task start TASK_ID
 # Read its AGENTS.md/CLAUDE.md, implement, run focused tests, and commit.
 yy task preflight TASK_ID
 yy task finish TASK_ID
-yy merge status
-yy merge arbiter status
-yy merge arbiter run --through TASK_ID
+yy merge status TASK_ID
+yy merge land TASK_ID
+yy merge project TASK_ID
 ```
+
+The guarded admission order is `yy task preflight ID -> yy task finish ID`.
+Delivery remains a separate one-task operation.
 
 Safety invariants:
 
 1. `task start` freezes the protected target SHA, creates a dedicated branch/worktree, and completes configured dependency hydration before reporting `WORKING`.
 2. Product edits and focused tests occur only in that task worktree. Controller metadata and integration-owner product bytes are separate authorities.
 3. `preflight` is read-only and catches closure defects before expensive gates. `finish` requires a clean committed tip and queues it; it does not merge.
-4. The merge queue owns risk-based review and moved-target composition. Low risk has no semantic reviewer, normal risk at most one, and high risk two sequential reviewers on one frozen candidate. After one repair candidate and one delta-review group, unresolved findings stop as `REVIEW_FINDINGS_EXHAUSTED` instead of starting an unbounded review loop.
-5. Target mutation is serialized under one fencing owner and expected-old-SHA CAS. Lease age alone never transfers authority.
-6. Conflicts and unrelated dirty bytes are preserved. Use the exact recovery packet and `yy merge resolve TASK_ID`; do not reset, stash, force, rebase, or squash to bypass it.
+4. Tests and semantic reviews are explicit project checks outside merge. Merge launches no models, chooses no reviewers, schedules no suites, and maintains no validation cache.
+5. `merge land` selects one immutable task source, composes in a private detached candidate, and uses Git expected-old ref protection. A moved target requires recomposition and renewed candidate checks.
+6. A conflict remains private to its task and cannot block an unrelated task. Preserve conflicts and unrelated dirty bytes; do not reset, stash, force, rebase, squash, or clean to bypass them.
+7. Git success and Ledger projection are separate. A projection retry never repeats Git integration and never blocks another independent land.
 
 Observation commands are safe to repeat:
 
 ```bash
 yy task status TASK_ID
 yy task doctor TASK_ID
-yy merge plan TASK_ID --json
 yy merge status
-yy merge arbiter status
+yy merge status TASK_ID
 ```
 
-`yy merge next` and `yy merge resolve` are explicit recovery mutations, not polling commands.
+Merge status reports only independently landable active tasks and always reports
+`model_calls: 0`. Historical queue receipts remain immutable data, not an
+executable compatibility surface.
 
-## Sealed release epochs
+## Maintainer npm release
 
-A release wave can freeze all eligible pre-cutoff candidates, compose one private history-preserving train, run aggregate evidence once, and advance the protected target with one expected-old-SHA CAS.
+Normal tasks and `yy merge` own integration. After an ordinary version bump is integrated, maintainers use `scripts/release-cli.sh prepare CLI_VERSION BENCHMARK_VERSION`, obtain explicit publication approval, and then run the separate `publish` command. The CLI has no release command.
+
+## Receipt-bound workspace relocation
+
+When an entire controller is moved between machines, do not rewrite lifecycle JSON or historical receipts by hand. From a clean physical controller checkout, create and review an external plan, apply it once, then verify its immutable receipt:
 
 ```bash
-yy release train inspect /absolute/path/to/train.json --json
-yy release train seal /absolute/path/to/train.json --json
-# Retain the epoch ID and one-time token returned by seal.
-yy release train drive EPOCH_ID --epoch-token TOKEN --json
-yy release train epoch-status EPOCH_ID --json
+node juno-code/scripts/workspace-relocation.mjs plan --controller "$PWD" \
+  --map /old/controller=/new/controller --map /old/worktrees=/new/worktrees \
+  --output /secure/relocation-plan.json
+node juno-code/scripts/workspace-relocation.mjs apply --controller "$PWD" \
+  --plan /secure/relocation-plan.json --receipt /secure/relocation-receipt.json
+node juno-code/scripts/workspace-relocation.mjs verify --controller "$PWD" \
+  --receipt /secure/relocation-receipt.json
 ```
 
-The declaration path, `EPOCH_ID`, and `TOKEN` are placeholders. `inspect`, `plan`, `status`, `epoch-status`, and `shadow` are observations. `seal`, `drive`, `eject`, `repair`, and `retry` are fenced mutations with command-specific authority.
-
-A successful epoch emits read-only release readiness after target CAS and member reconciliation. It does **not** authorize an RC, tag, push, npm/PyPI publication, deployment, production mutation, or worktree cleanup. Those remain separate explicit actions.
+The plan binds the Git common directory, HEAD/ref, task-state hash, exact JSON pointers, and old/new physical roots. Apply refuses dirty, stale, tampered, symlinked, replayed, or missing-commit inputs and preserves historical evidence. Scan shipped active surfaces separately with `node juno-code/scripts/check-path-portability.mjs`; fixtures, immutable receipts, logs, generated output, lockfiles, and security canaries are explicitly excluded rather than rewritten.
 
 ## Workspace roles and recovery
 
@@ -336,8 +391,8 @@ yy integration sync
 Install canonical packages independently:
 
 ```bash
-python3 -m pip install 'yylo-ledger==0.2.0'
-npm install --global '@yylo/benchmark@0.1.0-rc.1'
+python3 -m pip install 'yylo-ledger==0.3.1'
+npm install --global '@yylo/benchmark@0.1.1-rc.2'
 
 yylo-ledger --help
 yy ledger --help
@@ -370,7 +425,7 @@ juno-kanban-juno-002 --version
 ./juno-code/scripts/juno-002-source-toolchain.sh status
 ```
 
-Both aliases enforce the exact Ledger compatibility policy `>=2.0.5,<3.0.0`. Source selection, controller registration, and data history are separate boundaries:
+`yy ledger` and its labelled `yy kanban` compatibility alias use the exact Ledger compatibility policy `0.3.1`. The isolated source aliases also enforce the legacy controller package compatibility range `juno-kanban >=2.0.5,<3.0.0`. Source selection, controller registration, and data history are separate boundaries:
 
 ```bash
 ./juno-code/scripts/juno-002-source-toolchain.sh register-controller /path/to/controller controller-branch

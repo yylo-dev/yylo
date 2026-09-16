@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import subprocess
 import shutil
 import sys
@@ -76,6 +77,8 @@ lock = (package / 'package-lock.json').read_bytes()
 sys.path.insert(0, str(SCRIPT.parent))
 import task_workspace as task_runtime  # noqa: E402
 import target_runtime_provenance as provenance_runtime  # noqa: E402
+fixture_runtime = task_runtime.load_package_bound_test_fixture(
+    __file__, "task_workspace_fixture.py")
 try:
     _fixture = task_runtime.load_package_bound_test_fixture(__file__, "real_git_fixture.py")
 except task_runtime.TaskWorkspaceError as exc:
@@ -85,6 +88,69 @@ assert_juno_admission_fixture = _fixture.assert_juno_admission_fixture
 install_juno_admission_fixture = _fixture.install_juno_admission_fixture
 PACKAGE_ROOT = Path(_fixture.__file__).resolve().parents[4]
 PUBLIC_YY = PACKAGE_ROOT / "dist/bin/yylo.sh"
+
+
+def install_exact_lock_hydration_fixture(controller: Path, worktree: Path,
+                                          task_id: str) -> None:
+    """Materialize and bind a deterministic minimal dependency tree for a task."""
+    config = task_runtime.load_config(controller)
+    rows = [*config["focused_validation"], config["full_suite_validation"]]
+    for profile in config.get("validation_profiles") or []:
+        rows.extend(profile["commands"])
+    seen: set[str] = set()
+    for row in rows:
+        relative = task_runtime.normalized_relative(row["cwd"], "validation cwd")
+        if relative in seen:
+            continue
+        seen.add(relative)
+        package = worktree / relative
+        lock = package / "package-lock.json"
+        if not lock.is_file():
+            continue
+        node_modules = package / "node_modules"
+        node_modules.mkdir(parents=True, exist_ok=True)
+        try:
+            package_json = json.loads((package / "package.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            package_json = {}
+        try:
+            lock_json = json.loads(lock.read_text())
+        except json.JSONDecodeError:
+            lock_json = {}
+        installed: dict[str, dict[str, str]] = {}
+        dependencies = package_json.get("dependencies") or {}
+        for name, requested in sorted(dependencies.items()):
+            locked = (lock_json.get("packages") or {}).get(f"node_modules/{name}", {})
+            version = locked.get("version")
+            if not isinstance(version, str):
+                version = str(requested).lstrip("^~<>= ") or "0.0.0"
+            dependency = node_modules / Path(name)
+            dependency.mkdir(parents=True, exist_ok=True)
+            (dependency / "package.json").write_text(json.dumps(
+                {"name": name, "version": version}, sort_keys=True) + "\n")
+            installed[f"node_modules/{name}"] = {"version": version}
+        (node_modules / ".package-lock.json").write_text(json.dumps({
+            "name": package_json.get("name", "fixture"),
+            "version": package_json.get("version", "1.0.0"),
+            "lockfileVersion": 3, "packages": installed,
+        }, sort_keys=True) + "\n")
+        (node_modules / ".yylo-package-lock.sha256").write_text(
+            hashlib.sha256(lock.read_bytes()).hexdigest() + "\n")
+
+    content = task_runtime._dependency_content_manifest(worktree, config)
+    data = (json.dumps(content, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    manifest = (controller / ".juno_task/runtime/test-fixture-hydration" /
+                task_id / "content-manifest.json")
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_bytes(data)
+    state = task_runtime.read_state(controller)
+    record = state["tasks"][task_id]
+    record.setdefault("hydration", {})["content_manifest"] = {
+        "path": str(manifest.resolve()), "sha256": hashlib.sha256(data).hexdigest(),
+        "file_count": len(content),
+    }
+    task_runtime.write_state(controller, state)
+
 
 # Immutable creation-order authorities from the two production defect shapes.
 # 0IttWR differs only by its originally admitted juno_kanban subtree.
@@ -98,7 +164,7 @@ VHC90C_CREATION_PATHS = [
     ".juno_task/scripts/invocation_correlation.py",
     ".juno_task/scripts/managed_agent_runner.py", ".juno_task/scripts/merge_queue.py",
     ".juno_task/scripts/metadata_controller.py", ".juno_task/scripts/parallel_runner.sh",
-    ".juno_task/scripts/release_gate.py", ".juno_task/scripts/release_train.py",
+    ".juno_task/scripts/release_gate.py",
     ".juno_task/scripts/risk_policy.py", ".juno_task/scripts/run_until_completion.sh",
     ".juno_task/scripts/target_runtime_provenance.py",
     ".juno_task/scripts/task_workflow_helper.py", ".juno_task/scripts/task_workspace.py",
@@ -108,7 +174,6 @@ VHC90C_CREATION_PATHS = [
     ".juno_task/scripts/tests/test_managed_agent_runner.py",
     ".juno_task/scripts/tests/test_merge_queue.py",
     ".juno_task/scripts/tests/test_metadata_controller.py",
-    ".juno_task/scripts/tests/test_release_train.py",
     ".juno_task/scripts/tests/test_risk_policy.py",
     ".juno_task/scripts/tests/test_task_workspace.py",
     ".juno_task/scripts/tests/test_task_workspace_decisions.py",
@@ -134,9 +199,9 @@ OITTWR_CREATION_PATHS = [*VHC90C_CREATION_PATHS[:41], "juno_kanban",
                          *VHC90C_CREATION_PATHS[41:]]
 HISTORICAL_CREATION_SHAPES = (
     ("Vhc90c", VHC90C_CREATION_PATHS,
-     "199f964b6100769ed318556f4b77aeb8a4942523d7c6944e476f8ef8bb042ac9"),
+     "9a03ddb75fcd07e7a8600e583de192da02e0394f09a4c53e8b5862f8ed9a4bb8"),
     ("0IttWR", OITTWR_CREATION_PATHS,
-     "f17804f989bbc5549eded74406983cee8c9529638cf2ae4b513b67b29cbbea12"),
+     "7ace90b985ae7fc735b23a9d92c13cbe9070291dc7fa931a0adb64a02dd6f313"),
 )
 
 
@@ -485,9 +550,15 @@ task_runtime.start = _capturing_task_start
 task_runtime.lease_successor = _capturing_lease_successor
 
 
+def _fixture_mode_uses_global_resource() -> bool:
+    """Module-wide ownership is forbidden; only declared tests serialize."""
+    return False
+
+
 def setUpModule() -> None:
-    global _RESOURCE_LOCK_TOKEN
-    _RESOURCE_LOCK_TOKEN, _ = _acquire_resource_lock(_RESOURCE_LOCK_WORKLOAD, RESOURCE_LOCK_PATH)
+    # Pure, seeded, and temp-only hermetic shards never acquire the ambient
+    # managed-install lock. Shared-resource tests acquire it in their fixture.
+    return None
 
 
 def tearDownModule() -> None:
@@ -514,8 +585,15 @@ def run(argv: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedP
     return result
 
 
+_ACTIVE_GIT_QUERY_ADAPTER = None
+
+
 def git(root: Path, *args: str) -> str:
-    return run(["git", "-C", str(root), *args], root).stdout.strip()
+    argv = ["git", "-C", str(root), *args]
+    result = run(argv, root).stdout.strip()
+    if _ACTIVE_GIT_QUERY_ADAPTER is not None:
+        _ACTIVE_GIT_QUERY_ADAPTER.observe_external(argv)
+    return result
 
 
 FAKE_KANBAN_SOURCE = '''#!/usr/bin/env python3
@@ -526,6 +604,9 @@ fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
 value = json.loads(board.read_text())
 argv = sys.argv[1:]
 NL = chr(10)
+if argv == ["--version"]:
+    print("yylo-ledger 2.0.5")
+    raise SystemExit(0)
 
 
 def canon(task):
@@ -793,6 +874,16 @@ class ValidationProfilesRoundTripTests(unittest.TestCase):
                                        "argv": [sys.executable, "-c", "pass"]},
         }
 
+    def test_policy_field_mismatch_names_missing_and_extra_keys(self) -> None:
+        config = self.base_config()
+        del config["full_suite_validation"]
+        config["unexpected_policy"] = True
+        self.write_config(config)
+        with self.assertRaisesRegex(
+                task_runtime.TaskWorkspaceError,
+                r"missing fields: full_suite_validation; extra fields: unexpected_policy"):
+            task_runtime.load_config(self.controller)
+
     def test_absent_profiles_stay_absent_across_renormalization(self) -> None:
         self.write_config(self.base_config())
         first = task_runtime.load_config(self.controller)
@@ -801,6 +892,15 @@ class ValidationProfilesRoundTripTests(unittest.TestCase):
         second = task_runtime.load_config(self.controller)
         self.assertNotIn("validation_profiles", second)
         self.assertEqual(first, second)
+
+    def test_portable_state_workspace_root_uses_environment(self) -> None:
+        config = self.base_config()
+        config["workspace_root"] = "@state/yylo/task-worktrees"
+        self.write_config(config)
+        state_home = self.controller / "state home ü"
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state_home)}):
+            loaded = task_runtime.load_config(self.controller)
+        self.assertEqual(loaded["workspace_root"], str(state_home / "yylo/task-worktrees"))
 
     def test_authored_profiles_survive_renormalization(self) -> None:
         config = self.base_config()
@@ -826,8 +926,130 @@ class ValidationProfilesRoundTripTests(unittest.TestCase):
             task_runtime.load_config(self.controller)
 
 
+class _SeededTemporary:
+    def __init__(self, instance: fixture_runtime.Instance):
+        self.instance = instance
+        self.name = str(instance.root)
+
+    def cleanup(self) -> None:
+        self.instance.release()
+
+
 class TaskWorkspaceFixture(unittest.TestCase):
+    _topology_seed: Optional[fixture_runtime.Seed] = None
+    _topology_source_root: Optional[str] = None
+
     def setUp(self) -> None:
+        test_id = f"{type(self).__name__}.{self._testMethodName}"
+        tier = ("hermetic" if self._testMethodName.startswith("build_required_")
+                else fixture_tier_for(test_id))
+        mode = os.environ.get("JUNO_TASK_WORKSPACE_FIXTURE_MODE", "complete")
+        seeded = (mode in {"affected", "seeded", "complete"}
+                  and tier in {"seeded-repository", "seeded-controller", "seeded-history"}
+                  and os.environ.get(fixture_runtime.DISABLE_ENV, "") not in {"1", "true", "yes"})
+        self._test_resource_token: Optional[str] = None
+        if not seeded:
+            self._build_hermetic_fixture()
+            self._acquire_declared_test_resource(tier)
+            return
+        if TaskWorkspaceFixture._topology_seed is None:
+            TaskWorkspaceFixture._topology_seed = fixture_runtime.find_seed(
+                self._topology_static_inputs())
+        if TaskWorkspaceFixture._topology_seed is None:
+            self._build_hermetic_fixture()
+            source_root = str(self.root)
+            inputs = self._topology_seed_inputs()
+            def publish(topology: Path) -> None:
+                shutil.copytree(self.root, topology, dirs_exist_ok=True, symlinks=True)
+                (topology / ".yylo-source-root").write_text(source_root + "\n")
+            TaskWorkspaceFixture._topology_seed = fixture_runtime.ensure_seed(inputs, publish)
+            TaskWorkspaceFixture._topology_source_root = source_root
+            self._acquire_declared_test_resource(tier)
+            self._install_git_query_adapter()
+            return
+        seed = TaskWorkspaceFixture._topology_seed
+        instance = fixture_runtime.create_instance(seed)
+        marker = instance.root / ".yylo-source-root"
+        source_root = marker.read_text().strip()
+        marker.unlink()
+        replacement = str(instance.root)
+        old = source_root.encode(); new = replacement.encode()
+        for path in instance.root.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                value = path.read_bytes()
+                if old in value:
+                    path.write_bytes(value.replace(old, new))
+        self.temporary = _SeededTemporary(instance)
+        self.root = instance.root
+        self.repository = self.root / "repo"
+        self.controller = self.root / "controller"
+        self.workspaces = self.root / "workspaces"
+        # The tracked controller policy contains the owned workspace path.
+        # Rebinding it is instance materialization, not test dirt: amend only
+        # this disposable controller branch so status starts from the exact
+        # private path while the immutable seed remains byte-for-byte intact.
+        if git(self.controller, "status", "--porcelain=v1"):
+            git(self.controller, "add", "-u")
+            git(self.controller, "commit", "--amend", "--no-edit")
+        self.base = git(self.repository, "rev-parse", "refs/heads/product")
+        self.board = self.controller / ".juno_task/runtime/fake-kanban.json"
+        self._acquire_declared_test_resource(tier)
+        self._install_git_query_adapter()
+
+    def _install_git_query_adapter(self) -> None:
+        global _ACTIVE_GIT_QUERY_ADAPTER
+        self._original_task_runtime_run = task_runtime.run
+        self._git_query_adapter = fixture_runtime.MemoizedGitDispatch(task_runtime.run)
+        task_runtime.run = self._git_query_adapter
+        _ACTIVE_GIT_QUERY_ADAPTER = self._git_query_adapter
+
+    def _acquire_declared_test_resource(self, tier: str) -> None:
+        if tier == "shared-resource":
+            self._test_resource_token, _ = _acquire_resource_lock(
+                f"declared shared-resource test: {type(self).__name__}.{self._testMethodName}",
+                RESOURCE_LOCK_PATH,
+            )
+
+    def _topology_static_inputs(self) -> dict[str, str]:
+        def digest(path: Path) -> str:
+            return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "absent"
+        templates = SCRIPT.parent
+        git_version = run(["git", "--version"], SCRIPT.parent).stdout.strip()
+        return {
+            "fixture_schema": "task-workspace-topology.v1",
+            "builder_source_sha256": digest(Path(__file__)),
+            "task_workspace_sha256": digest(SCRIPT),
+            "decision_core_sha256": digest(templates / "task_workspace_decisions.py"),
+            "fixture_helper_sha256": digest(Path(fixture_runtime.__file__).resolve()),
+            "admission_sha256": digest(templates / "real_git_fixture.py"),
+            "fixture_manifest_sha256": hashlib.sha256("\n".join(VHC90C_CREATION_PATHS).encode()).hexdigest(),
+            "modes_sha256": hashlib.sha256("\n".join(sorted(FIXTURE_TIERS)).encode()).hexdigest(),
+            "sparse_checkout_sha256": hashlib.sha256(b"/.gitignore\n/.juno_task/\n").hexdigest(),
+            "git_identity": git_version,
+            "platform_class": f"{sys.platform}:{platform.machine()}",
+            "dependency_lock_sha256": digest(PACKAGE_ROOT / "package-lock.json"),
+            "managed_contract_sha256": digest(PACKAGE_ROOT / "src/templates/managed-assets.json"),
+        }
+
+    def _topology_seed_inputs(self) -> dict[str, str]:
+        values = self._topology_static_inputs()
+        def logical_tree(root: Path) -> str:
+            rows = []
+            for relative in git(root, "ls-files").splitlines():
+                path = root / relative
+                content = path.read_bytes().replace(str(self.root).encode(), b"<FIXTURE_ROOT>")
+                rows.append(relative.encode() + b"\0" + content)
+            return hashlib.sha256(b"\0".join(rows)).hexdigest()
+        policy = (self.controller / ".juno_task/config/task-workspace.json").read_bytes()
+        values.update({
+            "product_tree": logical_tree(self.repository),
+            "controller_tree": logical_tree(self.controller),
+            "policy_sha256": hashlib.sha256(
+                policy.replace(str(self.root).encode(), b"<FIXTURE_ROOT>")).hexdigest(),
+        })
+        return values
+
+    def _build_hermetic_fixture(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         # Use the physical temp root so exact-path tests are not aliases through
         # macOS's ordinary /var -> /private/var compatibility symlink.
@@ -921,6 +1143,14 @@ class TaskWorkspaceFixture(unittest.TestCase):
         git(self.controller, "read-tree", "-mu", "HEAD")
 
     def tearDown(self) -> None:
+        global _ACTIVE_GIT_QUERY_ADAPTER
+        if getattr(self, "_git_query_adapter", None) is not None:
+            task_runtime.run = self._original_task_runtime_run
+            _ACTIVE_GIT_QUERY_ADAPTER = None
+            self._git_query_adapter = None
+        if getattr(self, "_test_resource_token", None):
+            _release_resource_lock(RESOURCE_LOCK_PATH, self._test_resource_token)
+            self._test_resource_token = None
         self.temporary.cleanup()
 
     def write_policy(self, *, validation_ok: bool = True, validation_code: Optional[str] = None,
@@ -937,6 +1167,7 @@ class TaskWorkspaceFixture(unittest.TestCase):
             "branch_prefix": "refs/heads/task-",
             "allowed_paths": ["src"],
             "selectable_paths": ["optional"],
+            "legacy_umbrella_creation": True,
             "controller_private_paths": [".juno_task/tasks", ".juno_task/state", ".juno_task/specs", ".juno_task/ledger"],
             "focused_validation": [{"id": "focused", "cwd": "src",
                                     "timeout_seconds": timeout_seconds, "max_output_bytes": max_output_bytes,
@@ -1146,7 +1377,90 @@ class TaskWorkspaceFixture(unittest.TestCase):
 class TaskWorkspaceTests(TaskWorkspaceFixture):
     """Real-Git scenario suite for the canonical task-workspace lifecycle."""
 
-    def test_umbrella_start_freezes_exact_ordered_child_union_before_git_mutation(self) -> None:
+    def write_delivery_contract(self) -> None:
+        contract = {
+            "schema_version": task_runtime.DELIVERY_CHECKPOINT_CONTRACT_SCHEMA,
+            "tracking_task_ids": ["Y"],
+            "checkpoints": [
+                {"id": "implementation", "requirement": "Implement the bounded behavior", "final": False},
+                {"id": "acceptance", "requirement": "Validate the cumulative delivery", "final": True},
+            ],
+        }
+        task_runtime.task_file(self.controller, "X").write_text(
+            "---\nid: X\nstatus: todo\n---\nOrdinary delivery\n"
+            "[delivery_checkpoints]\n" + json.dumps(contract) +
+            "\n[/delivery_checkpoints]\n")
+
+    def test_ordinary_delivery_freezes_ordered_checkpoints_and_blocks_tracking_start(self) -> None:
+        self.write_delivery_contract()
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
+                                    "require explicit exact --path scope"):
+            task_runtime.start(self.controller, "X")
+        started = task_runtime.start(self.controller, "X", ["src/base.txt"])
+        frozen = started["creation_receipt"]["delivery_checkpoint_contract"]
+        self.assertEqual([row["id"] for row in frozen["checkpoints"]],
+                         ["implementation", "acceptance"])
+        child = task_runtime.status(self.controller, "Y")
+        self.assertEqual(child["state"], "TRACKING_ONLY")
+        self.assertEqual(child["umbrella_owner_task_id"], "X")
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
+                                    "reporting-only under delivery owner X"):
+            task_runtime.start(self.controller, "Y")
+        self.assertFalse((self.workspaces / "Y").exists())
+
+    def test_ordinary_delivery_records_exact_checkpoint_evidence_and_requires_final_tip(self) -> None:
+        self.write_delivery_contract()
+        started = task_runtime.start(self.controller, "X", ["src/base.txt"])
+        worktree = Path(started["worktree"])
+        plans: list[str] = []
+
+        def fake_plan(*_args: object, **_kwargs: object) -> dict[str, str]:
+            identity = "plan-" + git(worktree, "rev-parse", "HEAD")
+            plans.append(identity)
+            return {"plan_sha256": identity}
+
+        def fake_evidence(*_args: object, **_kwargs: object) -> dict[str, object]:
+            return {"outcome": "PASSED", "plan_sha256": plans[-1], "receipts": []}
+
+        with mock.patch.object(task_runtime, "standing_checkpoint", side_effect=fake_plan), \
+             mock.patch.object(task_runtime, "standing_evidence_run", side_effect=fake_evidence):
+            (worktree / "src/base.txt").write_text("first\n")
+            git(worktree, "add", "src/base.txt"); git(worktree, "commit", "-m", "first checkpoint")
+            first = task_runtime.accept_delivery_checkpoint(self.controller, "X", "implementation")
+            self.assertEqual(first["projection"]["implementation_state"], "IN_PROGRESS")
+            repeated = task_runtime.accept_delivery_checkpoint(self.controller, "X", "implementation")
+            self.assertEqual(repeated["outcome"], "delivery_checkpoint_already_accepted")
+            self.assertEqual(repeated["checkpoint"]["evidence_sha256"],
+                             first["checkpoint"]["evidence_sha256"])
+            with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
+                                        "delivery checkpoints are incomplete"):
+                task_runtime.preflight(self.controller, "X")
+            (worktree / "src/base.txt").write_text("final\n")
+            git(worktree, "add", "src/base.txt"); git(worktree, "commit", "-m", "final checkpoint")
+            final = task_runtime.accept_delivery_checkpoint(self.controller, "X", "acceptance")
+            self.assertTrue(final["projection"]["final_accepted"])
+            self.assertEqual(final["projection"]["integration_state"], "NOT_INTEGRATED")
+            preflight = task_runtime.preflight(self.controller, "X")
+            self.assertEqual(preflight["tip_sha"], final["checkpoint"]["tip_sha"])
+            (worktree / "src/base.txt").write_text("post acceptance\n")
+            git(worktree, "add", "src/base.txt"); git(worktree, "commit", "-m", "invalidate final")
+            with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
+                                        "final cumulative delivery acceptance"):
+                task_runtime.preflight(self.controller, "X")
+
+    def test_new_umbrella_start_refuses_before_lifecycle_mutation(self) -> None:
+        declaration = self.umbrella_fixture()
+        config_path = self.controller / ".juno_task/config/task-workspace.json"
+        config = json.loads(config_path.read_text())
+        config["legacy_umbrella_creation"] = False
+        config_path.write_text(json.dumps(config) + "\n")
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
+                                    "new umbrella execution is retired"):
+            task_runtime.start(self.controller, "X", umbrella_input=declaration)
+        self.assertFalse((self.workspaces / "X").exists())
+        self.assertNotIn("X", task_runtime.read_state(self.controller)["tasks"])
+
+    def test_legacy_fixture_umbrella_start_freezes_exact_ordered_child_union_before_git_mutation(self) -> None:
         declaration = self.umbrella_fixture()
         started = task_runtime.start(self.controller, "X", umbrella_input=declaration)
         admission = started["creation_receipt"]["umbrella_admission"]
@@ -1296,7 +1610,7 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
     def test_umbrella_reservations_block_child_start_and_duplicate_owner(self) -> None:
         declaration = self.umbrella_fixture()
         task_runtime.start(self.controller, "X", umbrella_input=declaration)
-        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "tracking-only under umbrella X"):
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "reporting-only under delivery owner X"):
             task_runtime.start(self.controller, "Y")
         task_runtime.task_file(self.controller, "X2").parent.mkdir(parents=True, exist_ok=True)
         task_runtime.task_file(self.controller, "X2").write_text(
@@ -1485,12 +1799,12 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
         child_status = task_runtime.status(self.controller, "Y")
         self.assertEqual(child_status["state"], "TRACKING_ONLY")
         self.assertEqual(child_status["umbrella_owner_task_id"], "X")
-        self.assertIn("child-checkpoint X Y", child_status["next_action"])
-        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "tracking-only under umbrella X"):
+        self.assertIn("task status X", child_status["next_action"])
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "reporting-only under delivery owner X"):
             task_runtime.preflight(self.controller, "Y")
-        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "tracking-only under umbrella X"):
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "reporting-only under delivery owner X"):
             task_runtime.finish(self.controller, "Y")
-        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "tracking-only under umbrella X"):
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "reporting-only under delivery owner X"):
             task_runtime.standing_checkpoint(self.controller, "Y")
         # The umbrella itself stays fully usable.
         self.commit_task("X", "child/one.txt")
@@ -1574,136 +1888,19 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
         with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "commit history escaped"):
             task_runtime.build_umbrella_recovery_plan(self.controller, "X", declaration)
 
-    def _contract_body(self, task_id: str, *, owner_decision: bool = False) -> None:
-        decisions = ("\n## Unresolved decisions\n\n- The owner must authorize the release scope before implementation.\n"
-                     if owner_decision else "")
-        task_runtime.task_file(self.controller, task_id).write_text(
-            f"---\nid: {task_id}\nstatus: todo\nlast_modified: '2026-08-20T00:00:00Z'\n---\n"
-            f"\n<!-- juno:body:start -->\n\n## Goal\n\nShip the feature.\n\n"
-            f"## Acceptance\n\n- Focused tests pass.\n- Full suite passes.\n"
-            f"{decisions}\n<!-- juno:body:end -->\n")
+    def test_raw_parser_rejects_removed_contract_and_handoff_operations(self) -> None:
+        for operation in ("contract", "handoff"):
+            result = run(["python3", str(SCRIPT), operation, "--task", "X",
+                          "--controller", str(self.controller)], self.controller, False)
+            self.assertEqual(result.returncode, 2, operation)
+            self.assertIn("invalid choice", result.stderr, operation)
 
-    def test_contract_binds_requirements_base_and_reviewer_checklist(self) -> None:
-        self._contract_body("X")
-        task_runtime.start(self.controller, "X")
-        contract = task_runtime.preimplementation_contract(self.controller, "X")
-        self.assertEqual(contract["schema_version"],
-                         task_runtime.PREIMPLEMENTATION_CONTRACT_SCHEMA)
-        self.assertEqual(contract["status"], "ready")
-        self.assertEqual(contract["version"], 1)
-        binding = contract["binding"]
-        self.assertEqual(binding["task_manifest_sha256"],
-                         hashlib.sha256(
-                             task_runtime.task_file(self.controller, "X").read_bytes()
-                         ).hexdigest())
-        self.assertEqual(binding["base_sha"], task_runtime.ref_sha(self.repository, "refs/heads/product"))
-        checklist = contract["reviewer_checklist"]
-        self.assertTrue(any("Focused tests pass" in item for item in checklist))
-        self.assertTrue(contract["contract_path"].endswith("v1.json"))
-        self.assertTrue(Path(contract["contract_path"]).is_file())
-
-    def test_contract_refuses_handoff_while_owner_decisions_open(self) -> None:
-        self._contract_body("X", owner_decision=True)
-        task_runtime.start(self.controller, "X")
-        contract = task_runtime.preimplementation_contract(self.controller, "X")
-        self.assertEqual(contract["status"], "blocked_handoff")
-        self.assertEqual(len(contract["owner_decisions"]), 1)
-        self.assertIn("owner must authorize", contract["owner_decisions"][0])
-
-    def test_contract_supersedes_without_rewriting_the_predecessor(self) -> None:
-        self._contract_body("X")
-        task_runtime.start(self.controller, "X")
-        first = task_runtime.preimplementation_contract(self.controller, "X")
-        first_path = Path(first["contract_path"])
-        first_bytes = first_path.read_bytes()
-        self._contract_body("X")
-        second = task_runtime.preimplementation_contract(self.controller, "X")
-        self.assertEqual(second["version"], 2)
-        self.assertEqual(second["predecessor"]["path"], str(first_path))
-        self.assertEqual(second["predecessor"]["sha256"],
-                         hashlib.sha256(first_bytes).hexdigest())
-        self.assertEqual(first_path.read_bytes(), first_bytes,
-                         "superseding must never rewrite predecessor evidence")
-        active = task_runtime.active_preimplementation_contract(self.controller, "X")
-        assert active is not None
-        self.assertEqual(active["version"], 2)
-
-    def test_contract_parity_pairs_follow_runtime_template_twins(self) -> None:
-        self._contract_body("X")
-        task_runtime.start(self.controller, "X")
-        with task_runtime.state_lock(self.controller):
-            state = task_runtime.read_state(self.controller)
-            state["tasks"]["X"]["changed_paths"] = [
-                ".juno_task/scripts/merge_queue.py",
-                "juno-code/src/templates/scripts/merge_queue.py",
-                "src/feature.txt",
-            ]
-            task_runtime.write_state(self.controller, state)
-        contract = task_runtime.preimplementation_contract(self.controller, "X")
-        pairs = {json.dumps(pair, sort_keys=True) for pair in contract["parity_pairs"]}
-        self.assertIn(json.dumps(
-            {"runtime": ".juno_task/scripts/merge_queue.py",
-             "template": "juno-code/src/templates/scripts/merge_queue.py"}, sort_keys=True), pairs)
-        self.assertEqual(len(contract["parity_pairs"]), 1)
-        self.assertTrue(any("Parity:" in item for item in contract["reviewer_checklist"]))
-
-    def test_handoff_is_deterministic_bounded_and_byte_stable(self) -> None:
-        task_runtime.start(self.controller, "X")
-        first = task_runtime.run_handoff(self.controller, "X")
-        second = task_runtime.run_handoff(self.controller, "X")
-        self.assertEqual(first["schema_version"], task_runtime.HANDOFF_SCHEMA)
-        self.assertEqual(first["state"], "WORKING")
-        self.assertEqual(first["next_command"], "yy task preflight X")
-        self.assertLessEqual(len(first["handoff_text"].encode()),
-                             task_runtime.HANDOFF_MAX_BYTES)
-        markdown = Path(first["handoff_paths"][1])
-        before = markdown.read_bytes()
-        task_runtime.run_handoff(self.controller, "X")
-        self.assertEqual(markdown.read_bytes(), before,
-                         "handoff must be byte-stable without state changes")
-        self.assertIn("[x]", first["handoff_text"])
-        self.assertIn("[>]", first["handoff_text"])
-        self.assertIn("cost/duration: not available", first["handoff_text"])
-
-    def test_handoff_fails_closed_on_conflicting_evidence(self) -> None:
-        task_runtime.start(self.controller, "X")
-        with task_runtime.state_lock(self.controller):
-            state = task_runtime.read_state(self.controller)
-            state["tasks"]["X"]["state"] = "AWAITING_RISK"
-            state["tasks"]["X"]["queue_attempt"] = {"candidate_sha": None,
-                                                    "risk": {"status": "AWAITING_RISK"}}
-            task_runtime.write_state(self.controller, state)
-        handoff = task_runtime.run_handoff(self.controller, "X")
-        self.assertTrue(handoff["conflicts"])
-        self.assertEqual(handoff["next_command"], "yy integration runtime-doctor")
-
-    def test_handoff_maps_lifecycle_states_to_next_commands(self) -> None:
-        task_runtime.start(self.controller, "X")
-        cases = {"QUEUED": "yy merge next",
-                 "AWAITING_RISK": "yy merge review X",
-                 "REVIEW_FINDINGS": "repair findings in the task worktree, then yy merge reopen X",
-                 "RISK_EVIDENCE_READY": "yy merge next X",
-                 "MERGED": "none: task integrated; archive the Kanban task"}
-        for queue_state, command in cases.items():
-            with task_runtime.state_lock(self.controller):
-                state = task_runtime.read_state(self.controller)
-                if queue_state in {"AWAITING_RISK", "RISK_EVIDENCE_READY", "REVIEWING"}:
-                    state["tasks"]["X"]["queue_attempt"] = {
-                        "candidate_sha": "a" * 40,
-                        "risk": {"status": queue_state,
-                                 "review_progress": {"full_suite_admission": {
-                                     "receipts": [{"receipt_path": "/tmp/r.json",
-                                                   "receipt_sha256": "0" * 64}]}}}}
-                elif queue_state == "MERGED":
-                    state["tasks"]["X"]["queue_attempt"] = {"outcome": "MERGED",
-                                                            "candidate_sha": "a" * 40}
-                    state["tasks"]["X"]["outcome"] = "MERGED"
-                else:
-                    state["tasks"]["X"]["queue_attempt"] = {"risk": {"status": queue_state}}
-                state["tasks"]["X"]["state"] = queue_state
-                task_runtime.write_state(self.controller, state)
-            handoff = task_runtime.run_handoff(self.controller, "X")
-            self.assertEqual(handoff["next_command"], command, queue_state)
+    def test_resume_is_a_thin_public_spelling_for_the_task_run_owner(self) -> None:
+        parsed = task_runtime.parser().parse_args(["resume", "--task", "X"])
+        self.assertEqual((parsed.operation, parsed.task), ("resume", "X"))
+        source = SCRIPT.read_text()
+        self.assertIn('if args.operation in {"run", "resume"}:', source)
+        self.assertIn('"resume_owner": "task-run"', source)
 
     def test_recovery_plan_audit_requires_kanban_routing_policy(self) -> None:
         self.payload("start", "X")
@@ -1724,6 +1921,23 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
         }, clear=False):
             with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "expected kanban"):
                 task_runtime.record_control_audit(self.controller, "task", "recovery-plan", "X")
+
+    def test_merge_audit_exposes_only_native_delivery_operations(self) -> None:
+        audit_root = self.controller / ".juno_task/runtime/control-audit/merge"
+        for operation in ("land", "project"):
+            receipt = task_runtime.record_control_audit(
+                self.controller, "merge", operation, "X")
+            audit = json.loads(Path(receipt["path"]).read_text())
+            self.assertEqual((audit["surface"], audit["operation"], audit["task_id"],
+                              audit["policy_operation"]),
+                             ("merge", operation, "X", "orchestration"))
+        before = sorted(audit_root.glob("*.json"))
+        for retired in ("drive", "next", "resolve", "review",
+                        "recover-authority-drift", "supersede-lifecycle-journal"):
+            with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
+                                        f"unsupported merge audit operation: {retired}"):
+                task_runtime.record_control_audit(self.controller, "merge", retired, "X")
+        self.assertEqual(sorted(audit_root.glob("*.json")), before)
 
     def test_clean_working_umbrella_recovery_preserves_predecessor_and_is_idempotent(self) -> None:
         declaration = self.umbrella_fixture()
@@ -1747,10 +1961,41 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
         repeated = task_runtime.apply_umbrella_recovery(
             self.controller, "X", plan_path, declaration, authorization)
         self.assertEqual(repeated["outcome"], "already_applied")
+        state_before_verify = task_runtime.read_state(self.controller)
+        verified = task_runtime.verify_umbrella_recovery(
+            self.controller, "X", plan_path, declaration, authorization)
+        self.assertEqual(verified["schema_version"],
+                         task_runtime.LEGACY_DELIVERY_VERIFICATION_SCHEMA)
+        self.assertEqual(verified["outcome"], "verified")
+        self.assertFalse(verified["mutation"])
+        self.assertEqual(task_runtime.read_state(self.controller), state_before_verify)
         status = task_runtime.status(self.controller, "X")
         self.assertEqual(status["umbrella_admission_status"]["authority"], "authorized_superseding")
+        self.assertEqual(status["delivery_checkpoint_status"]["current_checkpoint_id"], "Y")
+        self.assertEqual(status["delivery_checkpoint_status"]["integration_state"], "NOT_INTEGRATED")
+        child_status = task_runtime.status(self.controller, "Y")
+        self.assertTrue(child_status["reporting_only"])
+        self.assertFalse(child_status["separate_integration"])
         self.assertEqual(status["creation_receipt"], predecessor)
         self.assertEqual(status["admission_supersessions"][0]["predecessor_receipt_sha256"], predecessor_sha)
+
+    def test_start_time_umbrella_converts_to_one_ordinary_delivery_contract(self) -> None:
+        declaration = self.umbrella_fixture()
+        started = task_runtime.start(self.controller, "X", umbrella_input=declaration)
+        self.commit_task("X", "child/one.txt")
+        plan = task_runtime.build_umbrella_recovery_plan(self.controller, "X", declaration)
+        self.assertEqual(plan["newly_admitted_paths"], [])
+        plan_path = self.root / "admitted-conversion-plan.json"
+        plan_path.write_text(json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n")
+        authorization = self.recovery_authorization(plan_path, declaration)
+        applied = task_runtime.apply_umbrella_recovery(
+            self.controller, "X", plan_path, declaration, authorization)
+        self.assertEqual(applied["creation_receipt"], started["creation_receipt"])
+        self.assertEqual(applied["delivery_conversion"]["contract"]["source"],
+                         "verified_legacy_conversion")
+        status = task_runtime.status(self.controller, "X")
+        self.assertEqual(status["delivery_checkpoint_status"]["current_checkpoint_id"], "Y")
+        self.assertEqual(status["delivery_checkpoint_status"]["tracking_task_ids"], ["Y", "Z"])
 
     def test_umbrella_recovery_refuses_dirty_stale_revision_and_unauthorized_apply(self) -> None:
         declaration = self.umbrella_fixture()
@@ -1909,6 +2154,31 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
             "requirements; update real_git_fixture.py in the same change",
         )
 
+    def test_exact_lock_fixture_binds_stamp_and_installed_content_manifest(self) -> None:
+        self.payload("start", "X")
+        worktree = self.workspaces / "X"
+        package = worktree / "src"
+        (package / "package.json").write_text(json.dumps({
+            "name": "fixture", "version": "1.0.0", "dependencies": {"left-pad": "1.3.0"},
+        }) + "\n")
+        (package / "package-lock.json").write_text(json.dumps({
+            "name": "fixture", "version": "1.0.0", "lockfileVersion": 3,
+            "packages": {"": {"name": "fixture", "version": "1.0.0",
+                                "dependencies": {"left-pad": "1.3.0"}},
+                         "node_modules/left-pad": {"version": "1.3.0"}},
+        }) + "\n")
+
+        install_exact_lock_hydration_fixture(self.controller, worktree, "X")
+
+        record = task_runtime.read_state(self.controller)["tasks"]["X"]
+        stamp = package / "node_modules/.yylo-package-lock.sha256"
+        self.assertEqual(stamp.read_text().strip(), hashlib.sha256(
+            (package / "package-lock.json").read_bytes()).hexdigest())
+        self.assertIn("src/node_modules/left-pad/package.json", json.loads(
+            Path(record["hydration"]["content_manifest"]["path"]).read_text()))
+        task_runtime._verify_dependency_tree(
+            worktree, task_runtime.load_config(self.controller), record["hydration"])
+
     def test_declared_generator_and_managed_outputs_are_hash_bound_and_queue_at_byte_parity(self) -> None:
         fixtures = self.install_declared_output_fixtures()
         started = self.payload("start", "X")
@@ -2014,6 +2284,19 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
         git(self.repository, "commit", "-m", "schema two instruction declaration")
         started = self.payload("start", "X")
         self.assertEqual(started["state"], "WORKING")
+
+    def test_installed_instruction_bundle_uses_canonical_utf8_record_identity(self) -> None:
+        keys = ["😀", "a", ".dot", "é", "A", "_under"]
+        assets = {destination: {
+            "type": "script", "templateVersion": "1.2.3",
+            "sourceSha256": str(index) * 64, "installedSha256": str(index) * 64}
+                  for index, destination in enumerate(keys, start=1)}
+        self.assertEqual(task_runtime._managed_inventory_records_identity(assets),
+                         "d965b07f2505b7a1c7c7c5dfb8151409191fc8dfa37b81b4bc9ec9a2db4c6f82")
+        inventory = {"schemaVersion": 2, "packageName": "@yylo/cli",
+                     "packageVersion": "1.2.3", "assets": assets}
+        task_runtime._bind_instruction_bundle_identity(inventory)
+        self.assertTrue(task_runtime._managed_inventory_identity_valid(inventory))
 
     def test_installed_instruction_bundle_identity_rejects_mixed_hashes(self) -> None:
         assets = {}
@@ -2219,6 +2502,15 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
         }.issubset(admitted))
         self.assertNotIn(".juno_task/scripts", admitted)
 
+    def test_canonical_policy_admits_only_exact_lifecycle_acceptance_report(self) -> None:
+        canonical_policy = json.loads(
+            (SCRIPT.parent.parent / "config/task-workspace.json").read_text())
+        acceptance_path = "juno-code/docs/lifecycle-simplification-acceptance.md"
+        sibling_path = "juno-code/docs/lifecycle-simplification-acceptance-draft.md"
+
+        self.assertIn(acceptance_path, canonical_policy["allowed_paths"])
+        self.assertNotIn(sibling_path, canonical_policy["allowed_paths"])
+
     def test_start_freezes_explicit_policy_admitted_paths(self) -> None:
         started = task_runtime.start(self.controller, "X", ["optional"])
         self.assertEqual(started["creation_receipt"]["requested_paths"], ["optional"])
@@ -2227,6 +2519,29 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
         self.assertTrue((self.workspaces / "X" / "optional/base.txt").is_file())
         with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "differ from the frozen"):
             task_runtime.start(self.controller, "X", [])
+
+    def test_start_freezes_exact_tracked_files_without_legacy_baseline_roots(self) -> None:
+        started = task_runtime.start(self.controller, "X", ["src/base.txt"])
+        receipt = started["creation_receipt"]
+        self.assertEqual(receipt["requested_paths"], ["src/base.txt"])
+        self.assertEqual(receipt["allowed_paths"], ["src/base.txt"])
+        self.assertEqual(receipt["selected_entries"]["src/base.txt"]["type"], "blob")
+        self.assertNotIn("src", receipt["allowed_paths"])
+
+    def test_early_admission_projects_dirty_and_committed_authored_paths_read_only(self) -> None:
+        started = task_runtime.start(self.controller, "X", ["src/base.txt"])
+        worktree = Path(started["worktree"])
+        (worktree / "src/base.txt").write_text("changed\n")
+        dirty = task_runtime.task_admission_check(self.controller, "X")
+        self.assertEqual(dirty["dirty_paths"], ["src/base.txt"])
+        self.assertEqual(dirty["authored_paths"], [])
+        git(worktree, "add", "src/base.txt")
+        git(worktree, "commit", "-m", "exact authored file")
+        committed = task_runtime.task_admission_check(self.controller, "X")
+        self.assertEqual(committed["dirty_paths"], [])
+        self.assertEqual(committed["authored_paths"], ["src/base.txt"])
+        self.assertEqual(committed["origin_projection"]["schema_version"],
+                         "juno_path_origin_projection.v1")
 
     def test_exact_runtime_parity_paths_queue_with_their_package_templates(self) -> None:
         policy_path = self.controller / ".juno_task/config/task-workspace.json"
@@ -3450,6 +3765,11 @@ raise SystemExit(17)
         package = json.loads((PACKAGE_ROOT / "package.json").read_text())
         self.assertTrue(PUBLIC_YY.is_file(), f"public yy binary is missing: {PUBLIC_YY}")
         run([str(PUBLIC_YY), "scripts", "update", "--force"], self.controller)
+        canonical_kanban = self.controller / ".venv_juno/bin/juno-kanban"
+        canonical_kanban.parent.mkdir(parents=True, exist_ok=True)
+        canonical_kanban.write_text(
+            FAKE_KANBAN_SOURCE.replace("@BOARD@", repr(str(self.board))))
+        canonical_kanban.chmod(0o755)
         packaged_executable = PACKAGE_ROOT / "dist/bin/cli.mjs"
         identity = self.controller / ".juno_task/runtime/identity.json"
         identity.parent.mkdir(parents=True, exist_ok=True)
@@ -3531,8 +3851,18 @@ out.mkdir(parents=True)
         creation_identity = failed_record["workspace_identity"]["create_receipt_sha256"]
         workspace = Path(failed_record["worktree"])
 
-        # Simulate the selected managed runtime from the dogfood report: it can
-        # be invoked, but its dispatcher/audit protocol predates task hydrate.
+        # The failed start issued a fencing lease whose holder CLI process has
+        # ended; the honest recovery is one receipt-bound successor before the
+        # hydration retry can present a valid fencing token.
+        successor = json.loads(run(
+            [str(PUBLIC_YY), "task", "lease-successor", "X"], workspace).stdout)
+        self.assertEqual(successor["outcome"], "successor_issued")
+        self.assertEqual(successor["authority_kind"], "successor_death")
+        lease_token = successor["lease_token"]
+
+        # Simulate the selected managed runtime from the dogfood report only
+        # after successor authority exists: its dispatcher predates hydrate,
+        # so the public hydrate command must use the package-bound fallback.
         stale_runtime = self.controller / task_runtime.RUNTIME_PATH
         stale_runtime.write_text("""#!/usr/bin/env python3
 import sys
@@ -3543,15 +3873,6 @@ raise SystemExit(2)
                     self.controller, False)
         self.assertEqual(stale.returncode, 2)
         self.assertIn("unsupported task audit operation: hydrate", stale.stderr)
-
-        # The failed start issued a fencing lease whose holder CLI process has
-        # ended; the honest recovery is one receipt-bound successor before the
-        # hydration retry can present a valid fencing token.
-        successor = json.loads(run(
-            [str(PUBLIC_YY), "task", "lease-successor", "X"], workspace).stdout)
-        self.assertEqual(successor["outcome"], "successor_issued")
-        self.assertEqual(successor["authority_kind"], "successor_death")
-        lease_token = successor["lease_token"]
 
         recovered = run([str(PUBLIC_YY), "task", "hydrate", "X",
                          "--lease-token", lease_token], workspace)
@@ -3585,6 +3906,16 @@ raise SystemExit(2)
 
         updated = run([str(PUBLIC_YY), "scripts", "update", "--force"], self.controller)
         self.assertEqual(updated.returncode, 0)
+        canonical_kanban = self.controller / ".venv_juno/bin/juno-kanban"
+        canonical_kanban.parent.mkdir(parents=True, exist_ok=True)
+        canonical_kanban.write_text(
+            FAKE_KANBAN_SOURCE.replace("@BOARD@", repr(str(self.board))))
+        canonical_kanban.chmod(0o755)
+        git(self.controller, "add", "-u", "--", ".juno_task")
+        git(self.controller, "add", "-f", "--", ".juno_task/managed-assets.json",
+            ".juno_task/prompts", ".juno_task/wiki", ".juno_task/workflows")
+        if git(self.controller, "diff", "--cached", "--name-only"):
+            git(self.controller, "commit", "-m", "install current managed controller generation")
         controller_runtime = self.controller / task_runtime.RUNTIME_PATH
         self.assertEqual(
             controller_runtime.read_bytes(),
@@ -3598,8 +3929,11 @@ raise SystemExit(2)
         self.assertEqual(refused.returncode, 2)
         self.assertIn("yy task runtime-bootstrap --dry-run", refused.stderr)
         self.assertFalse((self.workspaces / "X").exists())
-        self.assertEqual(task_runtime._bootstrap_target_status(self.controller), "",
-                         "public task-start refusal dirtied the configured repository")
+        target_status = task_runtime._bootstrap_target_status(self.controller)
+        self.assertFalse(
+            target_status,
+            f"public task-start refusal dirtied the configured repository:\n{target_status}",
+        )
 
         planned = run(
             [str(PUBLIC_YY), "task", "runtime-bootstrap", "--dry-run"], self.controller)
@@ -3631,6 +3965,16 @@ raise SystemExit(2)
         self.assertEqual(package.get("name"), "@yylo/cli")
         self.assertTrue(PUBLIC_YY.is_file())
         run([str(PUBLIC_YY), "scripts", "update", "--force"], self.controller)
+        canonical_kanban = self.controller / ".venv_juno/bin/juno-kanban"
+        canonical_kanban.parent.mkdir(parents=True, exist_ok=True)
+        canonical_kanban.write_text(
+            FAKE_KANBAN_SOURCE.replace("@BOARD@", repr(str(self.board))))
+        canonical_kanban.chmod(0o755)
+        git(self.controller, "add", "-u", "--", ".juno_task")
+        git(self.controller, "add", "-f", "--", ".juno_task/prompts",
+            ".juno_task/wiki", ".juno_task/workflows")
+        if git(self.controller, "diff", "--cached", "--name-only"):
+            git(self.controller, "commit", "-m", "install current managed controller generation")
         packaged_executable = PACKAGE_ROOT / "dist/bin/cli.mjs"
         identity = self.controller / ".juno_task/runtime/identity.json"
         identity.parent.mkdir(parents=True, exist_ok=True)
@@ -3641,6 +3985,16 @@ raise SystemExit(2)
             "source": "installed-release", "tracked": False,
         }) + "\n")
         packaged_runtime = PACKAGE_ROOT / "dist/templates/scripts/task_workspace.py"
+        managed_inventory_path = self.controller / ".juno_task/managed-assets.json"
+        managed_inventory = json.loads(managed_inventory_path.read_text())
+        managed_inventory["schemaVersion"] = 1
+        managed_inventory["packageName"] = package["name"]
+        managed_inventory["packageVersion"] = package["version"]
+        runtime_inventory = managed_inventory["assets"][task_runtime.RUNTIME_PATH]
+        runtime_hash = hashlib.sha256(packaged_runtime.read_bytes()).hexdigest()
+        runtime_inventory["sourceSha256"] = runtime_hash
+        runtime_inventory["installedSha256"] = runtime_hash
+        managed_inventory_path.write_text(json.dumps(managed_inventory) + "\n")
         runtime = self.repository / task_runtime.RUNTIME_PATH
         runtime.write_bytes(packaged_runtime.read_bytes())
         git(self.repository, "rm", "juno-code/src/templates/scripts/task_workspace.py",
@@ -3662,6 +4016,12 @@ raise SystemExit(2)
         self.assertEqual(refused.returncode, 2)
         self.assertIn("target-runtime-provenance plan", refused.stderr)
         plan_path = self.root / "package-provenance-plan.json"
+        controller_status = git(
+            self.controller, "status", "--porcelain=v1", "--untracked-files=all")
+        self.assertFalse(
+            controller_status,
+            f"fixture controller must be clean before provenance planning:\n{controller_status}",
+        )
         planned = run([str(PUBLIC_YY), "migrate", "target-runtime-provenance", "plan",
                        "--controller", str(self.controller), "--output", str(plan_path)],
                       self.controller)
@@ -3694,8 +4054,12 @@ raise SystemExit(2)
         self.assertEqual(refused.returncode, 2)
         self.assertIn("managed task runtime differs", refused.stderr)
         self.assertIn("Juno source target", refused.stderr)
-        self.assertIn("controller package/runtime matching that target", refused.stderr)
-        self.assertIn("atomically update the source package", refused.stderr)
+        self.assertIn("Complete safe recovery", refused.stderr)
+        self.assertIn("yy integration runtime-adopt-source --previous-sha", refused.stderr)
+        self.assertIn("--target-sha", refused.stderr)
+        self.assertIn("--install-prefix", refused.stderr)
+        self.assertIn("--output", refused.stderr)
+        self.assertIn("do not use runtime-install-rebind or runtime-refresh alone", refused.stderr)
         self.assertNotIn("runtime-bootstrap", refused.stderr)
         self.assertFalse((self.workspaces / "X").exists())
         self.assertNotEqual(run(["git", "-C", str(self.repository), "show-ref", "--verify",
@@ -3825,6 +4189,12 @@ raise SystemExit(2)
         self.assertEqual(payload["changed_paths"], ["src/committed.txt"])
         self.assertEqual(payload["uncommitted_paths"], ["src/tracked-dirty.txt", "src/uncommitted.txt"])
         self.assertEqual(payload["changed_paths_scope"], "base_sha..tip committed diff")
+        self.assertEqual(payload["producer_fence"]["attempt"], 1)
+        self.assertEqual(payload["mutation_eligibility"]["operation"], "finish")
+        self.assertTrue(payload["mutation_eligibility"]["eligible"])
+        self.assertEqual(payload["mutation_eligibility"]["safe_next_action"],
+                         "yy task preflight X")
+        self.assertTrue(payload["mutation_eligibility"]["authority_checked_live_by_executor"])
 
     def test_status_reports_uncommitted_only_and_clean_cases(self) -> None:
         self.payload("start", "X")
@@ -4152,12 +4522,21 @@ raise SystemExit(2)
         self.assertEqual(checked["outcome"], "preflight_passed")
         self.assertEqual(closure["tip_sha"], tip)
         self.assertEqual(closure["changed_paths"], ["src/feature.txt"])
+        submission = closure["submission"]
+        submission_body = {key: value for key, value in submission.items()
+                           if key != "submission_sha256"}
+        self.assertEqual(submission["submission_sha256"],
+                         task_runtime.stable_sha256(submission_body))
+        self.assertTrue(Path(checked["submission_receipt"]["path"]).is_file())
         body = {key: value for key, value in closure.items() if key != "closure_sha256"}
         self.assertEqual(closure["closure_sha256"], task_runtime.stable_sha256(body))
         self.assertEqual(task_runtime.read_state(self.controller)["tasks"]["X"]["state"],
                          "WORKING")
         queued = self.payload("finish", "X")
         queued_closure = queued["review_ready_closure"]
+        self.assertEqual(checked["submission_receipt"], queued["submission_receipt"])
+        self.assertEqual(submission["submission_sha256"],
+                         queued_closure["submission"]["submission_sha256"])
         for key, value in closure.items():
             if key != "closure_sha256":
                 self.assertEqual(queued_closure[key], value)
@@ -4168,6 +4547,18 @@ raise SystemExit(2)
                        if key != "closure_sha256"}
         self.assertEqual(queued_closure["closure_sha256"],
                          task_runtime.stable_sha256(queued_body))
+
+    def test_unrelated_target_advance_reuses_the_same_semantic_submission(self) -> None:
+        self.payload("start", "X")
+        self.commit_task("X")
+        checked = self.payload("preflight", "X")
+        self.advance_target()
+        queued = self.payload("finish", "X")
+        self.assertEqual(
+            checked["review_ready_closure"]["submission"]["submission_sha256"],
+            queued["review_ready_closure"]["submission"]["submission_sha256"],
+        )
+        self.assertEqual(checked["submission_receipt"], queued["submission_receipt"])
 
     def test_finish_refuses_failed_focused_validation_without_state_advance(self) -> None:
         self.payload("start", "X")
@@ -4196,6 +4587,17 @@ raise SystemExit(2)
         self.assertTrue((self.workspaces / "X").is_dir())
         self.assertEqual(self.payload("finish", "X")["outcome"], "already_queued")
 
+    def test_state_ineligible_preflight_refuses_before_runtime_or_validation(self) -> None:
+        self.payload("start", "X")
+        state = task_runtime.read_state(self.controller)
+        state["tasks"]["X"]["state"] = "QUEUED"
+        task_runtime.write_state(self.controller, state)
+        with mock.patch.object(task_runtime, "require_current_runtime",
+                               side_effect=AssertionError("runtime must not run")):
+            with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
+                                        "cannot preflight from QUEUED"):
+                task_runtime.preflight(self.controller.resolve(), "X")
+
     def test_empty_commit_is_not_a_finished_feature(self) -> None:
         self.payload("start", "X")
         git(self.workspaces / "X", "commit", "--allow-empty", "-m", "empty")
@@ -4212,11 +4614,21 @@ raise SystemExit(2)
         self.write_policy(validation_code=code, timeout_seconds=1, max_output_bytes=1024)
         started = time.monotonic()
         failed = self.command("finish", "X", False)
-        self.assertLess(time.monotonic() - started, 3)
+        # Bound the operation itself rather than conflating it with fresh CLI
+        # import and durable-state readback overhead on a loaded host.
+        self.assertLess(time.monotonic() - started, 5)
         self.assertEqual(failed.returncode, 2)
         self.assertIn("timed out", failed.stderr)
         evidence = self.payload("status", "X")["validation"][0]
         self.assertTrue(evidence["timed_out"])
+        self.assertLess(evidence["duration_ms"], 1500)
+        timing = evidence["timing"]
+        self.assertEqual(timing["overall_elapsed_ms"], timing["wall_duration_ms"])
+        self.assertEqual(timing["first_failure_ms"], timing["overall_elapsed_ms"])
+        phase_total = (timing["resource_wait_ms"] + timing["setup_ms"]
+                       + timing["execution_ms"] + timing["settlement_ms"])
+        self.assertLessEqual(phase_total, timing["overall_elapsed_ms"])
+        self.assertLessEqual(timing["overall_elapsed_ms"] - phase_total, 4)
         self.assertGreater(evidence["stdout_truncated_bytes"], 0)
         self.assertGreater(evidence["stderr_truncated_bytes"], 0)
         self.assertLessEqual(len(evidence["stdout_tail"].encode()), 1024)
@@ -4505,6 +4917,60 @@ finished = time.monotonic()
         self.assertEqual(finished["validation_routing"],
                          {"mode": "profile", "profile_ids": ["pkg-suite"],
                           "authored_path_count": 1})
+
+    def test_declared_absent_file_is_created_without_sibling_authority(self) -> None:
+        config_path = self.controller / ".juno_task/config/task-workspace.json"
+        policy = json.loads(config_path.read_text())
+        migration_path = "juno-code/docs/lifecycle-simplification-migration.md"
+        sibling_path = "juno-code/docs/unrelated-future-contract.md"
+        policy["allowed_paths"].append(migration_path)
+        config_path.write_text(json.dumps(policy, indent=2) + "\n")
+
+        started = task_runtime.start(self.controller, "X", [migration_path])
+        self.assertEqual(started["creation_receipt"]["allowed_paths"], [migration_path])
+        self.assertEqual(started["creation_receipt"]["selected_entries"][migration_path], {
+            "mode": "000000", "type": "absent", "object": "0" * 40,
+        })
+        worktree = self.workspaces / "X"
+        destination = worktree / migration_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("# Migration contract\n")
+        git(worktree, "add", migration_path)
+        git(worktree, "commit", "-m", "add exact migration contract")
+        finished = self.payload("finish", "X")
+        self.assertEqual(finished["state"], "QUEUED")
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
+                                    "not admitted by policy"):
+            task_runtime.start(self.controller, "Y", [sibling_path])
+
+    def test_absent_allowed_root_is_creatable_and_selects_only_its_profile(self) -> None:
+        config_path = self.controller / ".juno_task/config/task-workspace.json"
+        config = json.loads(config_path.read_text())
+        config["allowed_paths"].append("telegram_bot")
+        config["validation_profiles"] = [{
+            "id": "telegram-bot-suite", "path_roots": ["telegram_bot"],
+            "commands": [{"id": "telegram-bot-test", "cwd": "telegram_bot",
+                          "argv": [sys.executable, "-c", "pass"],
+                          "timeout_seconds": 10, "max_output_bytes": 4096,
+                          "input_paths": ["telegram_bot"]}],
+        }]
+        config_path.write_text(json.dumps(config, indent=2) + "\n")
+
+        started = self.payload("start", "X")
+        self.assertIn("telegram_bot", started["creation_receipt"]["allowed_paths"])
+        worktree = self.workspaces / "X"
+        (worktree / "telegram_bot").mkdir()
+        (worktree / "telegram_bot/app.py").write_text("VALUE = 1\n")
+        git(worktree, "add", "telegram_bot/app.py")
+        git(worktree, "commit", "-m", "create newly admitted root")
+        finished = self.payload("finish", "X")
+        self.assertEqual([row["id"] for row in finished["validation"]],
+                         ["telegram-bot-test"])
+        self.assertEqual(finished["validation_routing"]["profile_ids"],
+                         ["telegram-bot-suite"])
+
+        self.assertFalse(task_runtime.path_within("unrelated_root/file.py",
+                                                  started["creation_receipt"]["allowed_paths"]))
 
     def test_task_run_persists_needs_decision_before_product_editing(self) -> None:
         self.install_task_run_assets()
@@ -5022,6 +5488,11 @@ steps:
             receipt_sha = journal["workers"][0]["predispatch_receipt"]["sha256"]
             historical_deadline = journal["deadline_unix_ns"]
             historical_events = json.loads(json.dumps(journal["events"]))
+
+            # Ordinary controller checkpoints must not invalidate the frozen
+            # execution policy or consume the no-provider recovery allowance.
+            git(self.controller, "add", ".")
+            git(self.controller, "commit", "--allow-empty", "-m", "metadata checkpoint")
 
             # Every caller-provided identity is exact and refusal is mutation-free.
             refusals = [
@@ -5985,11 +6456,8 @@ steps:
                       f"superseded-by-{repaired['plan_sha256']}.json")
         self.assertEqual(json.loads(superseded.read_text())["outcome"], "SUPERSEDED")
 
-    def test_failed_evidence_with_changed_readiness_reexecutes_via_supersession(self) -> None:
-        """Regression (Yx60Pf): a failed focused-validation receipt whose
-        readiness identity then changed must re-execute under its one
-        supersession and persist the supersession receipt instead of raising
-        FileNotFoundError for a receipt that was never written."""
+    def test_failed_exact_command_stands_when_only_legacy_readiness_wrapper_changes(self) -> None:
+        """D owns one terminal result; G, not readiness wrappers, owns retries."""
         counter = self.root / "standing-counter.txt"
         repair = self.root / "repair.flag"
         code = ("from pathlib import Path\n"
@@ -6010,23 +6478,16 @@ steps:
             **hydration, "yy60pf_readiness_marker": "repaired-environment"}
         state_path.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
         repair.write_text("ready\n")
-        summary = self.payload("evidence-run", "X")
-        self.assertEqual((summary["outcome"], summary["executed"], summary["invalidated"]),
-                         ("PASSED", 1, 1))
-        self.assertEqual(counter.read_text().splitlines(), ["run", "run"])
-        self.assertEqual([item["decision"] for item in summary["decisions"]],
-                         ["invalidated", "executed"])
-        root = self.controller / task_runtime.STANDING_ROOT / "X" / plan["plan_sha256"]
-        receipts = sorted(root.glob("command-0-*.json"))
-        self.assertEqual(len(receipts), 2)
-        supersession = [path for path in receipts if ".readiness-" in path.name]
-        original = [path for path in receipts if ".readiness-" not in path.name]
-        self.assertEqual((len(supersession), len(original)), (1, 1))
-        rerun = json.loads(supersession[0].read_text())
-        failed = json.loads(original[0].read_text())
-        self.assertEqual(rerun["result"]["exit_code"], 0)
+        with self.assertRaisesRegex(AssertionError, "focused validation failed"):
+            self.command("evidence-run", "X")
+        self.assertEqual(counter.read_text().splitlines(), ["run"])
+        canonical = list((self.controller / task_runtime.CANONICAL_VALIDATION_ROOT).rglob("result.json"))
+        self.assertEqual(len(canonical), 1)
+        failed = json.loads(canonical[0].read_text())
+        self.assertEqual(failed["outcome_identity"]["verdict"], "FAILED")
         self.assertEqual(failed["result"]["exit_code"], 3)
-        self.assertNotEqual(rerun["readiness_sha256"], failed["readiness_sha256"])
+        root = self.controller / task_runtime.STANDING_ROOT / "X" / plan["plan_sha256"]
+        self.assertEqual(list(root.glob("command-0-*.readiness-*.json")), [])
 
     # --- Receipt-bound projection of durable lifecycle truth onto the board ---
 
@@ -6197,7 +6658,7 @@ steps:
         git(worktree, "add", "src/feature.txt")
         git(worktree, "commit", "-m", "corrected descendant tip")
         with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
-                                    "yy merge reopen X") as failure:
+                                    "create a new task") as failure:
             task_runtime.finish(self.controller, "X")
         self.assertIn("queued at", failure.exception.args[0])
         state = json.loads((self.controller / ".juno_task/state/tasks.json").read_text())
@@ -6245,6 +6706,36 @@ steps:
         report = task_runtime.kanban_sync_doctor(self.controller, "X")
         self.assertIn("board_done_without_merge_truth", report["rows"][0]["reasons"])
 
+    def test_doctor_treats_projected_withdrawn_todo_as_agreement(self) -> None:
+        task_runtime.start(self.controller, "X")
+        state = task_runtime.read_state(self.controller)
+        withdrawn = {**state["tasks"]["X"], "state": "WITHDRAWN"}
+        task_runtime.project_kanban_lifecycle(self.controller, "X", "WITHDRAWN",
+                                              record=withdrawn)
+        state["tasks"]["X"] = withdrawn
+        task_runtime.write_state(self.controller, state)
+        report = task_runtime.kanban_sync_doctor(self.controller, "X")
+        self.assertEqual(report["rows"][0]["agreement"], "agree")
+
+    def test_git_integrated_projects_as_recoverable_in_progress(self) -> None:
+        task_runtime.start(self.controller, "X")
+        state = task_runtime.read_state(self.controller)
+        integrated = {**state["tasks"]["X"], "state": "GIT_INTEGRATED",
+                      "integrated_sha": "a" * 40}
+        projected = task_runtime.project_kanban_lifecycle(
+            self.controller, "X", "GIT_INTEGRATED", record=integrated)
+        self.assertEqual((projected["outcome"], projected["board_status"]),
+                         ("updated", "in_progress"))
+        board = self.board_task("X")
+        self.assertEqual(board["status"], "in_progress")
+        self.assertEqual(board["fields"]["lifecycle_state"], "GIT_INTEGRATED")
+
+    def test_doctor_reports_missing_projection_fields_even_when_status_matches(self) -> None:
+        task_runtime.start(self.controller, "X")
+        self.set_board_task("X", status="in_progress", fields={})
+        report = task_runtime.kanban_sync_doctor(self.controller, "X")
+        self.assertIn("lifecycle_projection_missing", report["rows"][0]["reasons"])
+
     def test_dispositions_and_continuation_linkage_without_claiming_done(self) -> None:
         task_runtime.start(self.controller, "X")
         state = json.loads((self.controller / ".juno_task/state/tasks.json").read_text())
@@ -6267,10 +6758,18 @@ steps:
         task_runtime.start(self.controller, "X")
         state = json.loads((self.controller / ".juno_task/state/tasks.json").read_text())
         merged = {**state["tasks"]["X"], "state": "MERGED"}
-        with self.assertRaisesRegex(task_runtime.KanbanSyncError, "merge finalization owns the done mutation"):
+        with self.assertRaisesRegex(task_runtime.KanbanSyncError, "native delivery projection owns the done mutation"):
             task_runtime.ensure_kanban_sync(self.controller, "X", merged)
         self.assertEqual(self.board_task("X")["status"], "in_progress")
-        self.set_board_task("X", status="done", commit_hash=state["tasks"]["X"]["tip_sha"])
+        commit_hash = state["tasks"]["X"]["tip_sha"]
+        projected = task_runtime.project_kanban_lifecycle(
+            self.controller, "X", "MERGED", record=merged, allow_done=True,
+            commit_hash=commit_hash, response=f"Merged as {commit_hash}.")
+        self.assertEqual((projected["outcome"], projected["board_status"]),
+                         ("projected", "done"))
+        board = self.board_task("X")
+        self.assertEqual(board["commit_hash"], commit_hash)
+        self.assertEqual(board["fields"]["lifecycle_state"], "MERGED")
         verified = task_runtime.ensure_kanban_sync(self.controller, "X", merged)
         self.assertEqual((verified["outcome"], verified["board_status"]),
                          ("verified", "done"))
@@ -6332,10 +6831,124 @@ class TaskFencingLeaseTests(TaskWorkspaceFixture):
         self.assertIn("release_receipt", terminal)
         status_after = self.payload("lease-status", "X")
         self.assertEqual(status_after["successor_readiness"]["code"], "lease_released")
+        task_status = self.payload("status", "X")
+        self.assertEqual(task_status["resume_decision"]["classification"],
+                         task_runtime.decisions.RESUME_EXACT_TERMINAL_CAPTURE)
+        self.assertEqual(task_status["resume_decision"]["owner_command"], "yy task run X")
         # The queued idempotent retry proceeds unfenced and stays released.
         again = self.payload("finish", "X")
         self.assertEqual((again["outcome"], self.fencing_record("X")["state"]),
                          ("already_queued", "RELEASED"))
+
+    def test_explicit_tokens_survive_start_and_successor_cli_exit(self) -> None:
+        # Deliberately bypass command()/payload(): they silently cache tokens.
+        def cli(operation: str, token: Optional[str] = None):
+            return run([sys.executable, str(SCRIPT), operation, "--task", "X",
+                        "--controller", str(self.controller),
+                        *(["--lease-token", token] if token else [])],
+                       self.controller, False)
+
+        def snapshot():
+            roots = [self.lease_root("X"), self.controller / task_runtime.TASK_RUN_ROOT]
+            return (task_runtime.read_state(self.controller),
+                    {str(path): path.read_bytes() for root in roots
+                     for path in root.rglob("*") if path.is_file()})
+
+        issued = cli("start")
+        self.assertEqual(issued.returncode, 0, issued.stderr)
+        started = json.loads(issued.stdout)
+        old_token = started["lease_token"]
+        self.assertIn("--lease-token <returned-token>", started["lease_note"])
+        for issuance in (started, None):
+            if issuance is None:
+                before_receipts = snapshot()[1]
+                issued = cli("lease-successor")
+                self.assertEqual(issued.returncode, 0, issued.stderr)
+                issuance = json.loads(issued.stdout)
+                self.assertIn("--lease-token <returned-token>", issuance["note"])
+                self.assertIn("do not repeat successor", issuance["note"])
+                for path, data in before_receipts.items():
+                    self.assertEqual(Path(path).read_bytes(), data)
+            token = issuance["lease_token"]
+            observation = cli("lease-status")
+            self.assertEqual(observation.returncode, 0, observation.stderr)
+            observed = json.loads(observation.stdout)
+            self.assertEqual(observed["producer_observation"]["status"], "dead")
+            self.assertIn("without a token", observed["mutation_authority"]["note"])
+            continued = cli("start", token)
+            self.assertEqual(continued.returncode, 0, continued.stderr)
+            self.assertEqual(json.loads(continued.stdout)["outcome"], "already_started")
+            dirt = self.workspaces / "X/src/private.txt"
+            if issuance is not started:
+                dirt.write_bytes(b"preserve dirty bytes\x00\n")
+            before = snapshot()
+            for bad_token, code in ((None, "lease_producer_dead"),
+                                    ("wrong-token", "lease_fence_stale")):
+                refused = cli("start", bad_token)
+                self.assertEqual(refused.returncode, 2)
+                self.assertIn(code, refused.stderr)
+                self.assertIn("--lease-token <returned-token>", refused.stderr)
+                self.assertNotIn(token, refused.stderr)
+                self.assertEqual(snapshot(), before)
+                if dirt.exists():
+                    self.assertEqual(dirt.read_bytes(), b"preserve dirty bytes\x00\n")
+        # Token authority does not bypass start's independent clean-base check.
+        dirty_start = cli("start", token)
+        self.assertEqual(dirty_start.returncode, 2)
+        self.assertIn("identity drifted", dirty_start.stderr)
+        self.assertEqual(snapshot(), before)
+        self.assertEqual(dirt.read_bytes(), b"preserve dirty bytes\x00\n")
+        git(self.workspaces / "X", "add", "src/private.txt")
+        git(self.workspaces / "X", "commit", "-m", "preserved bytes")
+        before = snapshot()
+        stale = cli("start", old_token)
+        self.assertEqual(stale.returncode, 2)
+        self.assertIn("lease_fence_stale", stale.stderr)
+        self.assertEqual(snapshot(), before)
+        finished = cli("finish", token)
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertEqual(json.loads(finished.stdout)["state"], "QUEUED")
+        self.assertEqual(self.fencing_record("X")["attempt"], 2)
+
+    def test_managed_run_and_resume_own_successor_through_worker_and_finish(self) -> None:
+        self.install_task_run_assets()
+        for task_id in ("X", "Y"):
+            task_runtime.task_file(self.controller, task_id).write_text(
+                f"---\nid: {task_id}\nstatus: todo\n---\n## Goal\nShip one file.\n"
+                "## Acceptance\n- The committed file is validated.\n")
+        git(self.controller, "add", ".juno_task/tasks", ".juno_task/workflows",
+            ".juno_task/prompts/lifecycle")
+        git(self.controller, "commit", "-m", "managed recovery fixtures")
+
+        def implement(_controller, task_id, record, _run_dir, _prompt, **_kwargs):
+            lease = self.fencing_record(task_id)
+            self.assertEqual(lease["attempt"], 2)
+            self.assertEqual(lease["producer"]["pid"], os.getpid())
+            self.assertEqual(task_runtime._observe_producer(lease["producer"]).status, "alive")
+            self.assertIsNone(task_runtime._ensure_run_fence(self.controller, task_id))
+            worktree = Path(record["worktree"])
+            before = git(worktree, "rev-parse", "HEAD")
+            after = self.commit_task(task_id)
+            return {"terminal_state": "completed", "before_sha": before, "after_sha": after,
+                    "receipt": {"path": "fixture", "sha256": "0" * 64}, "session_id": "fixture"}
+
+        for task_id, operation in (("X", "run"), ("Y", "resume")):
+            with self.subTest(operation=operation):
+                self.payload("start", task_id)  # real predecessor subprocess exits
+                LEASE_TOKENS.pop((str(self.controller), task_id), None)
+                output = io.StringIO()
+                with mock.patch.object(task_runtime, "_launch_task_worker", side_effect=implement) as worker, \
+                        contextlib.redirect_stdout(output):
+                    code = task_runtime.main([operation, "--task", task_id,
+                                              "--controller", str(self.controller)])
+                self.assertEqual(code, 0)
+                worker.assert_called_once()
+                result = json.loads(output.getvalue())
+                self.assertEqual(result["state"], "QUEUED")
+                self.assertEqual(result["attempts"]["implementation"], 1)
+                self.assertEqual(self.fencing_record(task_id)["state"], "RELEASED")
+                if operation == "resume":
+                    self.assertEqual(result["resume_owner"], "task-run")
 
     def test_cli_competing_dead_producer_fails_closed_and_recovers_via_successor(self) -> None:
         self.payload("start", "X")
@@ -6452,16 +7065,26 @@ class TaskFencingLeaseTests(TaskWorkspaceFixture):
         queued = self.payload("finish", "X")
         self.assertEqual(queued["state"], "QUEUED")
 
-    def test_dirty_worktree_successor_preserves_recovery_packet(self) -> None:
+    def test_dirty_worktree_successor_preserves_recovery_packet_and_routes_to_status(self) -> None:
         self.payload("start", "X")
         worktree = self.workspaces / "X"
+        (worktree / "src/committed.txt").write_text("committed bytes\n")
+        git(worktree, "add", "src/committed.txt")
+        git(worktree, "commit", "-m", "committed recovery evidence")
         (worktree / "src/uncommitted.txt").write_text("dirty bytes\n")
+        before = self.payload("status", "X")
+        self.assertEqual(before["changed_paths"], ["src/committed.txt"])
+        self.assertEqual(before["uncommitted_paths"], ["src/uncommitted.txt"])
         successor = self.payload("lease-successor", "X")
         recovery = successor["recovery"]
         self.assertEqual(recovery["classification"], "dirty_recovery_required")
         self.assertEqual(recovery["dirty_paths"], ["src/uncommitted.txt"])
+        self.assertEqual(recovery["next_command"], "yy task status X")
         self.assertIn("preserved", json.dumps(recovery))
-        # The dirty bytes survive successor issuance untouched.
+        # Successor issuance mutates neither committed nor uncommitted task bytes.
+        after = self.payload("status", "X")
+        self.assertEqual(after["changed_paths"], ["src/committed.txt"])
+        self.assertEqual(after["uncommitted_paths"], ["src/uncommitted.txt"])
         self.assertEqual((worktree / "src/uncommitted.txt").read_text(), "dirty bytes\n")
         lease = self.fencing_record("X")
         self.assertEqual(lease["recovery"]["classification"], "dirty_recovery_required")
@@ -6775,6 +7398,66 @@ class MinimumRcLifecycleContractTests(unittest.TestCase):
             phase="successor_attempt")
         self.assertEqual(trace["restart_stage"], "VALIDATING")
         self.assertEqual(trace["counters"]["invalidated"], 1)
+
+    def test_canonical_command_index_executes_once_and_invalidates_each_identity(self) -> None:
+        lifecycle = task_runtime.lifecycle_runtime
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repository"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True,
+                           stdout=subprocess.DEVNULL)
+            root = Path(temporary) / "index"
+            calls = []
+            body = {"schema_version": lifecycle.COMMAND_CLOSURE_SCHEMA,
+                    "command": {"id": "suite", "cwd": "pkg", "argv": ["npm", "test"]},
+                    "observable_tree": "a" * 40, "dependency_locks": {"lock": "b" * 40},
+                    "runtime_sha256": "c" * 64, "environment": {"CI": "1"}}
+            closure = {**body, "input_closure_sha256": lifecycle.digest(body)}
+
+            def execute() -> dict:
+                calls.append("run")
+                return {"exit_code": 0, "timed_out": False, "cancelled": False,
+                        "result_integrity": {"eligible_pass": True}}
+
+            first = lifecycle.consume_or_execute_command_result(
+                root, repository, closure, execute, phase="task_closure", task_id="T")
+            second = lifecycle.consume_or_execute_command_result(
+                root, repository, closure, execute, phase="merge_validation", task_id="T")
+            self.assertEqual(([first["decision"], second["decision"]], calls),
+                             (["executed", "reused"], ["run"]))
+            self.assertEqual(first["reference"], second["reference"])
+            drifted_body = {**body, "environment": {"CI": "0"}}
+            drifted = {**drifted_body,
+                       "input_closure_sha256": lifecycle.digest(drifted_body)}
+            third = lifecycle.consume_or_execute_command_result(
+                root, repository, drifted, execute, phase="merge_validation", task_id="T")
+            self.assertEqual((third["decision"], calls), ("executed", ["run", "run"]))
+            failed_body = {**body, "environment": {"CI": "failure"}}
+            failed_closure = {**failed_body,
+                              "input_closure_sha256": lifecycle.digest(failed_body)}
+            failure_calls = []
+            def fail_once() -> dict:
+                failure_calls.append("run")
+                return {"exit_code": 7, "timed_out": False, "cancelled": False,
+                        "result_integrity": {"eligible_pass": False}}
+            failed = lifecycle.consume_or_execute_command_result(
+                root, repository, failed_closure, fail_once,
+                phase="task_closure", task_id="T")
+            repeated_failure = lifecycle.consume_or_execute_command_result(
+                root, repository, failed_closure, fail_once,
+                phase="merge_validation", task_id="T")
+            self.assertEqual((failed["decision"], repeated_failure["decision"], failure_calls),
+                             ("executed", "failure_stands", ["run"]))
+            self.assertEqual(repeated_failure["reference"], failed["reference"])
+            path = Path(first["reference"]["path"])
+            tampered = json.loads(path.read_text())
+            tampered["result"]["exit_code"] = 7
+            path.write_text(json.dumps(tampered) + "\n")
+            with self.assertRaisesRegex(lifecycle.LifecycleContractError,
+                                        "canonical command result"):
+                lifecycle.consume_or_execute_command_result(
+                    root, repository, closure, execute, phase="merge_validation", task_id="T")
+            self.assertEqual(calls, ["run", "run"])
 
     def test_profile_closure_is_package_local_deterministic_and_attributes_changed_inputs(self) -> None:
         lifecycle = task_runtime.lifecycle_runtime
@@ -7129,6 +7812,515 @@ class MinimumRcLifecycleContractTests(unittest.TestCase):
             prompt_a.write_text("model-authored mutation\n")
             with self.assertRaisesRegex(lifecycle.LifecycleContractError, "uncommitted|drifted"):
                 lifecycle.compile_lifecycle_template(root, "task-run", "T1")
+
+
+FIXTURE_TIERS = frozenset({
+    "pure", "seeded-repository", "seeded-controller", "seeded-history",
+    "hermetic", "shared-resource",
+})
+PURE_FIXTURE_CLASSES = frozenset({"SemVerValidationTests"})
+PURE_FIXTURE_TESTS = frozenset({
+    "FixtureModeContractTests.test_every_task_workspace_test_declares_one_fixture_tier",
+    "FixtureModeContractTests.test_pure_tier_forbids_git_subprocess_and_filesystem_mutation",
+    "FixtureModeContractTests.test_hermetic_capabilities_cannot_be_classified_seeded",
+})
+SHARED_RESOURCE_TESTS = frozenset({
+    "TaskWorkspaceTests.test_focused_scheduler_serializes_only_shared_resource_in_policy_order",
+})
+HERMETIC_CAPABILITY_MARKERS = (
+    "symlink", "submodule", "orphan", "sparse", "common_dir", "common_directory",
+    "cleanup", "interruption", "worktree_identity", "parent_component",
+)
+HISTORICAL_CAPABILITY_MARKERS = ("historical", "stale_then_absent", "legacy_consumer")
+SEEDED_CONTROLLER_OVERRIDES = frozenset({
+    "TaskWorkspaceTests.test_finish_queues_clean_committed_tip_without_merging_or_cleanup",
+})
+
+
+def _requires_hermetic(test_id: str) -> bool:
+    return (test_id not in SEEDED_CONTROLLER_OVERRIDES
+            and any(marker in test_id.split(".", 1)[1]
+                    for marker in HERMETIC_CAPABILITY_MARKERS))
+
+
+def _canonical_test_ids() -> list[str]:
+    values = []
+    for name, candidate in sorted(globals().items()):
+        if isinstance(candidate, type) and issubclass(candidate, unittest.TestCase):
+            values.extend(f"{name}.{method}" for method in unittest.defaultTestLoader.getTestCaseNames(candidate))
+    return values
+
+
+def _classify_fixture_test(test_id: str) -> str:
+    class_name, method = test_id.split(".", 1)
+    if class_name in PURE_FIXTURE_CLASSES or test_id in PURE_FIXTURE_TESTS:
+        return "pure"
+    if test_id in SHARED_RESOURCE_TESTS:
+        return "shared-resource"
+    if test_id in SEEDED_CONTROLLER_OVERRIDES:
+        return "seeded-controller"
+    if _requires_hermetic(test_id):
+        return "hermetic"
+    if any(marker in method for marker in HISTORICAL_CAPABILITY_MARKERS):
+        return "seeded-history"
+    if class_name in {"ValidationProfilesRoundTripTests", "QueueAttributionReceiptTests",
+                      "MinimumRcLifecycleContractTests"}:
+        return "seeded-repository"
+    return "seeded-controller"
+
+
+def fixture_registry() -> dict[str, str]:
+    """Frozen one-tier registry for the exact collected contract inventory."""
+    return {test_id: _classify_fixture_test(test_id) for test_id in _canonical_test_ids()}
+
+
+def selected_fixture_tests(mode: str) -> list[str]:
+    registry = fixture_registry()
+    admitted = {
+        "affected": FIXTURE_TIERS,
+        "seeded": {"pure", "seeded-repository", "seeded-controller", "seeded-history"},
+        "hermetic": {"hermetic", "shared-resource"},
+        "complete": FIXTURE_TIERS,
+    }
+    if mode not in admitted:
+        raise ValueError(f"unsupported fixture mode: {mode}")
+    return sorted(test_id for test_id, tier in registry.items() if tier in admitted[mode])
+
+
+def affected_fixture_tests(changed_paths: list[str]) -> list[str]:
+    if not changed_paths:
+        return selected_fixture_tests("complete")
+    pure = [test_id for test_id in selected_fixture_tests("seeded")
+            if fixture_tier_for(test_id) == "pure"]
+    if all(path.endswith((".md", ".json")) for path in changed_paths):
+        return pure
+    adapter = [test_id for test_id in selected_fixture_tests("seeded")
+               if test_id.endswith("test_finish_queues_clean_committed_tip_without_merging_or_cleanup")]
+    return sorted(set([*pure, *adapter]))
+
+
+def performance_receipt_eligible(receipt: dict, baseline: dict) -> bool:
+    return bool(
+        receipt.get("success") is True and baseline.get("success") is True
+        and receipt.get("comparable_identity") == baseline.get("comparable_identity")
+        and receipt.get("inventory") == baseline.get("inventory")
+        and not any((receipt.get("failures", 0), receipt.get("errors", 0),
+                     receipt.get("skipped", 0), baseline.get("failures", 0),
+                     baseline.get("errors", 0), baseline.get("skipped", 0)))
+        and isinstance(receipt.get("p95_ms"), (int, float))
+        and isinstance(baseline.get("p95_ms"), (int, float))
+    )
+
+
+def fixture_tier_for(test_id: str) -> str:
+    try:
+        return fixture_registry()[test_id]
+    except KeyError as exc:
+        raise ValueError(f"unclassified task-workspace test: {test_id}") from exc
+
+
+def validate_fixture_registry(test_ids: list[str], registry: Optional[dict[str, str]] = None) -> None:
+    registry = dict(fixture_registry() if registry is None else registry)
+    missing = sorted(set(test_ids) - set(registry))
+    extra = sorted(set(registry) - set(test_ids))
+    invalid = sorted(test_id for test_id, tier in registry.items() if tier not in FIXTURE_TIERS)
+    unsafe = sorted(test_id for test_id, tier in registry.items()
+                    if tier.startswith("seeded-") and _requires_hermetic(test_id))
+    if missing or extra or invalid or unsafe:
+        raise ValueError(f"fixture registry mismatch missing={missing} extra={extra} invalid={invalid} unsafe={unsafe}")
+
+
+class FixtureModeContractTests(unittest.TestCase):
+    def test_every_task_workspace_test_declares_one_fixture_tier(self) -> None:
+        inventory = _canonical_test_ids()
+        validate_fixture_registry(inventory)
+        self.assertEqual(len(inventory), len(fixture_registry()))
+        with self.assertRaisesRegex(ValueError, "unclassified"):
+            fixture_tier_for("SyntheticTests.test_new_contract")
+        with self.assertRaisesRegex(ValueError, "missing"):
+            validate_fixture_registry([*inventory, "SyntheticTests.test_new_contract"])
+
+    def test_pure_tier_forbids_git_subprocess_and_filesystem_mutation(self) -> None:
+        pure = [test_id for test_id, tier in fixture_registry().items()
+                if tier == "pure" and test_id.startswith("SemVerValidationTests.")]
+        self.assertTrue(pure)
+        forbidden = mock.Mock(side_effect=AssertionError("pure fixture attempted mutation"))
+        suite = unittest.TestSuite(
+            SemVerValidationTests(method.split(".", 1)[1]) for method in pure)
+        with mock.patch.object(task_runtime.subprocess, "run", forbidden), \
+             mock.patch.object(task_runtime.subprocess, "Popen", forbidden), \
+             mock.patch.object(Path, "write_text", forbidden), \
+             mock.patch.object(Path, "write_bytes", forbidden):
+            result = unittest.TestResult()
+            suite.run(result)
+        self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+
+    def test_hermetic_capabilities_cannot_be_classified_seeded(self) -> None:
+        inventory = _canonical_test_ids()
+        registry = fixture_registry()
+        hermetic = [test_id for test_id in inventory if _requires_hermetic(test_id)]
+        self.assertTrue(hermetic)
+        for test_id in hermetic:
+            self.assertIn(registry[test_id], {"hermetic", "shared-resource"})
+        unsafe = dict(registry)
+        unsafe[hermetic[0]] = "seeded-controller"
+        with self.assertRaisesRegex(ValueError, "unsafe"):
+            validate_fixture_registry(inventory, unsafe)
+
+    def _seed_inputs(self, **changes) -> dict[str, str]:
+        values = {name: hashlib.sha256(name.encode()).hexdigest()
+                  for name in fixture_runtime.BOUND_INPUTS}
+        values.update(changes)
+        return values
+
+    def _seed_builder(self, topology: Path) -> None:
+        repository = topology / "repo"
+        repository.mkdir()
+        git(repository, "init", "-b", "fixture")
+        git(repository, "config", "user.email", "fixture@example.invalid")
+        git(repository, "config", "user.name", "Fixture")
+        (repository / "base.txt").write_text("base\n")
+        git(repository, "add", ".")
+        git(repository, "commit", "-m", "base")
+        (repository / "history.txt").write_text("history\n")
+        git(repository, "add", ".")
+        git(repository, "commit", "-m", "history")
+        (topology / "runtime").mkdir()
+        (topology / "runtime/task.json").write_text("{}\n")
+
+    def test_seed_identity_invalidates_on_every_bound_input(self) -> None:
+        original = self._seed_inputs()
+        key = fixture_runtime.seed_key(original)
+        for name in fixture_runtime.BOUND_INPUTS:
+            with self.subTest(name=name):
+                changed = dict(original); changed[name] = "drift-" + changed[name]
+                self.assertNotEqual(key, fixture_runtime.seed_key(changed))
+        with self.assertRaisesRegex(ValueError, "missing"):
+            fixture_runtime.seed_key({})
+
+    def test_seed_is_immutable_and_tamper_rebuilds_without_repairing_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = Path(temporary) / "bases"
+            inputs = self._seed_inputs()
+            first = fixture_runtime.ensure_seed(inputs, self._seed_builder,
+                                                cache_root=cache)
+            target = first.root / "topology/runtime/task.json"
+            target.chmod(0o644); target.write_text("tampered\n"); target.chmod(0o444)
+            second = fixture_runtime.ensure_seed(inputs, self._seed_builder,
+                                                 cache_root=cache)
+            self.assertFalse(second.hit)
+            self.assertEqual((second.root / "topology/runtime/task.json").read_text(), "{}\n")
+            manifest_path = second.root / "yylo-fixture-base.json"
+            for field, bad_value in (("immutable", False), ("key", "0" * 64)):
+                manifest_path.chmod(0o644)
+                manifest = json.loads(manifest_path.read_text())
+                manifest[field] = bad_value
+                manifest_path.write_text(json.dumps(manifest) + "\n")
+                manifest_path.chmod(0o444)
+                second = fixture_runtime.ensure_seed(inputs, self._seed_builder,
+                                                     cache_root=cache)
+                self.assertFalse(second.hit)
+                manifest_path = second.root / "yylo-fixture-base.json"
+            manifest_path.chmod(0o644)
+            manifest = json.loads(manifest_path.read_text())
+            manifest["inputs"][fixture_runtime.BOUND_INPUTS[0]] = "wrong"
+            manifest_path.write_text(json.dumps(manifest) + "\n")
+            manifest_path.chmod(0o444)
+            second = fixture_runtime.ensure_seed(inputs, self._seed_builder,
+                                                 cache_root=cache)
+            self.assertFalse(second.hit)
+            quarantined = [item for item in cache.iterdir() if ".corrupt-" in item.name]
+            self.assertGreaterEqual(len(quarantined), 4)
+            second.root.rename(cache / f"{second.key}.corrupt-manual")
+            self.assertIsNone(fixture_runtime.find_seed(
+                {fixture_runtime.BOUND_INPUTS[0]: inputs[fixture_runtime.BOUND_INPUTS[0]]},
+                cache_root=cache))
+
+    def test_disposable_instances_cannot_observe_each_other(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = Path(temporary) / "bases"; overlays = Path(temporary) / "overlays"
+            seed = fixture_runtime.ensure_seed(self._seed_inputs(), self._seed_builder,
+                                               cache_root=cache)
+            first = fixture_runtime.create_instance(seed, parent=overlays)
+            second = fixture_runtime.create_instance(seed, parent=overlays)
+            try:
+                git(first.root / "repo", "branch", "only-first")
+                (first.root / "runtime/task.json").write_text('{"owner":"first"}\n')
+                (first.root / "receipts").mkdir(); (first.root / "receipts/one").write_text("x")
+                self.assertNotIn("only-first", git(second.root / "repo", "branch"))
+                self.assertEqual((second.root / "runtime/task.json").read_text(), "{}\n")
+                self.assertFalse((second.root / "receipts").exists())
+            finally:
+                first.release(); second.release()
+
+    def test_failed_instance_cannot_contaminate_next_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = Path(temporary) / "bases"; overlays = Path(temporary) / "overlays"
+            seed = fixture_runtime.ensure_seed(self._seed_inputs(), self._seed_builder,
+                                               cache_root=cache)
+            failed = fixture_runtime.create_instance(seed, parent=overlays)
+            (failed.root / "runtime/failed").write_text("partial")
+            failed.release()
+            successor = fixture_runtime.create_instance(seed, parent=overlays)
+            try: self.assertFalse((successor.root / "runtime/failed").exists())
+            finally: successor.release()
+
+    def test_historical_instance_starts_at_exact_declared_commit_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = Path(temporary) / "bases"
+            seed = fixture_runtime.ensure_seed(self._seed_inputs(), self._seed_builder,
+                                               cache_root=cache)
+            instance = fixture_runtime.create_instance(seed, parent=Path(temporary) / "overlays")
+            try:
+                repository = instance.root / "repo"
+                historical = git(repository, "rev-parse", "HEAD^")
+                expected_tree = git(repository, "rev-parse", f"{historical}^{{tree}}")
+                git(repository, "checkout", "--detach", historical)
+                self.assertEqual(git(repository, "rev-parse", "HEAD^{tree}"), expected_tree)
+            finally: instance.release()
+
+    def test_memoized_git_query_adapter_preserves_outputs_and_real_process_canaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repository"; repository.mkdir()
+            git(repository, "init", "-b", "main")
+            git(repository, "config", "user.email", "fixture@example.invalid")
+            git(repository, "config", "user.name", "Fixture")
+            (repository / "value").write_text("one\n")
+            git(repository, "add", "value"); git(repository, "commit", "-m", "one")
+            adapter = fixture_runtime.MemoizedGitDispatch(task_runtime.run)
+            with mock.patch.object(task_runtime, "run", side_effect=adapter):
+                first = task_runtime.git(repository, "rev-parse", "HEAD")
+                self.assertEqual(task_runtime.git(repository, "rev-parse", "HEAD"), first)
+                (repository / "value").write_text("two\n")
+                task_runtime.git(repository, "add", "value")
+                task_runtime.git(repository, "commit", "-m", "two")
+                second = task_runtime.git(repository, "rev-parse", "HEAD")
+                self.assertEqual(task_runtime.git(repository, "rev-parse", "HEAD"), second)
+            self.assertNotEqual(first, second)
+            self.assertEqual(first, git(repository, "rev-parse", "HEAD^"))
+            self.assertEqual(second, git(repository, "rev-parse", "HEAD"))
+            self.assertEqual(adapter.cache_hits, 2)
+            self.assertEqual(adapter.real_query_processes, 2)
+
+    def test_overlay_release_repairs_only_cleanup_obstructions_without_eager_tree_chmod(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); cache = root / "bases"; overlays = root / "overlays"
+            seed = fixture_runtime.ensure_seed(self._seed_inputs(), self._seed_builder,
+                                               cache_root=cache)
+            instance = fixture_runtime.create_instance(seed, parent=overlays)
+            obstruction = instance.root / "readonly"
+            obstruction.mkdir(); (obstruction / "payload").write_text("preserve semantics\n")
+            obstruction.chmod(0o500)
+            with mock.patch.object(fixture_runtime, "make_owner_writable",
+                                   side_effect=AssertionError("eager recursive chmod")):
+                instance.release()
+            self.assertFalse(instance.root.exists())
+
+    def test_overlay_cleanup_refuses_foreign_or_aliased_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); cache = root / "bases"; overlays = root / "overlays"
+            seed = fixture_runtime.ensure_seed(self._seed_inputs(), self._seed_builder,
+                                               cache_root=cache)
+            instance = fixture_runtime.create_instance(seed, parent=overlays)
+            foreign = root / "foreign"; foreign.mkdir(); (foreign / "keep").write_text("safe")
+            shutil.rmtree(instance.root); instance.root.symlink_to(foreign, target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError, "foreign or aliased"):
+                instance.release()
+            self.assertEqual((foreign / "keep").read_text(), "safe")
+            instance.root.unlink()
+
+    def test_complete_mode_includes_every_hermetic_required_contract(self) -> None:
+        complete = set(selected_fixture_tests("complete"))
+        hermetic = set(selected_fixture_tests("hermetic"))
+        self.assertTrue(hermetic)
+        self.assertTrue(hermetic <= complete)
+        self.assertEqual(complete, set(_canonical_test_ids()))
+
+    def test_temp_only_shards_run_without_global_managed_install_lock(self) -> None:
+        self.assertFalse(_fixture_mode_uses_global_resource())
+        with mock.patch(__name__ + "._acquire_resource_lock") as acquire:
+            setUpModule()
+        acquire.assert_not_called()
+
+    def test_shared_resource_tests_serialize_by_declared_resource_class(self) -> None:
+        registry = fixture_registry()
+        self.assertTrue(SHARED_RESOURCE_TESTS)
+        self.assertTrue(all(registry[test_id] == "shared-resource"
+                            for test_id in SHARED_RESOURCE_TESTS))
+        self.assertFalse(set(selected_fixture_tests("seeded")) & SHARED_RESOURCE_TESTS)
+        self.assertTrue(SHARED_RESOURCE_TESTS <= set(selected_fixture_tests("hermetic")))
+
+    def test_parallel_shards_preserve_result_and_mutation_equivalence(self) -> None:
+        serial = selected_fixture_tests("complete")
+        shards = [serial[index::4] for index in range(4)]
+        parallel = sorted(test_id for shard in shards for test_id in shard)
+        self.assertEqual(parallel, serial)
+        self.assertEqual(len(parallel), len(set(parallel)))
+        self.assertEqual(
+            [(test_id, fixture_tier_for(test_id)) for test_id in parallel],
+            [(test_id, fixture_registry()[test_id]) for test_id in serial],
+        )
+
+    def test_duration_weighted_shards_balance_deterministically(self) -> None:
+        runner_path = Path(fixture_runtime.__file__).resolve().parent / "task_workspace_test_runner.py"
+        specification = __import__("importlib.util").util.spec_from_file_location(
+            "fixture_profile_runner_contract", runner_path)
+        self.assertIsNotNone(specification)
+        runner = __import__("importlib.util").util.module_from_spec(specification)
+        specification.loader.exec_module(runner)
+        tests = ["Suite.test_slow", "Suite.test_medium", "Suite.test_fast_a", "Suite.test_fast_b"]
+        weights = {"Suite.test_slow": 9_000, "Suite.test_medium": 5_000,
+                   "Suite.test_fast_a": 2_000, "Suite.test_fast_b": 1_000}
+        first = runner.balanced_shards(tests, weights, 2)
+        second = runner.balanced_shards(list(reversed(tests)), weights, 2)
+        self.assertEqual(first, second)
+        self.assertEqual(sorted(item for shard in first for item in shard), sorted(tests))
+        loads = [sum(weights[item] for item in shard) for shard in first]
+        round_robin = [sum(weights[item] for item in tests[index::2]) for index in range(2)]
+        self.assertLess(max(loads), max(round_robin))
+
+    def test_complete_suite_entrypoint_cannot_select_seeded_only(self) -> None:
+        complete = set(selected_fixture_tests("complete"))
+        seeded = set(selected_fixture_tests("seeded"))
+        hermetic = set(selected_fixture_tests("hermetic"))
+        self.assertEqual(complete, seeded | hermetic)
+        self.assertTrue(hermetic - seeded)
+
+    def test_changed_closure_routes_to_expected_fixture_shards(self) -> None:
+        docs = affected_fixture_tests(["docs/fixture-modes.md"])
+        runtime = affected_fixture_tests(["juno-code/src/templates/scripts/task_workspace.py"])
+        self.assertTrue(docs)
+        self.assertTrue(all(fixture_tier_for(test_id) == "pure" for test_id in docs))
+        self.assertTrue(set(docs) < set(runtime))
+        self.assertTrue(all(fixture_tier_for(test_id) != "hermetic" for test_id in runtime))
+
+    def test_seeded_failure_replays_in_hermetic_mode(self) -> None:
+        failed = "TaskWorkspaceTests.test_status_and_finish_refuse_symlinked_parent_component"
+        self.assertIn(failed, selected_fixture_tests("hermetic"))
+        command = ["npm", "run", "test:task-workspace:hermetic", "--", "--test-id", failed]
+        self.assertEqual(command[-1], failed)
+        self.assertIn("test:task-workspace:hermetic", command)
+
+    def test_performance_receipt_rejects_incomparable_or_failed_baseline(self) -> None:
+        valid = {"success": True, "comparable_identity": "host-A", "inventory": ["a"],
+                 "failures": 0, "errors": 0, "skipped": 0, "p95_ms": 10}
+        self.assertTrue(performance_receipt_eligible(valid, dict(valid)))
+        for change in ({"success": False}, {"comparable_identity": "host-B"},
+                       {"failures": 1}, {"errors": 1}, {"skipped": 1},
+                       {"inventory": []}, {"p95_ms": None}):
+            with self.subTest(change=change):
+                invalid = dict(valid); invalid.update(change)
+                self.assertFalse(performance_receipt_eligible(valid, invalid))
+
+
+class TerminalStateArchiveTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name) / "controller"
+        self.root.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "controller", str(self.root)], check=True)
+        subprocess.run(["git", "-C", str(self.root), "config", "user.name", "Fixture"], check=True)
+        subprocess.run(["git", "-C", str(self.root), "config", "user.email", "fixture@invalid"], check=True)
+        path = self.root / ".juno_task/state/tasks.json"
+        path.parent.mkdir(parents=True)
+        payload = "x" * 20000
+        tasks = {
+            f"T{number:04d}": {
+                "schema_version": task_runtime.RECORD_SCHEMA,
+                "task_id": f"T{number:04d}",
+                "state": "MERGED" if number % 2 else "WITHDRAWN",
+                "tip_sha": f"{number:040x}",
+                "queue_attempt": {"stdout_tail": payload, "validation": payload},
+            }
+            for number in range(100)
+        }
+        tasks["ACTIVE"] = {"schema_version": task_runtime.RECORD_SCHEMA,
+                           "task_id": "ACTIVE", "state": "WORKING",
+                           "tip_sha": "a" * 40, "validation": []}
+        self.source = {"schema_version": task_runtime.STATE_SCHEMA,
+                       "tasks": tasks, "queues": {"owner": {"task": "ACTIVE"}}}
+        path.write_bytes(task_runtime._canonical_bytes(self.source))
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.root), "commit", "-qm", "fixture"], check=True)
+        self.plan = Path(self.temporary.name) / "plan.json"
+        self.receipt = Path(self.temporary.name) / "apply.json"
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_plan_apply_retrieve_verify_and_rollback(self) -> None:
+        planned = task_runtime.state_archive_plan(
+            self.root, self.plan, task_runtime.STATE_ARCHIVE_COLD_REF)
+        self.assertEqual(planned["summary"]["terminal_counts"],
+                         {"MERGED": 50, "WITHDRAWN": 50})
+        self.assertLess(planned["summary"]["projected_state_bytes"],
+                        len(task_runtime._canonical_bytes(self.source)) // 10)
+        applied = task_runtime.state_archive_apply(
+            self.root, self.plan, self.receipt, authorized=True)
+        self.assertEqual(applied["archived_records"], 100)
+        compacted = task_runtime.read_state(self.root)
+        self.assertEqual(compacted["schema_version"], task_runtime.BOUNDED_STATE_SCHEMA)
+        self.assertEqual(compacted["tasks"]["ACTIVE"], self.source["tasks"]["ACTIVE"])
+        self.assertEqual(compacted["queues"], self.source["queues"])
+        self.assertTrue(all(compacted["tasks"][f"T{number:04d}"]["schema_version"]
+                            == task_runtime.TERMINAL_TOMBSTONE_SCHEMA
+                            for number in range(100)))
+        retrieved = task_runtime.state_archive_get(
+            self.root, "T0001", task_runtime.STATE_ARCHIVE_COLD_REF)
+        self.assertEqual(retrieved["record"], self.source["tasks"]["T0001"])
+        verified = task_runtime.state_archive_verify(self.root, self.plan)
+        self.assertEqual(verified["archived_records"], 100)
+        self.assertEqual(task_runtime.state_archive_apply(
+            self.root, self.plan, self.receipt, authorized=True), applied)
+        rollback = Path(self.temporary.name) / "rollback.json"
+        task_runtime.state_archive_rollback(self.root, self.plan, rollback, authorized=True)
+        self.assertEqual(task_runtime.read_state(self.root), self.source)
+
+    def test_apply_requires_explicit_authority(self) -> None:
+        task_runtime.state_archive_plan(self.root, self.plan, task_runtime.STATE_ARCHIVE_COLD_REF)
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "authorize-state-compaction"):
+            task_runtime.state_archive_apply(
+                self.root, self.plan, self.receipt, authorized=False)
+        self.assertFalse(self.receipt.exists())
+        self.assertFalse(Path(str(self.receipt) + ".intent.json").exists())
+        self.assertFalse(task_runtime.git(
+            self.root, "rev-parse", "--verify", task_runtime.STATE_ARCHIVE_COLD_REF,
+            check=False))
+
+    def test_apply_refuses_writer_lock_contention_and_stale_source(self) -> None:
+        task_runtime.state_archive_plan(self.root, self.plan, task_runtime.STATE_ARCHIVE_COLD_REF)
+        common = Path(task_runtime.git(
+            self.root, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+        with (common / "juno-repository-writer.lock").open("a+b") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "writer lock is busy"):
+                task_runtime.state_archive_apply(
+                    self.root, self.plan, self.receipt, authorized=True)
+        state = task_runtime.read_state(self.root)
+        state["tasks"]["ACTIVE"]["tip_sha"] = "b" * 40
+        task_runtime.write_state(self.root, state)
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "source drifted"):
+            task_runtime.state_archive_apply(
+                self.root, self.plan, self.receipt, authorized=True)
+
+    def test_plan_refuses_dirt_and_write_enforces_hard_limit(self) -> None:
+        (self.root / "untracked").write_text("preserve\n")
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "clean controller"):
+            task_runtime.state_archive_plan(
+                self.root, self.plan, task_runtime.STATE_ARCHIVE_COLD_REF)
+        (self.root / "untracked").unlink()
+        with mock.patch.object(task_runtime, "HOT_STATE_HARD_BYTES", 10):
+            with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "hard limit"):
+                task_runtime.write_state(self.root, self.source)
+
+    def test_bounded_schema_rejects_full_terminal_record(self) -> None:
+        invalid = {"schema_version": task_runtime.BOUNDED_STATE_SCHEMA,
+                   "tasks": {"X": {"schema_version": task_runtime.RECORD_SCHEMA,
+                                     "task_id": "X", "state": "MERGED"}}, "queues": {}}
+        (self.root / ".juno_task/state/tasks.json").write_bytes(
+            task_runtime._canonical_bytes(invalid))
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "non-tombstone"):
+            task_runtime.read_state(self.root)
 
 
 if __name__ == "__main__":

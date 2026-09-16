@@ -1,12 +1,12 @@
-import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'fs-extra';
 import { Command } from 'commander';
 import { routeControlPlane } from '../../utils/control-plane-router.js';
+import { addMachineOutputOptions, invokeMachineAwareChild, resolveMachineOutput } from '../machine-output.js';
 
 export type IntegrationOperation =
-  | 'status' | 'sync' | 'runtime-doctor' | 'runtime-refresh'
+  | 'status' | 'sync' | 'runtime-doctor' | 'runtime-refresh' | 'runtime-adopt-source'
   | 'register' | 'repair' | 'push';
 export type IntegrationOptions = {
   fetch?: boolean;
@@ -16,6 +16,8 @@ export type IntegrationOptions = {
   apply?: string;
   previousSha?: string;
   targetSha?: string;
+  installPrefix?: string;
+  output?: string;
 };
 export type IntegrationInvoker = (
   operation: IntegrationOperation,
@@ -38,6 +40,19 @@ export async function selectIntegrationRuntime(
   packagedCandidates = packagedIntegrationRuntimeCandidates(),
 ): Promise<string> {
   const canonical = path.join(controllerRoot, '.juno_task', 'scripts', 'integration_workspace.py');
+  if (operation === 'runtime-adopt-source') {
+    const packaged = packagedCandidates.find((candidate) => fs.existsSync(candidate));
+    if (!packaged) {
+      throw new Error('Packaged source-runtime adoption engine is missing; refusing partial recovery.');
+    }
+    const source = await fs.readFile(packaged, 'utf8');
+    if (!source.includes('SOURCE_ADOPTION_SCHEMA = "juno_source_runtime_adoption.v1"') ||
+        !source.includes('def source_runtime_adopt(') ||
+        !source.includes('"runtime-adopt-source"')) {
+      throw new Error('Packaged source-runtime adoption engine is incompatible; refusing partial recovery.');
+    }
+    return packaged;
+  }
   const bootstrapRecovery = operation === 'runtime-refresh';
   if (!bootstrapRecovery) {
     if (!(await fs.pathExists(canonical))) {
@@ -74,6 +89,13 @@ export async function invokeIntegration(
   const script = await selectIntegrationRuntime(route.controllerRoot, operation, options);
   const argv = [script, '--controller', route.controllerRoot, operation];
   if (operation === 'status' && options.fetch) argv.push('--fetch');
+  if (operation === 'runtime-adopt-source') {
+    if (!options.previousSha || !options.targetSha || !options.installPrefix || !options.output) {
+      throw new Error('integration runtime-adopt-source requires --previous-sha, --target-sha, --install-prefix, and --output');
+    }
+    argv.push('--previous-sha', options.previousSha, '--target-sha', options.targetSha,
+      '--install-prefix', path.resolve(options.installPrefix), '--output', path.resolve(options.output));
+  }
   if (operation === 'runtime-doctor' || operation === 'runtime-refresh') {
     if (operation === 'runtime-refresh') {
       if (!options.previousSha) throw new Error('integration runtime-refresh requires --previous-sha');
@@ -85,7 +107,17 @@ export async function invokeIntegration(
   }
   if (operation === 'register') {
     if (!options.owner) throw new Error('integration register requires an owner path');
-    argv.push(path.resolve(options.owner));
+    const runtimeExecutable = path.resolve(process.argv[1] ?? '');
+    const packagedRuntime = packagedIntegrationRuntimeCandidates().find((candidate) => fs.existsSync(candidate));
+    if (!packagedRuntime) throw new Error('integration register package runtime is missing');
+    const packagePath = path.resolve(path.dirname(packagedRuntime), '../../..', 'package.json');
+    const packageJson = await fs.readJson(packagePath) as { name?: string; version?: string };
+    if (packageJson.name !== '@yylo/cli' || typeof packageJson.version !== 'string' ||
+        !(await fs.pathExists(runtimeExecutable))) {
+      throw new Error('integration register cannot prove the invoking package runtime identity');
+    }
+    argv.push(path.resolve(options.owner), '--runtime-executable', runtimeExecutable,
+      '--runtime-version', packageJson.version);
     if (options.replace) argv.push('--replace');
   }
   if (operation === 'repair' || operation === 'push') {
@@ -93,17 +125,13 @@ export async function invokeIntegration(
     else if (options.apply) argv.push('--apply', path.resolve(options.apply));
     else throw new Error(`integration ${operation} requires --dry-run or --apply <receipt>`);
   }
-  const exitCode = await new Promise<number>((resolve, reject) => {
-    const child = spawn('python3', argv, {
-      cwd: route.controllerRoot,
-      env: route.env,
-      stdio: 'inherit',
-    });
-    child.once('error', reject);
-    child.once('exit', (code, signal) => {
-      if (signal) reject(new Error(`Integration command terminated by signal ${signal}`));
-      else resolve(code ?? 1);
-    });
+  const machine = resolveMachineOutput(process.argv.slice(2), { jsonFlag: true });
+  const { exitCode } = await invokeMachineAwareChild({
+    executable: 'python3', args: argv,
+    cwd: route.controllerRoot,
+    env: route.env,
+    command: `integration.${operation}`,
+    ...(machine ? { machine } : {}),
   });
   if (exitCode !== 0) process.exitCode = exitCode;
 }
@@ -112,9 +140,9 @@ export function configureIntegrationCommand(
   program: Command,
   invoke: IntegrationInvoker = invokeIntegration,
 ): void {
-  const integration = program
+  const integration = addMachineOutputOptions(program
     .command('integration')
-    .description('Inspect or synchronize the registered integration owner');
+    .description('Inspect or synchronize the registered integration owner'));
   integration
     .command('status')
     .description('Show offline integration drift; fetch only when explicitly requested')
@@ -129,6 +157,15 @@ export function configureIntegrationCommand(
     .description('Verify controller runtime hashes against one exact target generation')
     .option('--target-sha <sha>', 'Exact target generation; defaults to the configured target ref')
     .action((options: { targetSha?: string }) => invoke('runtime-doctor', options));
+  integration
+    .command('runtime-adopt-source')
+    .description('Build and atomically adopt one exact unpublished Juno source generation')
+    .requiredOption('--previous-sha <sha>', 'Exact currently admitted target generation')
+    .requiredOption('--target-sha <sha>', 'Exact source target generation to adopt')
+    .requiredOption('--install-prefix <path>', 'Fresh non-Git package installation prefix')
+    .requiredOption('--output <path>', 'New immutable transaction receipt outside Git')
+    .action((options: { previousSha: string; targetSha: string; installPrefix: string; output: string }) =>
+      invoke('runtime-adopt-source', options));
   integration
     .command('runtime-refresh')
     .description('Refresh managed runtime from an exact admitted target transition')

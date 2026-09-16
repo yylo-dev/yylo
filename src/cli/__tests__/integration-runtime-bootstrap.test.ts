@@ -35,10 +35,13 @@ async function fixture(): Promise<{ controller: string; canonical: string; packa
   await fs.writeFile(packaged, [
     'import argparse,json,pathlib',
     'MANAGED_REPAIR_SCHEMA = "juno_managed_runtime_repair.v1"',
+    'SOURCE_ADOPTION_SCHEMA = "juno_source_runtime_adoption.v1"',
     'def managed_runtime_repair_plan(): pass',
+    'def source_runtime_adopt(): pass',
     'p=argparse.ArgumentParser()',
     'p.add_argument("--controller")',
     's=p.add_subparsers(dest="operation", required=True)',
+    's.add_parser("runtime-adopt-source")',
     'r=s.add_parser("runtime-refresh")',
     'r.add_argument("--previous-sha", required=True)',
     'r.add_argument("--target-sha")',
@@ -81,6 +84,17 @@ describe('integration runtime-refresh bootstrap routing', () => {
       .resolves.toBe(canonical);
     await expect(selectIntegrationRuntime(controller, 'status', {}, [packaged]))
       .resolves.toBe(canonical);
+  });
+
+  it('selects only the packaged all-in-one source adoption engine', async () => {
+    const { controller, packaged } = await fixture();
+    await expect(selectIntegrationRuntime(controller, 'runtime-adopt-source', {
+      previousSha: 'a'.repeat(40), targetSha: 'b'.repeat(40),
+      installPrefix: '/tmp/runtime', output: '/tmp/adoption.json',
+    }, [packaged])).resolves.toBe(packaged);
+    await fs.writeFile(packaged, '# partial engine\n');
+    await expect(selectIntegrationRuntime(controller, 'runtime-adopt-source', {}, [packaged]))
+      .rejects.toThrow('incompatible; refusing partial recovery');
   });
 
   it('fails closed instead of falling back when the packaged recovery protocol is incompatible', async () => {

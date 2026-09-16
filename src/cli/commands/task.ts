@@ -6,13 +6,16 @@ import fs from 'fs-extra';
 import { Command } from 'commander';
 import { routeControlPlane } from '../../utils/control-plane-router.js';
 import { checkpointControllerAfterFinalization } from '../../utils/controller-checkpoint.js';
+import { addMachineOutputOptions, invokeMachineAwareChild, resolveMachineOutput } from '../machine-output.js';
 
 export type TaskWorkspaceOperation =
   | 'start'
   | 'run'
+  | 'resume'
   | 'recover-predispatch'
   | 'recover-wall-budget'
   | 'status'
+  | 'admission'
   | 'hydrate'
   | 'preflight'
   | 'finish'
@@ -26,12 +29,18 @@ export type TaskWorkspaceOperation =
   | 'recovery-plan'
   | 'recovery-authorize'
   | 'recovery-apply'
+  | 'recovery-verify'
   | 'lease-status'
   | 'lease-heartbeat'
   | 'lease-handoff'
   | 'lease-successor'
   | 'lease-revoke'
-  | 'lease-release';
+  | 'lease-release'
+  | 'state-archive-plan'
+  | 'state-archive-apply'
+  | 'state-archive-verify'
+  | 'state-archive-get'
+  | 'state-archive-rollback';
 export type TaskWorkspaceInvoker = (
   operation: TaskWorkspaceOperation,
   taskId: string,
@@ -43,7 +52,8 @@ export type TaskRuntimeBootstrapOptions = { dryRun?: boolean; apply?: string };
 export type TaskRuntimeBootstrapInvoker = (options: TaskRuntimeBootstrapOptions) => Promise<void>;
 
 export function taskWorkspaceControlOperation(operation: TaskWorkspaceOperation): 'kanban' | 'orchestration' {
-  return ['status', 'preflight', 'recovery-plan', 'evidence-status', 'doctor', 'lease-status'].includes(operation) ? 'kanban' : 'orchestration';
+  return ['status', 'admission', 'preflight', 'recovery-plan', 'recovery-verify', 'evidence-status', 'doctor', 'lease-status',
+    'state-archive-plan', 'state-archive-verify', 'state-archive-get'].includes(operation) ? 'kanban' : 'orchestration';
 }
 
 export function packagedTaskRuntimeCandidates(): string[] {
@@ -138,7 +148,7 @@ export async function checkpointTaskWorkspaceAfterFinalization(
   checkpoint: TaskWorkspaceCheckpointer = checkpointControllerAfterFinalization,
   taskId?: string,
 ): Promise<void> {
-  if (['status', 'preflight', 'recovery-plan', 'checkpoint', 'evidence-run', 'evidence-status', 'evidence-await', 'doctor', 'lease-status'].includes(operation)) return;
+  if (['status', 'admission', 'preflight', 'recovery-plan', 'recovery-verify', 'checkpoint', 'evidence-run', 'evidence-status', 'evidence-await', 'doctor', 'lease-status'].includes(operation)) return;
   if (taskId) await checkpoint(controllerRoot, exitCode, taskId);
   else await checkpoint(controllerRoot, exitCode);
 }
@@ -153,18 +163,15 @@ export async function invokeTaskWorkspace(
   const controllerRoot = route.controllerRoot;
   const script = await selectTaskWorkspaceRuntime(controllerRoot, operation);
   const taskEnv = route.env;
-  const exitCode = await new Promise<number>((resolve, reject) => {
-    const pathArgs = requiredPaths.flatMap((requiredPath) => ['--path', requiredPath]);
-    const child = spawn('python3', [script, operation, '--task', taskId, ...pathArgs, ...admissionArgs], {
-      cwd: controllerRoot,
-      env: taskEnv,
-      stdio: 'inherit',
-    });
-    child.once('error', reject);
-    child.once('exit', (code, signal) => {
-      if (signal) reject(new Error(`Task workspace command terminated by signal ${signal}`));
-      else resolve(code ?? 1);
-    });
+  const pathArgs = requiredPaths.flatMap((requiredPath) => ['--path', requiredPath]);
+  const machine = resolveMachineOutput(process.argv.slice(2), { jsonFlag: true });
+  const { exitCode } = await invokeMachineAwareChild({
+    executable: 'python3',
+    args: [script, operation, ...(taskId ? ['--task', taskId] : []), ...pathArgs, ...admissionArgs],
+    cwd: controllerRoot,
+    env: taskEnv,
+    command: `task.${operation}`,
+    ...(machine ? { machine } : {}),
   });
   await checkpointTaskWorkspaceAfterFinalization(operation, controllerRoot, exitCode,
     checkpointControllerAfterFinalization, taskId);
@@ -176,14 +183,19 @@ export function configureTaskWorkspaceCommand(
   invoke: TaskWorkspaceInvoker = invokeTaskWorkspace,
   invokeBootstrap: TaskRuntimeBootstrapInvoker = invokeTaskRuntimeBootstrap,
 ): void {
-  const task = program
+  const task = addMachineOutputOptions(program
     .command('task')
-    .description('Create, inspect, and queue one exact-base feature worktree');
+    .description('Create, inspect, and queue one exact-base feature worktree'));
   task
     .command('run')
-    .description('Execute the controller-owned typed task workflow through QUEUED')
+    .description('Execute the managed workflow through QUEUED; acquires its own fence without --lease-token')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
     .action((taskId: string) => invoke('run', taskId, []));
+  task
+    .command('resume')
+    .description('Resume managed task run with its own fence; existing blockers and budgets still apply')
+    .argument('<task-id>', 'Canonical YYLO Ledger task ID')
+    .action((taskId: string) => invoke('resume', taskId, []));
   task
     .command('recover-predispatch')
     .description('Release one receipt-proven no-provider task-run attempt without spending model budget')
@@ -213,34 +225,30 @@ export function configureTaskWorkspaceCommand(
     ]));
   task
     .command('start')
+    .description('Start a hydrated worktree; retain the returned token for later manual gated commands')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
-    .option('--path <path>', 'Additional selectable product root; omit for baseline/default paths', (value, values: string[]) => [...values, value], [])
-    .option('--umbrella-admission <file>', 'Versioned ordered-child exact-scope input')
+    .option('--path <path>', 'Exact authored file (including one policy-declared new file) or selectable product root; repeat for exact scope', (value, values: string[]) => [...values, value], [])
     .option('--lease-token <token>', 'Current fencing lease token for this gated mutation')
-    .action((taskId: string, options: { path: string[]; umbrellaAdmission?: string; leaseToken?: string }) => {
-      const admission = options.umbrellaAdmission ? ['--umbrella-admission', options.umbrellaAdmission] : [];
-      if (options.leaseToken) admission.push('--lease-token', options.leaseToken);
-      return invoke('start', taskId, options.path, admission);
-    });
+    .action((taskId: string, options: { path: string[]; leaseToken?: string }) => invoke(
+      'start', taskId, options.path,
+      options.leaseToken ? ['--lease-token', options.leaseToken] : [],
+    ));
+  task.command('admission')
+    .description('Read-only exact authored-path and dirty-path admission check')
+    .argument('<task-id>', 'Canonical YYLO Ledger task ID')
+    .action((taskId: string) => invoke('admission', taskId, []));
   task.command('preflight')
     .description('Read-only finish/admission check before expensive validation')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
     .action((taskId: string) => invoke('preflight', taskId, []));
   task.command('checkpoint')
-    .description('Plan affected validation for one clean coherent committed tip')
+    .description('Plan validation or accept one ordered checkpoint on the ordinary delivery')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
+    .option('--accept <checkpoint-id>', 'Run/reuse exact evidence and accept this frozen checkpoint')
     .option('--lease-token <token>', 'Current fencing lease token for this gated mutation')
-    .action((taskId: string, options: { leaseToken?: string }) => invoke(
-      'checkpoint', taskId, [], options.leaseToken ? ['--lease-token', options.leaseToken] : [],
-    ));
-  task.command('child-checkpoint')
-    .description('Record one admitted umbrella child sequential committed increment')
-    .argument('<task-id>', 'Canonical umbrella YYLO Ledger task ID')
-    .argument('<child-id>', 'Admitted ordered tracking-only child task ID')
-    .option('--lease-token <token>', 'Current fencing lease token for this gated mutation')
-    .action((taskId: string, childId: string, options: { leaseToken?: string }) => invoke(
-      'child-checkpoint', taskId, [], [
-        '--child', childId,
+    .action((taskId: string, options: { accept?: string; leaseToken?: string }) => invoke(
+      'checkpoint', taskId, [], [
+        ...(options.accept ? ['--accept-checkpoint', options.accept] : []),
         ...(options.leaseToken ? ['--lease-token', options.leaseToken] : []),
       ],
     ));
@@ -252,9 +260,11 @@ export function configureTaskWorkspaceCommand(
       'hydrate', taskId, [], options.leaseToken ? ['--lease-token', options.leaseToken] : [],
     ));
   task.command('status')
+    .description('Read-only state, producer fence, prior terminal evidence, and one eligible action')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
     .action((taskId: string) => invoke('status', taskId, []));
   task.command('finish')
+    .description('Queue only after live state/fence admission and exact reusable validation')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
     .option('--lease-token <token>', 'Current fencing lease token for this gated mutation')
     .action((taskId: string, options: { leaseToken?: string }) => invoke(
@@ -294,8 +304,9 @@ export function configureTaskWorkspaceCommand(
       ],
     ));
   task.command('lease-successor')
-    .description('Issue the next fencing attempt after proven predecessor termination')
+    .description('Issue one successor token; retry manual gated commands with --lease-token <returned-token>')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
+    .addHelpText('after', '\nThe returned token remains valid after this helper exits until superseded or terminated.\nAt the unchanged clean base: yy task start TASK_ID --lease-token <returned-token>\nUse that token for later manual gated commands, including finish; do not repeat successor.\nFor authorized managed execution instead: yy task run TASK_ID (or resume).\nManaged execution is not read-only recovery; lifecycle blockers and budgets still apply.\nKeep tokens private; never include them in logs or task evidence.\n')
     .option('--handoff-receipt <file>', 'Exact handoff receipt consumed by this successor')
     .action((taskId: string, options: { handoffReceipt?: string }) => invoke(
       'lease-successor', taskId, [],
@@ -315,30 +326,44 @@ export function configureTaskWorkspaceCommand(
     .action((taskId: string, options: { leaseToken: string }) => invoke(
       'lease-release', taskId, [], ['--lease-token', options.leaseToken],
     ));
-  task.command('recovery-plan')
-    .argument('<task-id>', 'Canonical umbrella YYLO Ledger task ID')
-    .requiredOption('--umbrella-admission <file>', 'Frozen ordered-child exact-scope input')
-    .requiredOption('--output <file>', 'New exclusive recovery plan path')
-    .action((taskId: string, options: { umbrellaAdmission: string; output: string }) => invoke(
-      'recovery-plan', taskId, [], ['--umbrella-admission', options.umbrellaAdmission,
-        '--output', options.output],
+  task.command('state-archive-plan')
+    .description('Create a read-only reviewed plan for terminal lifecycle compaction')
+    .requiredOption('--output <file>', 'Fresh external plan path')
+    .option('--cold-ref <ref>', 'Dedicated opt-in cold Git ref')
+    .action((options: { output: string; coldRef?: string }) => invoke(
+      'state-archive-plan', '', [], ['--output', options.output,
+        ...(options.coldRef ? ['--cold-ref', options.coldRef] : [])],
     ));
-  task.command('recovery-authorize')
-    .argument('<task-id>', 'Canonical umbrella YYLO Ledger task ID')
-    .requiredOption('--umbrella-admission <file>', 'Frozen ordered-child exact-scope input')
-    .requiredOption('--plan <file>', 'Exact reviewed recovery plan')
-    .action((taskId: string, options: { umbrellaAdmission: string; plan: string }) => invoke(
-      'recovery-authorize', taskId, [], ['--umbrella-admission', options.umbrellaAdmission,
-        '--plan', options.plan],
+  task.command('state-archive-apply')
+    .description('Apply one exact reviewed terminal lifecycle compaction plan')
+    .requiredOption('--plan <file>', 'Exact reviewed plan')
+    .requiredOption('--output <file>', 'Fresh external receipt path')
+    .requiredOption('--authorize-state-compaction', 'Explicit destructive migration authority')
+    .action((options: { plan: string; output: string }) => invoke(
+      'state-archive-apply', '', [], ['--plan', options.plan, '--output', options.output,
+        '--authorize-state-compaction'],
     ));
-  task.command('recovery-apply')
-    .argument('<task-id>', 'Canonical umbrella YYLO Ledger task ID')
-    .requiredOption('--umbrella-admission <file>', 'Frozen ordered-child exact-scope input')
-    .requiredOption('--plan <file>', 'Exact reviewed recovery plan')
-    .requiredOption('--authorization-receipt <file>', 'Canonical immutable authorization for the exact plan')
-    .action((taskId: string, options: { umbrellaAdmission: string; plan: string; authorizationReceipt: string }) => invoke(
-      'recovery-apply', taskId, [], ['--umbrella-admission', options.umbrellaAdmission,
-        '--plan', options.plan, '--authorization-receipt', options.authorizationReceipt],
+  task.command('state-archive-verify')
+    .description('Verify compact hot state and every archived terminal record')
+    .requiredOption('--plan <file>', 'Exact applied plan')
+    .action((options: { plan: string }) => invoke(
+      'state-archive-verify', '', [], ['--plan', options.plan],
+    ));
+  task.command('state-archive-get')
+    .description('Explicitly retrieve one digest-verified cold terminal lifecycle record')
+    .argument('<task-id>', 'Canonical YYLO Ledger task ID')
+    .option('--cold-ref <ref>', 'Dedicated opt-in cold Git ref')
+    .action((taskId: string, options: { coldRef?: string }) => invoke(
+      'state-archive-get', taskId, [], options.coldRef ? ['--cold-ref', options.coldRef] : [],
+    ));
+  task.command('state-archive-rollback')
+    .description('Restore the exact pre-compaction hot state while preserving cold evidence')
+    .requiredOption('--plan <file>', 'Exact applied plan')
+    .requiredOption('--output <file>', 'Fresh external receipt path')
+    .requiredOption('--authorize-state-rollback', 'Explicit rollback authority')
+    .action((options: { plan: string; output: string }) => invoke(
+      'state-archive-rollback', '', [], ['--plan', options.plan, '--output', options.output,
+        '--authorize-state-rollback'],
     ));
   task.command('runtime-bootstrap')
     .description('Plan or apply guarded package-bound target task-runtime recovery')

@@ -45,7 +45,7 @@ COMMANDS = (
 STATES = (
     None, "NOT_STARTED", "WORKING", "QUEUED", "HYDRATING", "HYDRATION_FAILED",
     "REVIEW_FINDINGS", "REVIEW_FINDINGS_EXHAUSTED", "AWAITING_RISK",
-    "AWAITING_RELEASE", "REVIEWING", "CONFLICT", "CONFLICT_RESOLVED",
+    "REVIEWING", "CONFLICT", "CONFLICT_RESOLVED",
     "REOPENING", "REQUEUING_STALE", "RISK_EVIDENCE_READY", "MERGING",
     "MERGED", "KANBAN_SYNC_REQUIRED", "WITHDRAWN",
 )
@@ -156,23 +156,23 @@ class TransitionMatrixTables(unittest.TestCase):
                 self.plan("evidence-run", state).finding.message,
                 "standing evidence run requires a WORKING task")
 
-    def test_tracking_only_children_are_redirected_to_their_umbrella(self) -> None:
+    def test_reporting_only_tasks_redirect_to_their_ordinary_delivery(self) -> None:
         owner = "UMB"
         self.assertEqual(
             self.plan("checkpoint", None, owner).finding.message,
-            f"task X is tracking-only under umbrella {owner}; "
-            f"checkpoint the umbrella child instead: yy task child-checkpoint {owner} X")
+            f"task X is reporting-only under delivery owner {owner}; "
+            f"checkpoint the ordinary delivery instead: yy task checkpoint {owner}")
         self.assertEqual(
             self.plan("preflight", None, owner).finding.message,
-            f"task X is tracking-only under umbrella {owner}; "
-            f"preflight the umbrella instead: yy task preflight {owner}")
+            f"task X is reporting-only under delivery owner {owner}; "
+            f"preflight the delivery instead: yy task preflight {owner}")
         self.assertEqual(
             self.plan("finish", None, owner).finding.message,
-            f"task X is tracking-only under umbrella {owner}; "
-            f"finish the umbrella instead: yy task finish {owner}")
+            f"task X is reporting-only under delivery owner {owner}; "
+            f"finish the delivery instead: yy task finish {owner}")
         self.assertEqual(
             self.plan("start", None, owner).finding.message,
-            f"task X is tracking-only under umbrella {owner}")
+            f"task X is reporting-only under delivery owner {owner}")
 
     def test_hydrate_admits_exactly_the_frozen_hydration_states(self) -> None:
         for state in STATES:
@@ -225,7 +225,7 @@ class TransitionMatrixTables(unittest.TestCase):
 
 
 class StatusProjectionTables(unittest.TestCase):
-    def test_tracking_only_projection_redirects_progress_recording(self) -> None:
+    def test_reporting_only_projection_redirects_to_delivery_status(self) -> None:
         with poisoned_surface():
             projection = decisions.status_projection(
                 decisions.TaskSnapshot("X", None, "UMB"))
@@ -233,8 +233,8 @@ class StatusProjectionTables(unittest.TestCase):
         self.assertEqual(projection.umbrella_owner_task_id, "UMB")
         self.assertEqual(
             projection.next_action,
-            "implement inside the umbrella worktree; "
-            "record progress with: yy task child-checkpoint UMB X")
+            "report through the ordinary delivery owner; "
+            "inspect progress with: yy task status UMB")
 
     def test_absent_task_projects_not_started(self) -> None:
         with poisoned_surface():
@@ -242,6 +242,19 @@ class StatusProjectionTables(unittest.TestCase):
         self.assertEqual(projection.state, "NOT_STARTED")
         self.assertIsNone(projection.umbrella_owner_task_id)
         self.assertIsNone(projection.next_action)
+
+    def test_mutation_eligibility_exposes_one_action_or_operator_stop(self) -> None:
+        with poisoned_surface():
+            working = decisions.task_mutation_eligibility("X", "WORKING")
+            queued = decisions.task_mutation_eligibility("X", "QUEUED")
+            child = decisions.task_mutation_eligibility(
+                "X", None, tracking_owner="UMB")
+        self.assertEqual((working.operation, working.eligible, working.safe_next_action),
+                         ("finish", True, "yy task preflight X"))
+        self.assertEqual((queued.operation, queued.eligible, queued.reason_code),
+                         (None, False, "task_already_queued"))
+        self.assertEqual(child.safe_next_action, "yy task status UMB")
+        self.assertTrue(all(item.invalidating_change for item in (working, queued, child)))
 
 
 class HandoffPhaseTables(unittest.TestCase):
@@ -482,22 +495,7 @@ class FailureContractTables(unittest.TestCase):
         return {"id": "suite", "timeout_seconds": 900}
 
 
-class QueueingDecisionTables(unittest.TestCase):
-    def test_sequence_admission_contract(self) -> None:
-        with poisoned_surface():
-            self.assertEqual(decisions.next_enqueue_sequence(
-                {"schema_version": "juno_task_workspace_fifo.v1", "next": 7}), 7)
-            for bad in (None, 3, {}, {"schema_version": "other", "next": 1},
-                        {"schema_version": "juno_task_workspace_fifo.v1"},
-                        {"schema_version": "juno_task_workspace_fifo.v1",
-                         "next": True},
-                        {"schema_version": "juno_task_workspace_fifo.v1", "next": 0},
-                        {"schema_version": "juno_task_workspace_fifo.v1",
-                         "next": 2**63},
-                        {"schema_version": "juno_task_workspace_fifo.v1", "next": 1,
-                         "extra": 2}):
-                self.assertRaises(ValueError, decisions.next_enqueue_sequence, bad)
-
+class HistoricalStateAttributionTables(unittest.TestCase):
     def test_shared_queue_delta_reports_only_queue_owned_changes(self) -> None:
         before = {"schema_version": "s", "tasks": {"A": {"state": "WORKING"}},
                   "queues": {"fifo": {"next": 1}}}
@@ -551,7 +549,7 @@ class ShellWiringCharacterization(unittest.TestCase):
         self.assertIn("decisions.plan_evidence_reuse(", shell)
         self.assertIn("decisions.validation_failure_message(", shell)
         self.assertIn("decisions.status_projection(", shell)
-        self.assertIn("decisions.next_enqueue_sequence(", shell)
+        self.assertNotIn("decisions.next_enqueue_sequence(", shell)
 
     def test_shell_fence_gates_call_the_lease_planners(self) -> None:
         shell = (Path(__file__).resolve().parents[1] / "task_workspace.py").read_text()
@@ -596,6 +594,18 @@ class LeaseAuthorityTables(unittest.TestCase):
         self.assertFalse(stale.admitted)
         self.assertEqual(stale.code, decisions.LEASE_CODE_FENCE_STALE)
 
+    def test_token_authority_is_independent_of_helper_liveness(self) -> None:
+        for status in ("alive", "dead", "unknown"):
+            with self.subTest(status=status):
+                observation = decisions.LeaseObservation(status, "fixture")
+                valid = self.run_authority(self.lease(), "digest-a", observation)
+                self.assertTrue(valid.admitted)
+                self.assertEqual(valid.authority, "token")
+                stale = self.run_authority(self.lease(), "digest-b", observation)
+                self.assertFalse(stale.admitted)
+                self.assertEqual(stale.code, decisions.LEASE_CODE_FENCE_STALE)
+                self.assertIn("--lease-token <returned-token>", stale.message)
+
     def test_same_pid_live_producer_continuity_admits_only_process_leases(self) -> None:
         decision = self.run_authority(
             self.lease(), None, decisions.LeaseObservation("alive", "pid live"), pid=4242)
@@ -613,6 +623,12 @@ class LeaseAuthorityTables(unittest.TestCase):
         self.assertFalse(dead.admitted)
         self.assertEqual(dead.code, decisions.LEASE_CODE_PRODUCER_DEAD)
         self.assertIn("lease-successor", dead.message)
+        self.assertIn("--lease-token <current-token>", dead.message)
+        self.assertIn("--lease-token <returned-token>", dead.message)
+        self.assertIn("do not repeat successor", dead.message)
+        self.assertIn("yy task run T1", dead.message)
+        self.assertIn("yy task resume T1", dead.message)
+        self.assertIn("blockers and budgets still apply", dead.message)
         unknown = self.run_authority(
             self.lease(), None, decisions.LeaseObservation("unknown", "ps failed"))
         self.assertFalse(unknown.admitted)
@@ -623,6 +639,48 @@ class LeaseAuthorityTables(unittest.TestCase):
         self.assertEqual(decisions.LEASE_GATED_COMMANDS, frozenset({
             "start", "hydrate", "checkpoint", "child-checkpoint",
             "evidence-run", "finish", "sync"}))
+
+
+class ResumeDecisionTables(unittest.TestCase):
+    def decide(self, **values):
+        with poisoned_surface():
+            return decisions.plan_resume(decisions.ResumeFacts(owner="task", **values))
+
+    def test_launch_terminal_and_deterministic_phase_choose_smallest_verified_stage(self) -> None:
+        launch = self.decide(launch_observed=False, resumable_stage="IMPLEMENTING")
+        self.assertTrue(launch.admitted)
+        self.assertEqual(launch.classification, decisions.RESUME_LAUNCH_NOT_STARTED)
+        self.assertEqual(launch.restart_stage, "IMPLEMENTING")
+        terminal = self.decide(exact_terminal=True, launch_observed=True,
+                               resumable_stage="CAPTURE")
+        self.assertTrue(terminal.admitted)
+        self.assertEqual(terminal.classification, decisions.RESUME_EXACT_TERMINAL_CAPTURE)
+        deterministic = self.decide(producer_status="dead", launch_observed=True,
+                                    resumable_stage="VALIDATING")
+        self.assertTrue(deterministic.admitted)
+        self.assertEqual(deterministic.classification,
+                         decisions.RESUME_DETERMINISTIC_PHASE)
+
+    def test_live_unknown_conflict_stale_and_budget_exhaustion_stop(self) -> None:
+        cases = [
+            ({"producer_status": "alive"}, decisions.RESUME_LIVE_AUTHORITY),
+            ({"producer_status": "unknown"}, decisions.RESUME_UNKNOWN_OUTCOME),
+            ({"conflict": True}, decisions.RESUME_REAL_CONFLICT),
+            ({"stale_authority": True}, decisions.RESUME_STALE_AUTHORITY),
+            ({"budget_remaining": False}, decisions.RESUME_BUDGET_EXHAUSTED),
+        ]
+        for values, classification in cases:
+            with self.subTest(classification=classification):
+                decision = self.decide(**values)
+                self.assertFalse(decision.admitted)
+                self.assertEqual(decision.classification, classification)
+
+    def test_target_resume_routes_to_native_delivery_status(self) -> None:
+        decision = decisions.plan_resume(decisions.ResumeFacts(
+            owner="target", producer_status="dead", launch_observed=True,
+            explicit_handoff=True, resumable_stage="FINALIZING"))
+        self.assertEqual(decision.owner_command, "yy merge status")
+        self.assertEqual(decision.restart_stage, "FINALIZING")
 
 
 class LeaseSuccessorTables(unittest.TestCase):
@@ -685,6 +743,32 @@ class LeaseSuccessorTables(unittest.TestCase):
         empty = self.run_successor(None, decisions.LeaseObservation("dead", "x"))
         self.assertFalse(empty.admitted)
         self.assertEqual(empty.code, decisions.LEASE_CODE_NOT_ACTIVE)
+
+
+class CanonicalPathOriginProjectionTests(unittest.TestCase):
+    def test_projection_is_versioned_and_altered_inherited_bytes_are_authored(self) -> None:
+        projection = decisions.project_path_origins(
+            base_tree={"target.txt": "b0", "feature.txt": "f0"},
+            source_tree={"target.txt": "tampered", "feature.txt": "f1"},
+            target_tree={"target.txt": "t1", "feature.txt": "f0"},
+            candidate_tree={"target.txt": "tampered", "feature.txt": "f1"},
+            admitted_paths=["feature.txt"], generated_bindings=[], conflict_paths=[])
+        self.assertEqual(projection["schema_version"], "juno_path_origin_projection.v1")
+        self.assertEqual(projection["authored_paths"], ["feature.txt", "target.txt"])
+        self.assertEqual(projection["target_derived_paths"], [])
+        self.assertEqual(projection["candidate_delta_paths"], ["feature.txt", "target.txt"])
+
+    def test_projection_accepts_unchanged_target_bytes_and_fails_ambiguous_legacy_admission(self) -> None:
+        projection = decisions.project_path_origins(
+            base_tree={"target.txt": "b0"}, source_tree={"target.txt": "t1"},
+            target_tree={"target.txt": "t1"}, candidate_tree={"target.txt": "t1"},
+            admitted_paths=[], generated_bindings=[], conflict_paths=[])
+        self.assertEqual(projection["target_derived_paths"], ["target.txt"])
+        ambiguous = decisions.project_path_origins(
+            base_tree={"same.txt": "x"}, source_tree={"same.txt": "x"},
+            target_tree={"same.txt": "x"}, candidate_tree={"same.txt": "x"},
+            admitted_paths=["same.txt"], generated_bindings=[], conflict_paths=[])
+        self.assertEqual(ambiguous["ambiguous_paths"], ["same.txt"])
 
 
 def tearDownModule() -> None:

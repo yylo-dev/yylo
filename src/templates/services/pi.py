@@ -6,7 +6,9 @@ Headless wrapper around the Pi coding agent CLI with JSON streaming and shorthan
 
 import argparse
 import json
+import math
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -45,6 +47,37 @@ def _positive_int_env(name: str, fallback: int) -> int:
     return parsed if parsed > 0 else fallback
 
 
+class OrderedOutputCoordinator:
+    """Single writer for append-only, atomically emitted semantic blocks."""
+
+    def __init__(self, stream: TextIO):
+        self._stream = stream
+        self._queue: "queue.Queue[Optional[str]]" = queue.Queue()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def emit(self, block: str) -> None:
+        if block:
+            self._queue.put(block)
+
+    def close(self) -> None:
+        self._queue.put(None)
+        self._thread.join()
+
+    def _run(self) -> None:
+        first = True
+        while True:
+            block = self._queue.get()
+            if block is None:
+                return
+            text = block.rstrip("\n")
+            if not first:
+                self._stream.write("\n")
+            self._stream.write(text + "\n")
+            self._stream.flush()
+            first = False
+
+
 class PiService:
     """Service wrapper for Pi coding agent headless mode."""
 
@@ -63,7 +96,8 @@ class PiService:
         # OpenAI
         ":luna": "openai-codex/gpt-5.6-luna",
         ":sol": "openai-codex/gpt-5.6-sol",
-        ":gpt": ":sol",
+        ":gpt": "openai-codex/gpt-6-astra",
+        ":astra": "openai-codex/gpt-6-astra",
         ":gpt5.5": "openai-codex/gpt-5.5",
         ":mini": "openai-codex/gpt-5.6-terra",
         ":gpt-5": "openai/gpt-5",
@@ -111,11 +145,18 @@ class PiService:
     PRETTIFIER_CODEX = "codex"
     PRETTIFIER_LIVE = "live"
 
-    # ANSI colors for tool prettifier output.
-    # - command/args blocks are green for readability
-    # - error results are red
+    # Provider-neutral headless UI palette. Labels remain explicit so the
+    # transcript is equally understandable when ANSI styling is unavailable.
     ANSI_GREEN = "\x1b[38;5;40m"
+    ANSI_MUTED_GREEN = "\x1b[38;5;108m"
+    ANSI_CYAN = "\x1b[38;5;44m"
+    ANSI_YELLOW = "\x1b[38;5;220m"
     ANSI_RED = "\x1b[38;5;203m"
+    ANSI_BLUE = "\x1b[38;5;75m"
+    ANSI_MAGENTA = "\x1b[38;5;141m"
+    ANSI_BOLD = "\x1b[1m"
+    ANSI_DIM = "\x1b[2m"
+    ANSI_ITALIC = "\x1b[3m"
     ANSI_RESET = "\x1b[0m"
 
     # Keep tool args readable while preventing giant inline payloads.
@@ -135,6 +176,17 @@ class PiService:
         self._pending_tool_calls: Dict[str, dict] = {}  # toolCallId -> {tool, args/command}
         # Buffer tool_execution_start data for fallback + timing (when toolcall_end arrives late)
         self._pending_exec_starts: Dict[str, dict] = {}  # toolCallId -> {tool, args/command, started_at}
+        self._pending_tool_running_timers: Dict[str, threading.Timer] = {}
+        self._tool_running_lock = threading.Lock()
+        # Semantic non-live renderer state. Timer threads only enqueue complete
+        # blocks through _ordered_output; they never write terminal bytes.
+        self._ordered_output = None
+        self._semantic_lock = threading.Lock()
+        self._semantic_tools: Dict[str, dict] = {}
+        self._semantic_missing_ids: List[str] = []
+        self._semantic_sequence = 0
+        self._semantic_thinking: Optional[dict] = None
+        self._semantic_answer_texts: Set[str] = set()
         # Track whether we're inside a tool execution
         self._in_tool_execution: bool = False
         # Buffer raw non-JSON tool stdout so it doesn't interleave with structured events
@@ -148,7 +200,9 @@ class PiService:
         # Codex prettifier state
         self._item_counter = 0
         self._codex_first_assistant_seen = False
-        self._codex_tool_result_max_lines = int(os.environ.get("PI_TOOL_RESULT_MAX_LINES", "6"))
+        self._codex_tool_result_max_lines = int(os.environ.get("PI_TOOL_RESULT_MAX_LINES", "15"))
+        self._tool_result_tail_lines = 2
+        self._turn_cost_display_threshold_usd = 0.5
         # Keys to hide from intermediate assistant messages in Codex mode
         self._codex_metadata_keys = {"api", "provider", "model", "usage", "stopReason", "timestamp"}
         self._managed_prompt_files: List[Path] = []
@@ -220,24 +274,129 @@ class PiService:
         return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 
     def _colorize_lines(self, text: str, color_code: str) -> str:
-        """Apply ANSI coloring per line so line-based renderers keep colors stable."""
+        """Apply ANSI styling per line so line-oriented renderers cannot leak it."""
         if "\n" not in text:
             return f"{color_code}{text}{self.ANSI_RESET}"
         return "\n".join(f"{color_code}{line}{self.ANSI_RESET}" for line in text.split("\n"))
 
+    def _style_text(self, text: str, *codes: str) -> str:
+        if not self._color_enabled() or not text:
+            return text
+        return self._colorize_lines(text, "".join(codes))
+
     def _colorize_result(self, text: str, is_error: bool = False) -> str:
-        """Colorize tool output only for errors; success stays terminal-default."""
+        """Make tool responses distinct and highlight omitted-middle markers."""
+        if is_error:
+            return self._style_text(text, self.ANSI_BOLD, self.ANSI_RED)
         if not self._color_enabled():
             return text
-        if not is_error:
-            return text
-        return self._colorize_lines(text, self.ANSI_RED)
+        styled: List[str] = []
+        for line in text.split("\n"):
+            color = self.ANSI_YELLOW if re.fullmatch(r"\[\d+ lines, \d+ characters truncated\]", line) else self.ANSI_GREEN
+            styled.append(f"{color}{line}{self.ANSI_RESET}")
+        return "\n".join(styled)
 
     def _colorize_command(self, text: str) -> str:
-        """Colorize tool command/args blocks in green when ANSI color is enabled."""
+        """Render legacy tool command/argument blocks in cyan."""
+        return self._style_text(text, self.ANSI_CYAN)
+
+    def _style_semantic_input(self, text: str) -> str:
+        return self._style_text(text, self.ANSI_BOLD, self.ANSI_CYAN)
+
+    def _style_semantic_response(self, text: str, *, is_error: bool = False) -> str:
+        if is_error:
+            return self._style_text(text, self.ANSI_BOLD, self.ANSI_RED)
         if not self._color_enabled():
             return text
-        return self._colorize_lines(text, self.ANSI_GREEN)
+        lines = []
+        for line in text.split("\n"):
+            codes = (self.ANSI_DIM, self.ANSI_YELLOW) if re.fullmatch(
+                r"\[\d+ lines, \d+ characters truncated\]", line
+            ) else (self.ANSI_DIM, self.ANSI_MUTED_GREEN)
+            lines.append("".join(codes) + line + self.ANSI_RESET)
+        return "\n".join(lines)
+
+    def _style_semantic_label(self, text: str, *, input_label: bool = False) -> str:
+        codes = [self.ANSI_DIM, self.ANSI_ITALIC]
+        if input_label:
+            codes.append(self.ANSI_CYAN)
+        return self._style_text(text, *codes)
+
+    def _style_thinking(self, text: str) -> str:
+        return self._style_text(text, self.ANSI_DIM, self.ANSI_ITALIC)
+
+    def _style_assistant(self, text: str) -> str:
+        return self._style_text(text, self.ANSI_BOLD)
+
+    def _format_json_header(self, header: Dict) -> str:
+        """Render compact valid JSON, adding jq-inspired token colors on TTYs."""
+        raw = json.dumps(header, ensure_ascii=False, separators=(",", ":"))
+        if not self._color_enabled():
+            return raw
+
+        out: List[str] = []
+        current_key: Optional[str] = None
+        index = 0
+        while index < len(raw):
+            char = raw[index]
+            if char == '"':
+                end = index + 1
+                while end < len(raw):
+                    if raw[end] == '"' and raw[end - 1] != "\\":
+                        break
+                    slash_count = 0
+                    probe = end - 1
+                    while probe >= index and raw[probe] == "\\":
+                        slash_count += 1
+                        probe -= 1
+                    if raw[end] == '"' and slash_count % 2 == 0:
+                        break
+                    end += 1
+                token = raw[index:end + 1]
+                probe = end + 1
+                while probe < len(raw) and raw[probe].isspace():
+                    probe += 1
+                is_key = probe < len(raw) and raw[probe] == ":"
+                color = (
+                    self.ANSI_BLUE
+                    if is_key
+                    else self.ANSI_BOLD + self.ANSI_YELLOW
+                    if current_key == "status" and token == '"running"'
+                    else self.ANSI_CYAN
+                    if current_key in {"tool", "toolName", "command"}
+                    else self.ANSI_GREEN
+                )
+                out.append(f"{color}{token}{self.ANSI_RESET}")
+                if is_key:
+                    try:
+                        current_key = json.loads(token)
+                    except json.JSONDecodeError:
+                        current_key = None
+                else:
+                    current_key = None
+                index = end + 1
+                continue
+            if char.isdigit() or char == "-":
+                match = re.match(r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?", raw[index:])
+                if match:
+                    token = match.group(0)
+                    number_style = (
+                        self.ANSI_BOLD + self.ANSI_YELLOW
+                        if current_key == "cost_usd"
+                        else self.ANSI_MAGENTA
+                    )
+                    out.append(f"{number_style}{token}{self.ANSI_RESET}")
+                    current_key = None
+                    index += len(token)
+                    continue
+            matched_literal = next((value for value in ("true", "false", "null") if raw.startswith(value, index)), None)
+            if matched_literal:
+                out.append(f"{self.ANSI_YELLOW}{matched_literal}{self.ANSI_RESET}")
+                index += len(matched_literal)
+                continue
+            out.append(char)
+            index += 1
+        return "".join(out)
 
     def _normalize_multiline_tool_text(self, text: str) -> str:
         """Render escaped newline sequences as real newlines for tool command/args blocks."""
@@ -270,7 +429,7 @@ class PiService:
                     block_label = "args:"
                     block_text = self._colorize_command(args_text)
 
-        output = json.dumps(metadata, ensure_ascii=False)
+        output = self._format_json_header(metadata)
         if block_text is None:
             return output
         return output + "\n" + block_label + "\n" + block_text
@@ -286,13 +445,39 @@ class PiService:
         if isinstance(value, str):
             clean = self._strip_ansi_sequences(value)
             if len(clean) > self.TOOL_ARG_STRING_MAX_CHARS:
-                return clean[:self.TOOL_ARG_STRING_MAX_CHARS] + "..."
+                omitted = len(clean) - self.TOOL_ARG_STRING_MAX_CHARS
+                return clean[:self.TOOL_ARG_STRING_MAX_CHARS] + f"\n[{omitted} input characters truncated]"
             return clean
         if isinstance(value, dict):
             return {k: self._sanitize_tool_argument_value(v) for k, v in value.items()}
         if isinstance(value, list):
             return [self._sanitize_tool_argument_value(v) for v in value]
         return value
+
+    def _highlight_formatted_header(self, formatted: str) -> str:
+        """Apply the shared jq header style to a formatter's leading JSON line."""
+        if not formatted:
+            return formatted
+        first, separator, rest = formatted.partition("\n")
+        try:
+            header = json.loads(self._strip_ansi_sequences(first))
+        except (json.JSONDecodeError, TypeError):
+            return formatted
+        if not isinstance(header, dict):
+            return formatted
+        result_text = header.pop("result", None) if header.get("type") == "tool" else None
+        is_error = bool(header.get("isError"))
+        highlighted = self._format_json_header(header)
+        existing = separator + rest if separator else ""
+        if isinstance(result_text, str) and result_text:
+            result_block = self._colorize_result("result:", is_error=is_error) + "\n" + self._colorize_result(result_text, is_error=is_error)
+            return highlighted + existing + ("\n" if not existing or not existing.endswith("\n") else "") + result_block
+        return highlighted + existing
+
+    def _format_tool_result_block(self, header: Dict, result_text: str, is_error: bool = False) -> str:
+        label = self._colorize_result("result:", is_error=is_error)
+        body = self._colorize_result(result_text, is_error=is_error)
+        return self._format_tool_invocation_header(header) + "\n" + label + "\n" + body
 
     def _format_execution_time(self, payload: dict, pending: Optional[dict] = None) -> Optional[str]:
         """Return execution time string (e.g. 0.12s) from payload or measured start time."""
@@ -320,6 +505,255 @@ class PiService:
         if seconds is None:
             return None
         return f"{seconds:.2f}s"
+
+    def _semantic_next_id(self) -> int:
+        self.message_counter += 1
+        return self.message_counter
+
+    def _semantic_time(self) -> str:
+        return datetime.now().strftime("%H:%M:%S")
+
+    def _semantic_indent(self, text: str, style=None) -> str:
+        clean = self._strip_ansi_sequences(text)
+        rendered = "\n".join("  " + line for line in clean.split("\n"))
+        return style(rendered) if style else rendered
+
+    def _semantic_tag(self, tag: str, *, input_label: bool = False) -> str:
+        return self._style_semantic_label(tag, input_label=input_label)
+
+    def _semantic_metadata(self, values: dict) -> str:
+        return self._format_json_header(values)
+
+    def _semantic_input_text(self, pending: dict) -> str:
+        if isinstance(pending.get("command"), str):
+            return self._normalize_multiline_tool_text(pending["command"])
+        args = pending.get("args")
+        if isinstance(args, str):
+            return self._normalize_multiline_tool_text(args)
+        if args is not None:
+            return json.dumps(args, ensure_ascii=False, separators=(",", ":"))
+        return ""
+
+    def _semantic_result_text(self, payload: dict) -> str:
+        value = payload.get("result")
+        if isinstance(value, str):
+            return self._truncate_tool_result_text(value)
+        if isinstance(value, dict):
+            content = value.get("content")
+            if isinstance(content, list):
+                parts = [item.get("text", "") for item in content
+                         if isinstance(item, dict) and item.get("type") == "text"]
+                if parts:
+                    return self._truncate_tool_result_text("\n".join(parts))
+        if value not in (None, "", [], {}):
+            return self._truncate_tool_result_text(json.dumps(value, ensure_ascii=False))
+        return ""
+
+    def _semantic_tool_block(self, state: dict, *, status: str, result: str = "",
+                             is_error: bool = False, include_input: bool = True,
+                             duration: Optional[str] = None) -> str:
+        metadata: Dict = {"id": state["id"], "tool": state.get("tool", ""), "status": status}
+        if is_error:
+            metadata["isError"] = True
+        if duration:
+            metadata["duration"] = duration
+        lines = [self._semantic_tag("[TOOL]" ) + " " + self._semantic_metadata(metadata)]
+        input_text = self._semantic_input_text(state)
+        if include_input and input_text:
+            lines.extend([
+                self._semantic_tag("[INPUT]", input_label=True),
+                self._semantic_indent(input_text, self._style_semantic_input),
+                self._semantic_tag("[/INPUT]", input_label=True),
+            ])
+        if result:
+            response_style = lambda text: self._style_semantic_response(text, is_error=is_error)
+            lines.extend([
+                self._semantic_tag("[TOOL_RESPONSE]"),
+                self._semantic_indent(result, response_style),
+                self._semantic_tag("[/TOOL_RESPONSE]"),
+            ])
+        lines.append(self._semantic_tag("[/TOOL]"))
+        return "\n".join(lines)
+
+    def _semantic_find_tool_key(self, payload: dict, *, create: bool = False) -> Optional[str]:
+        tool_call_id = payload.get("toolCallId")
+        tool_name = payload.get("toolName", "")
+        if isinstance(tool_call_id, str) and tool_call_id:
+            exact = "id:" + tool_call_id
+            if exact in self._semantic_tools or not create:
+                return exact
+            # Pi can omit the ID on toolcall_end and provide it at execution
+            # start. Promote the oldest matching fallback without duplicating it.
+            for fallback in list(self._semantic_missing_ids):
+                state = self._semantic_tools.get(fallback)
+                if state and not state.get("completed") and (not tool_name or state.get("tool") == tool_name):
+                    self._semantic_tools[exact] = self._semantic_tools.pop(fallback)
+                    self._semantic_missing_ids.remove(fallback)
+                    return exact
+            return exact
+        for key in list(self._semantic_missing_ids):
+            state = self._semantic_tools.get(key)
+            if state and not state.get("completed") and (not tool_name or state.get("tool") == tool_name):
+                return key
+        if not create:
+            return None
+        self._semantic_sequence += 1
+        key = f"missing:{self._semantic_sequence}"
+        self._semantic_missing_ids.append(key)
+        return key
+
+    def _schedule_semantic_running(self, key: str) -> None:
+        def enqueue_running() -> None:
+            with self._semantic_lock:
+                state = self._semantic_tools.get(key)
+                if not state or state.get("completed") or state.get("running_emitted"):
+                    return
+                state["running_emitted"] = True
+                block = self._semantic_tool_block(state, status="running")
+                # Enqueue under the state lock. Completion takes the same lock,
+                # so FIFO can never observe done before this running block.
+                if self._ordered_output is not None:
+                    self._ordered_output.emit(block)
+
+        timer = threading.Timer(0.5, enqueue_running)
+        timer.daemon = True
+        with self._tool_running_lock:
+            previous = self._pending_tool_running_timers.pop(key, None)
+            if previous:
+                previous.cancel()
+            self._pending_tool_running_timers[key] = timer
+        timer.start()
+
+    def _format_semantic_event(self, payload: dict) -> Optional[str]:
+        """Consume one Pi event and return at most one complete semantic block."""
+        event_type = payload.get("type", "")
+        ame = payload.get("assistantMessageEvent")
+        subtype = ame.get("type", "") if isinstance(ame, dict) else ""
+
+        if event_type == "message_update" and subtype == "thinking_start":
+            with self._semantic_lock:
+                self._semantic_thinking = {"started_at": time.perf_counter()}
+            return None
+        if event_type == "message_update" and subtype == "thinking_end":
+            text = ame.get("thinking", "") or ame.get("content", "") or ame.get("text", "")
+            with self._semantic_lock:
+                thinking = self._semantic_thinking
+                self._semantic_thinking = None
+            if not isinstance(text, str) or not text.strip():
+                return None
+            duration = max(0.0, time.perf_counter() - thinking["started_at"]) if thinking else 0.0
+            metadata = {"id": self._semantic_next_id(), "time": self._semantic_time()}
+            return "\n".join([
+                self._semantic_tag("[THINKING]") + " " + self._semantic_metadata(metadata),
+                self._semantic_indent(text, self._style_thinking),
+                self._semantic_tag(f"[/THINKING : {duration:.2f}s]"),
+            ])
+
+        if event_type == "message_update" and subtype == "text_end":
+            text = ame.get("content", "") or ame.get("text", "")
+            if not isinstance(text, str) or not text.strip() or text in self._semantic_answer_texts:
+                return None
+            self._semantic_answer_texts.add(text)
+            metadata = {"id": self._semantic_next_id(), "time": self._semantic_time()}
+            return "\n".join([
+                self._semantic_tag("[ANSWER]") + " " + self._semantic_metadata(metadata),
+                self._semantic_indent(text, self._style_assistant),
+                self._semantic_tag("[/ANSWER]"),
+            ])
+
+        if event_type == "message_update" and subtype == "toolcall_end":
+            call = ame.get("toolCall", {})
+            if not isinstance(call, dict):
+                return None
+            synthetic = {"toolCallId": call.get("toolCallId"), "toolName": call.get("name", "")}
+            with self._semantic_lock:
+                key = self._semantic_find_tool_key(synthetic, create=True)
+                state = self._semantic_tools.setdefault(key, {
+                    "id": self._semantic_next_id(), "tool": call.get("name", ""),
+                    "started_at": time.perf_counter(), "running_emitted": False,
+                    "completed": False,
+                })
+                args = call.get("arguments", {})
+                if isinstance(args, dict) and isinstance(args.get("command"), str):
+                    state["command"] = self._sanitize_tool_argument_value(args["command"])
+                else:
+                    state["args"] = self._sanitize_tool_argument_value(args)
+            return None
+
+        if event_type == "tool_execution_start":
+            self._in_tool_execution = True
+            with self._semantic_lock:
+                key = self._semantic_find_tool_key(payload, create=True)
+                state = self._semantic_tools.setdefault(key, {
+                    "id": self._semantic_next_id(), "tool": payload.get("toolName", ""),
+                    "running_emitted": False, "completed": False,
+                })
+                state["started_at"] = time.perf_counter()
+                state["tool"] = state.get("tool") or payload.get("toolName", "")
+                args = payload.get("args")
+                if isinstance(args, dict) and isinstance(args.get("command"), str):
+                    state["command"] = self._sanitize_tool_argument_value(args["command"])
+                elif args is not None:
+                    state["args"] = self._sanitize_tool_argument_value(args)
+            self._schedule_semantic_running(key)
+            return None
+
+        if event_type == "tool_execution_end":
+            with self._semantic_lock:
+                key = self._semantic_find_tool_key(payload, create=True)
+                state = self._semantic_tools.setdefault(key, {
+                    "id": self._semantic_next_id(), "tool": payload.get("toolName", ""),
+                    "started_at": time.perf_counter(), "running_emitted": False,
+                    "completed": False,
+                })
+                state["completed"] = True
+                running = bool(state.get("running_emitted"))
+                started = state.get("started_at")
+                self._in_tool_execution = any(
+                    not candidate.get("completed")
+                    for candidate in self._semantic_tools.values()
+                )
+            with self._tool_running_lock:
+                timer = self._pending_tool_running_timers.pop(key, None)
+            if timer:
+                timer.cancel()
+            duration = self._format_execution_time(payload, {"started_at": started})
+            is_error = payload.get("isError") is True
+            return self._semantic_tool_block(
+                state, status="error" if is_error else "done",
+                result=self._semantic_result_text(payload), is_error=is_error,
+                include_input=not running, duration=duration,
+            )
+
+        if event_type == "turn_end":
+            cost = self._extract_total_cost_usd(payload)
+            if cost is None or cost <= self._turn_cost_display_threshold_usd:
+                return None
+            metadata = {"id": self._semantic_next_id(), "time": self._semantic_time(), "cost_usd": cost}
+            return "\n".join([
+                self._semantic_tag("[STATUS]") + " " + self._semantic_metadata(metadata),
+                self._semantic_indent("Turn cost exceeded the display threshold."),
+                self._semantic_tag("[/STATUS]"),
+            ])
+
+        if event_type in {"message", "agent_end"}:
+            message = payload.get("message", {})
+            if event_type == "agent_end":
+                messages = payload.get("messages", [])
+                message = next((item for item in reversed(messages)
+                                if isinstance(item, dict) and item.get("role") == "assistant"), {}) \
+                    if isinstance(messages, list) else {}
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                text = self._extract_text_from_message(message)
+                if text and text not in self._semantic_answer_texts:
+                    self._semantic_answer_texts.add(text)
+                    metadata = {"id": self._semantic_next_id(), "time": self._semantic_time()}
+                    return "\n".join([
+                        self._semantic_tag("[ANSWER]") + " " + self._semantic_metadata(metadata),
+                        self._semantic_indent(text, self._style_assistant),
+                        self._semantic_tag("[/ANSWER]"),
+                    ])
+        return None
 
     def expand_model_shorthand(self, model: str) -> str:
         """Resolve shipped and project model shortcuts for Pi."""
@@ -369,13 +803,13 @@ Examples:
   %(prog)s -p "Audit code" -m :luna --tools read,bash,edit
 
 Model shorthands:
-  :pi, :default    -> :gpt -> openai-codex/gpt-5.6-sol
+  :pi, :default    -> :gpt -> openai-codex/gpt-6-astra
   :sonnet          -> anthropic/claude-sonnet-4-6
   :opus            -> anthropic/claude-opus-4-6
   :haiku           -> anthropic/claude-haiku-4-5-20251001
   :luna            -> openai-codex/gpt-5.6-luna
   :sol             -> openai-codex/gpt-5.6-sol
-  :gpt             -> :sol -> openai-codex/gpt-5.6-sol
+  :gpt, :astra     -> openai-codex/gpt-6-astra
   :gpt5.5          -> openai-codex/gpt-5.5
   :mini            -> openai-codex/gpt-5.6-terra
   :gpt-5           -> openai/gpt-5
@@ -409,7 +843,7 @@ Model shorthands:
             type=str,
             default=os.environ.get("PI_MODEL", self.DEFAULT_MODEL),
             help=(
-                "Model name. Supports shorthands (:pi, :sonnet, :opus, :luna, :sol, :gpt, :gpt5.5, :mini, :gpt-5, :gemini-pro, etc.) "
+                "Model name. Supports shorthands (:pi, :sonnet, :opus, :luna, :sol, :gpt, :astra, :gpt5.5, :mini, :gpt-5, :gemini-pro, etc.) "
                 f"or provider/model format. Default: {self.DEFAULT_MODEL} (env: PI_MODEL)"
             ),
         )
@@ -840,20 +1274,44 @@ Model shorthands:
         return obj
 
     def _truncate_tool_result_text(self, text: str) -> str:
-        """Truncate tool result text to max lines, rendering newlines properly."""
+        """Show a bounded head and tail with exact omitted-middle counts."""
         if not isinstance(text, str):
             return text
-        # Unescape JSON-escaped newlines for human-readable display
-        display_text = text.replace("\\n", "\n").replace("\\t", "\t")
-        display_text = self._strip_ansi_sequences(display_text)
-        lines = display_text.split("\n")
-        max_lines = self._codex_tool_result_max_lines
-        if len(lines) <= max_lines:
+        display_text = self._strip_ansi_sequences(text.replace("\\n", "\n").replace("\\t", "\t"))
+        lines = display_text.splitlines()
+        if display_text.endswith(("\n", "\r")):
+            # splitlines intentionally avoids inventing an empty final display line.
+            pass
+        if not lines and display_text:
+            lines = [display_text]
+        head_lines = max(0, self._codex_tool_result_max_lines)
+        tail_lines = max(0, self._tool_result_tail_lines)
+        if len(lines) <= head_lines + tail_lines:
             return display_text
-        shown = "\n".join(lines[:max_lines])
-        remaining_text = "\n".join(lines[max_lines:])
-        remaining_chars = len(remaining_text)
-        return f"{shown}\n[{remaining_chars} characters remaining]"
+
+        omitted = lines[head_lines:len(lines) - tail_lines if tail_lines else len(lines)]
+        omitted_text = "\n".join(omitted)
+        marker = f"[{len(omitted)} lines, {len(omitted_text)} characters truncated]"
+        visible = [*lines[:head_lines], marker]
+        if tail_lines:
+            visible.extend(lines[-tail_lines:])
+        return "\n".join(visible)
+
+    def _configure_headless_ui(self) -> Optional[str]:
+        raw = os.environ.get("HEADLESS_UI_TURN_COST_DISPLAY_THRESHOLD_USD", "0.5").strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            return "HEADLESS_UI_TURN_COST_DISPLAY_THRESHOLD_USD must be a finite number >= 0"
+        if not math.isfinite(value) or value < 0:
+            return "HEADLESS_UI_TURN_COST_DISPLAY_THRESHOLD_USD must be a finite number >= 0"
+        self._turn_cost_display_threshold_usd = value
+        return None
+
+    def _add_visible_turn_cost(self, header: Dict, event: dict) -> None:
+        cost = self._extract_total_cost_usd(event)
+        if cost is not None and cost > self._turn_cost_display_threshold_usd:
+            header["cost_usd"] = cost
 
     def _is_codex_final_message(self, parsed: dict) -> bool:
         """Detect if this is the final assistant message (contains type=text content or stopReason=stop)."""
@@ -1017,10 +1475,8 @@ Model shorthands:
                         "counter": f"#{self.message_counter}",
                     }
                     if isinstance(content_text, str) and content_text.strip():
-                        if "\n" in content_text:
-                            return json.dumps(header, ensure_ascii=False) + "\ncontent:\n" + content_text
-                        header["content"] = content_text
-                    return json.dumps(header, ensure_ascii=False)
+                        return self._format_json_header(header) + "\ncontent:\n" + self._style_assistant(content_text)
+                    return self._format_json_header(header)
 
                 # thinking_end: show the final thinking summary
                 if ame_type == "thinking_end":
@@ -1032,8 +1488,8 @@ Model shorthands:
                         "counter": f"#{self.message_counter}",
                     }
                     if isinstance(thinking_text, str) and thinking_text.strip():
-                        header["thinking"] = thinking_text
-                    return json.dumps(header, ensure_ascii=False)
+                        return self._format_json_header(header) + "\nthinking:\n" + self._style_thinking(thinking_text)
+                    return self._format_json_header(header)
 
                 # toolcall_end: buffer for grouping with tool_execution_end
                 if ame_type == "toolcall_end":
@@ -1074,7 +1530,8 @@ Model shorthands:
             tool_results = parsed.get("toolResults")
             if isinstance(tool_results, list):
                 header["tool_results_count"] = len(tool_results)
-            return json.dumps(header, ensure_ascii=False)
+            self._add_visible_turn_cost(header, parsed)
+            return self._format_json_header(header)
 
         # --- message_start: minimal header (no counter — only *_end events get counters) ---
         if event_type == "message_start":
@@ -1109,6 +1566,7 @@ Model shorthands:
         if event_type == "tool_execution_end":
             self._in_tool_execution = False
             tool_call_id = parsed.get("toolCallId")
+            self._cancel_tool_running(tool_call_id)
 
             pending_tool = self._pending_tool_calls.pop(tool_call_id, None) if tool_call_id else None
             pending_exec = self._pending_exec_starts.pop(tool_call_id, None) if tool_call_id else None
@@ -1466,6 +1924,50 @@ Model shorthands:
         self._pending_tool_calls[tc_id] = pending
         return True
 
+    def _schedule_tool_running(self, tool_call_id: str, pending: dict) -> None:
+        """Show a pending tool only when it remains active for 500 ms."""
+        if not tool_call_id:
+            return
+
+        def emit_running() -> None:
+            with self._tool_running_lock:
+                if self._pending_tool_running_timers.pop(tool_call_id, None) is None:
+                    return
+            header: Dict = {
+                "type": "tool",
+                "status": "running",
+                "tool": pending.get("tool", ""),
+            }
+            if "command" in pending:
+                header["command"] = pending["command"]
+            elif "args" in pending:
+                header["args"] = pending["args"]
+            print(self._format_tool_invocation_header(header), flush=True)
+
+        timer = threading.Timer(0.5, emit_running)
+        timer.daemon = True
+        with self._tool_running_lock:
+            previous = self._pending_tool_running_timers.pop(tool_call_id, None)
+            if previous:
+                previous.cancel()
+            self._pending_tool_running_timers[tool_call_id] = timer
+        timer.start()
+
+    def _cancel_tool_running(self, tool_call_id: object) -> None:
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            return
+        with self._tool_running_lock:
+            timer = self._pending_tool_running_timers.pop(tool_call_id, None)
+        if timer:
+            timer.cancel()
+
+    def _cancel_all_tool_running(self) -> None:
+        with self._tool_running_lock:
+            timers = list(self._pending_tool_running_timers.values())
+            self._pending_tool_running_timers.clear()
+        for timer in timers:
+            timer.cancel()
+
     def _buffer_exec_start(self, payload: dict) -> None:
         """Buffer tool_execution_start data for tool_execution_end fallback + timing."""
         tc_id = payload.get("toolCallId", "")
@@ -1490,9 +1992,11 @@ Model shorthands:
 
     def _build_combined_tool_event(self, pending: dict, payload: dict, now: str) -> str:
         """Build a combined 'tool' event from buffered toolcall_end + tool_execution_end."""
+        self._cancel_tool_running(payload.get("toolCallId"))
         self.message_counter += 1
         header: Dict = {
             "type": "tool",
+            "status": "done",
             "datetime": now,
             "counter": f"#{self.message_counter}",
             "tool": pending.get("tool", payload.get("toolName", "")),
@@ -1531,14 +2035,7 @@ Model shorthands:
             result_text = self._strip_ansi_sequences(json.dumps(result_val, ensure_ascii=False))
 
         if result_text:
-            colorize_error = self._color_enabled() and bool(is_error)
-            if "\n" in result_text or colorize_error:
-                label = "result:"
-                colored_text = self._colorize_result(result_text, is_error=bool(is_error))
-                if colorize_error:
-                    label = self._colorize_result(label, is_error=True)
-                return self._format_tool_invocation_header(header) + "\n" + label + "\n" + colored_text
-            header["result"] = result_text
+            return self._format_tool_result_block(header, result_text, is_error=bool(is_error))
 
         return self._format_tool_invocation_header(header)
 
@@ -1588,8 +2085,9 @@ Model shorthands:
                 tool_results = payload.get("toolResults")
                 if isinstance(tool_results, list):
                     header["tool_results_count"] = len(tool_results)
+                self._add_visible_turn_cost(header, payload)
                 # Skip message text - already displayed by text_end/thinking_end/toolcall_end
-                return json.dumps(header, ensure_ascii=False)
+                return self._format_json_header(header)
 
             # --- Message events (assistant streaming) ---
             if event_type == "message_start":
@@ -1636,8 +2134,8 @@ Model shorthands:
                     header["event"] = ame_type
                     thinking_text = ame.get("thinking", "") or ame.get("content", "") or ame.get("text", "")
                     if isinstance(thinking_text, str) and thinking_text.strip():
-                        header["thinking"] = thinking_text
-                    return json.dumps(header, ensure_ascii=False)
+                        return self._format_json_header(header) + "\nthinking:\n" + self._style_thinking(thinking_text)
+                    return self._format_json_header(header)
 
                 # Any other *_end subtypes (e.g. text_end) get counter
                 if isinstance(ame, dict) and ame_type and ame_type.endswith("_end"):
@@ -1656,11 +2154,9 @@ Model shorthands:
                         if not text:
                             text = delta_text
 
-                if text and "\n" in text:
-                    return json.dumps(header, ensure_ascii=False) + "\ncontent:\n" + text
-                elif text:
-                    header["content"] = text
-                return json.dumps(header, ensure_ascii=False)
+                if text:
+                    return self._format_json_header(header) + "\ncontent:\n" + self._style_assistant(text)
+                return self._format_json_header(header)
 
             if event_type == "message_end":
                 self.message_counter += 1
@@ -1684,6 +2180,7 @@ Model shorthands:
             if event_type == "tool_execution_end":
                 self._in_tool_execution = False
                 tool_call_id = payload.get("toolCallId")
+                self._cancel_tool_running(tool_call_id)
 
                 pending_tool = self._pending_tool_calls.pop(tool_call_id, None) if tool_call_id else None
                 pending_exec = self._pending_exec_starts.pop(tool_call_id, None) if tool_call_id else None
@@ -1806,17 +2303,17 @@ Model shorthands:
             ame = parsed.get("assistantMessageEvent", {})
             ame_type = ame.get("type", "") if isinstance(ame, dict) else ""
 
-            # Stream text deltas directly (no JSON, no newline)
+            # Stream text deltas directly (no JSON, no newline).
             if ame_type == "text_delta":
                 delta = ame.get("delta", "")
                 if isinstance(delta, str) and delta:
-                    return delta  # raw text, no newline
+                    return self._style_assistant(delta)
                 return ""
 
             if ame_type == "thinking_delta":
                 delta = ame.get("delta", "")
                 if isinstance(delta, str) and delta:
-                    return delta
+                    return self._style_thinking(delta)
                 return ""
 
             # Section start markers (no counter — only *_end events get counters)
@@ -1873,6 +2370,7 @@ Model shorthands:
         if event_type == "tool_execution_end":
             self._in_tool_execution = False
             tool_call_id = parsed.get("toolCallId")
+            self._cancel_tool_running(tool_call_id)
 
             pending_tool = self._pending_tool_calls.pop(tool_call_id, None) if tool_call_id else None
             pending_exec = self._pending_exec_starts.pop(tool_call_id, None) if tool_call_id else None
@@ -1959,7 +2457,8 @@ Model shorthands:
             tool_results = parsed.get("toolResults")
             if isinstance(tool_results, list):
                 header["tool_results_count"] = len(tool_results)
-            return json.dumps(header, ensure_ascii=False) + "\n"
+            self._add_visible_turn_cost(header, parsed)
+            return self._format_json_header(header) + "\n"
 
         # turn_start: suppress (no user-visible value)
         if event_type == "turn_start":
@@ -3203,6 +3702,7 @@ export default function (pi: ExtensionAPI) {
                 pass
         hide_types = self._build_hide_types()
         self._buffered_tool_stdout_lines.clear()
+        self._cancel_all_tool_running()
         self._reset_run_cost_tracking()
         cancel_delayed_toolcalls = lambda: None
         stderr_error_messages: List[str] = []
@@ -3261,6 +3761,8 @@ export default function (pi: ExtensionAPI) {
             and stdout_has_tty
             and (stdin_has_tty or live_tty_stdin is not None)
         )
+        semantic_mode = pretty and not live_mode_requested
+        self._ordered_output = OrderedOutputCoordinator(sys.stdout) if semantic_mode else None
 
         try:
             if is_live_tty_passthrough:
@@ -3438,11 +3940,15 @@ export default function (pi: ExtensionAPI) {
                     return self._format_event_pretty(parsed_event)
 
                 def _emit_stdout(formatted: str, raw: bool = False) -> None:
+                    if semantic_mode and self._ordered_output is not None:
+                        self._ordered_output.emit(formatted)
+                        return
+                    styled = self._highlight_formatted_header(formatted) if pretty else formatted
                     if raw:
-                        sys.stdout.write(formatted)
+                        sys.stdout.write(styled)
                         sys.stdout.flush()
                         return
-                    print(formatted, flush=True)
+                    print(styled, flush=True)
 
                 def _schedule_delayed_toolcall(parsed_event: dict, tool_name: str, mode: str) -> None:
                     nonlocal delayed_toolcall_seq
@@ -3609,6 +4115,21 @@ export default function (pi: ExtensionAPI) {
                     if event_type in hide_types and self.prettifier_mode != self.PRETTIFIER_LIVE:
                         return
 
+                    if semantic_mode:
+                        formatted = self._format_semantic_event(parsed_event)
+                        if formatted:
+                            _emit_stdout(formatted)
+                        return
+
+                    # Schedule visible progress only in the active stream loop; the
+                    # pure formatter helpers remain deterministic for tests/reuse.
+                    if pretty and event_type == "tool_execution_start":
+                        self._buffer_exec_start(parsed_event)
+                        tool_call_id = parsed_event.get("toolCallId")
+                        pending_start = self._pending_exec_starts.get(tool_call_id) if isinstance(tool_call_id, str) else None
+                        if isinstance(tool_call_id, str) and isinstance(pending_start, dict):
+                            self._schedule_tool_running(tool_call_id, pending_start)
+
                     # Fallback toolcall_end events (without toolCallId) are delayed so
                     # short tool executions only show the final combined tool event.
                     if pretty:
@@ -3628,8 +4149,7 @@ export default function (pi: ExtensionAPI) {
                         if formatted_live is not None:
                             if formatted_live == "":
                                 return
-                            sys.stdout.write(formatted_live)
-                            sys.stdout.flush()
+                            _emit_stdout(formatted_live, raw=True)
                         else:
                             # Fallback: print raw JSON for unhandled event types
                             print(json.dumps(parsed_event, ensure_ascii=False), flush=True)
@@ -3659,7 +4179,7 @@ export default function (pi: ExtensionAPI) {
                         else:
                             formatted = self._format_event_pretty(parsed_event)
                         if formatted is not None:
-                            print(formatted, flush=True)
+                            _emit_stdout(formatted)
                     else:
                         if raw_json_line is not None:
                             print(raw_json_line, flush=True)
@@ -3684,9 +4204,12 @@ export default function (pi: ExtensionAPI) {
                         else:
                             event_payload["result"] = buffered_text
                     else:
-                        # Keep complex result structures untouched; print trailing raw lines
-                        # before the next structured event for stable transcript ordering.
-                        print(buffered_text, flush=True)
+                        # Keep complex result structures untouched; serialize trailing raw
+                        # lines through the same coordinator as semantic lifecycle blocks.
+                        if semantic_mode and self._ordered_output is not None:
+                            self._ordered_output.emit(buffered_text)
+                        else:
+                            print(buffered_text, flush=True)
 
                     self._buffered_tool_stdout_lines.clear()
 
@@ -3699,7 +4222,11 @@ export default function (pi: ExtensionAPI) {
 
                     if pending_turn_end_after_tool is not None:
                         if self._buffered_tool_stdout_lines:
-                            print("\n".join(self._buffered_tool_stdout_lines), flush=True)
+                            buffered = "\n".join(self._buffered_tool_stdout_lines)
+                            if semantic_mode and self._ordered_output is not None:
+                                self._ordered_output.emit(buffered)
+                            else:
+                                print(buffered, flush=True)
                             self._buffered_tool_stdout_lines.clear()
                         _emit_parsed_event(pending_turn_end_after_tool)
                         pending_turn_end_after_tool = None
@@ -3724,7 +4251,10 @@ export default function (pi: ExtensionAPI) {
                             ):
                                 self._buffered_tool_stdout_lines.append(self._strip_ansi_sequences(line))
                                 continue
-                            print(line, flush=True)
+                            if semantic_mode and self._ordered_output is not None:
+                                self._ordered_output.emit(self._strip_ansi_sequences(line))
+                            else:
+                                print(line, flush=True)
                             continue
 
                         event_type = parsed.get("type", "")
@@ -3763,7 +4293,11 @@ export default function (pi: ExtensionAPI) {
                     ):
                         _flush_pending_tool_events()
                     elif self._buffered_tool_stdout_lines:
-                        print("\n".join(self._buffered_tool_stdout_lines), flush=True)
+                        buffered = "\n".join(self._buffered_tool_stdout_lines)
+                        if semantic_mode and self._ordered_output is not None:
+                            self._ordered_output.emit(buffered)
+                        else:
+                            print(buffered, flush=True)
                         self._buffered_tool_stdout_lines.clear()
 
                 except ValueError:
@@ -3773,6 +4307,10 @@ export default function (pi: ExtensionAPI) {
             # Signal watchdog that output loop is done
             output_done.set()
             cancel_delayed_toolcalls()
+            self._cancel_all_tool_running()
+            if self._ordered_output is not None:
+                self._ordered_output.close()
+                self._ordered_output = None
 
             # Wait for process cleanup
             try:
@@ -3811,6 +4349,7 @@ export default function (pi: ExtensionAPI) {
         except KeyboardInterrupt:
             print("\nInterrupted by user", file=sys.stderr)
             cancel_delayed_toolcalls()
+            self._cancel_all_tool_running()
             try:
                 if process is not None:
                     process.terminate()
@@ -3821,24 +4360,35 @@ export default function (pi: ExtensionAPI) {
                         process.wait(timeout=5)
             except Exception:
                 pass
+            if self._ordered_output is not None:
+                self._ordered_output.close()
+                self._ordered_output = None
             self._write_capture_file(capture_path)
             return 130
 
         except Exception as e:
             print(f"Error executing pi: {e}", file=sys.stderr)
             cancel_delayed_toolcalls()
+            self._cancel_all_tool_running()
             try:
                 if process is not None and process.poll() is None:
                     process.terminate()
                     process.wait(timeout=5)
             except Exception:
                 pass
+            if self._ordered_output is not None:
+                self._ordered_output.close()
+                self._ordered_output = None
             self._write_capture_file(capture_path)
             return 1
 
     def run(self) -> int:
         """Main execution flow."""
         args = self.parse_arguments()
+        headless_ui_error = self._configure_headless_ui()
+        if headless_ui_error:
+            print(f"Error: {headless_ui_error}", file=sys.stderr)
+            return 1
 
         # Prompt handling
         prompt_value = args.prompt or os.environ.get("JUNO_INSTRUCTION")

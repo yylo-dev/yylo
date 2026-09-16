@@ -1,285 +1,119 @@
 import { Command } from 'commander';
-import { execFileSync } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import fs from 'fs-extra';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  MAX_MERGE_RESULT_LINE_CHARS,
-  checkpointMergeQueueAfterFinalization,
-  configureMergeQueueCommand,
-  invokeMergeQueueAtController,
+  configureMergeCommand,
+  invokeMergeAtController,
+  mergeControlOperation,
 } from '../commands/merge.js';
 
 const temporaryRoots: string[] = [];
-
-function git(root: string, ...args: string[]): string {
-  return execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' }).trim();
-}
-
-async function controllerFixture(): Promise<string> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'merge-checkpoint-'));
-  temporaryRoots.push(root);
-  git(root, 'init', '-b', 'controller');
-  git(root, 'config', 'user.email', 'fixture@example.invalid');
-  git(root, 'config', 'user.name', 'Fixture');
-  await fs.ensureDir(path.join(root, '.juno_task', 'scripts'));
-  for (const relative of ['tasks/T123.md', 'ledger/events.jsonl', 'state/tasks.json']) {
-    await fs.outputFile(path.join(root, '.juno_task', relative), 'initial\n');
-  }
-  await fs.writeJson(path.join(root, '.juno_task', 'config.json'), {
-    gitCheckpoint: { include: ['.juno_task/tasks', '.juno_task/ledger', '.juno_task/state'] },
-  });
-  const helper = path.resolve(process.cwd(), 'src/templates/scripts/controller_checkpoint.py');
-  await fs.writeFile(path.join(root, '.juno_task', 'scripts', 'controller_checkpoint.py'), `#!/usr/bin/env python3
-import subprocess, sys
-raise SystemExit(subprocess.run([sys.executable, ${JSON.stringify(helper)}, *sys.argv[1:]]).returncode)
-`);
-  await fs.writeFile(path.join(root, 'product.txt'), 'product\n');
-  git(root, 'add', '.');
-  git(root, 'commit', '-m', 'initial controller');
-  return root;
-}
-
-const mergedResult = {
-  outcome: 'MERGED',
-  post_integration: { kanban_finalization: { status: 'complete' } },
-};
-
-async function writeMergeRuntime(root: string, body: string): Promise<void> {
-  await fs.writeFile(
-    path.join(root, '.juno_task', 'scripts', 'merge_queue.py'),
-    `#!/usr/bin/env python3\n${body}\n`,
-  );
-}
 
 afterEach(async () => {
   vi.restoreAllMocks();
   await Promise.all(temporaryRoots.splice(0).map((root) => fs.remove(root)));
 });
 
-describe('merge queue CLI', () => {
+describe('native Git merge CLI', () => {
+  it('exposes status, auto-projecting land, and explicit projection recovery', () => {
+    const program = new Command();
+    configureMergeCommand(program, async () => undefined);
+    const merge = program.commands.find((command) => command.name() === 'merge');
+    expect(merge?.commands.map((command) => command.name())).toEqual([
+      'status', 'land', 'project',
+    ]);
+    expect(merge?.description()).toContain('one task');
+    expect(merge?.commands.find((command) => command.name() === 'land')?.description())
+      .toContain('never runs tests, reviews, or models');
+    expect(merge?.description()).toContain('project lifecycle truth to Ledger');
+    expect(merge?.commands.find((command) => command.name() === 'land')?.description())
+      .toContain('project Ledger status');
+    expect(merge?.commands.find((command) => command.name() === 'project')?.description())
+      .toContain('Retry or repair');
+  });
+
+  it('routes observation separately from mutations', () => {
+    expect(mergeControlOperation('status')).toBe('kanban');
+    expect(mergeControlOperation('land')).toBe('orchestration');
+    expect(mergeControlOperation('project')).toBe('orchestration');
+  });
+
   it.each([
     { argv: ['status'], expected: ['status'] },
-    { argv: ['next'], expected: ['next'] },
-    { argv: ['next', 'T123'], expected: ['next', 'T123'] },
-    { argv: ['resolve', 'T123'], expected: ['resolve', 'T123'] },
-    { argv: ['review', 'T123'], expected: ['review', 'T123'] },
-    { argv: ['reopen', 'T123'], expected: ['reopen', 'T123'] },
-    { argv: ['withdraw', 'T123'], expected: ['withdraw', 'T123'] },
-  ] as const)('forwards merge $argv', async ({ argv, expected }) => {
+    { argv: ['status', 'T123'], expected: ['status', 'T123'] },
+    { argv: ['land', 'T123'], expected: ['land', 'T123', []] },
+    { argv: ['project', 'T123'], expected: ['project', 'T123'] },
+  ] as const)('forwards $argv', async ({ argv, expected }) => {
     const invoke = vi.fn(async () => undefined);
-    const program = new Command().exitOverride().configureOutput({ writeOut: () => undefined });
-    configureMergeQueueCommand(program, invoke);
+    const program = new Command().exitOverride();
+    configureMergeCommand(program, invoke);
     await program.parseAsync(['node', 'yy', 'merge', ...argv]);
-    expect(invoke).toHaveBeenCalledOnce();
     expect(invoke).toHaveBeenCalledWith(...expected);
   });
 
-  it('forwards merge drive with an optional frozen FIFO stop boundary', async () => {
+  it('binds a resolved candidate to its exact observed target', async () => {
     const invoke = vi.fn(async () => undefined);
     const program = new Command().exitOverride();
-    configureMergeQueueCommand(program, invoke);
-    await program.parseAsync(['node', 'yy', 'merge', 'drive', '--through', 'T123']);
-    expect(invoke).toHaveBeenCalledWith('drive', undefined, ['--through', 'T123']);
+    configureMergeCommand(program, invoke);
+    await program.parseAsync(['node', 'yy', 'merge', 'land', 'T123',
+      '--candidate', 'a'.repeat(40), '--expected-target', 'b'.repeat(40)]);
+    expect(invoke).toHaveBeenCalledWith('land', 'T123', [
+      '--candidate', 'a'.repeat(40), '--expected-target', 'b'.repeat(40),
+    ]);
   });
 
-  it('forwards target arbiter observation and bounded on-demand runs', async () => {
-    const invoke = vi.fn(async () => undefined);
+  it('refuses a partially specified resolved candidate', async () => {
     const program = new Command().exitOverride();
-    configureMergeQueueCommand(program, invoke);
-    await program.parseAsync(['node', 'yy', 'merge', 'arbiter', 'status']);
-    expect(invoke).toHaveBeenCalledWith('arbiter-status');
-    invoke.mockClear();
-    await program.parseAsync(['node', 'yy', 'merge', 'arbiter', 'run', '--through', 'T123']);
-    expect(invoke).toHaveBeenCalledWith('arbiter-run', undefined, ['--through', 'T123']);
+    configureMergeCommand(program, async () => undefined);
+    await expect(program.parseAsync(['node', 'yy', 'merge', 'land', 'T123',
+      '--candidate', 'a'.repeat(40)])).rejects.toThrow(
+      '--candidate and --expected-target must be supplied together',
+    );
   });
 
-  it('forwards stable plan projection and stale-plan execution options', async () => {
-    const invoke = vi.fn(async () => undefined);
-    const program = new Command().exitOverride();
-    configureMergeQueueCommand(program, invoke);
-    await program.parseAsync(['node', 'yy', 'merge', 'plan', 'T123', '--against', 'HEAD', '--json']);
-    expect(invoke).toHaveBeenCalledWith('plan', 'T123', ['--against', 'HEAD', '--json']);
-    invoke.mockClear();
-    await program.parseAsync(['node', 'yy', 'merge', 'resolve', 'T123', '--plan-id', 'abc',
-      '--train-plan', '/train-plan.json']);
-    expect(invoke).toHaveBeenCalledWith('resolve', 'T123', ['--plan-id', 'abc',
-      '--train-plan', '/train-plan.json']);
-    invoke.mockClear();
-    await program.parseAsync(['node', 'yy', 'merge', 'next', '--train-plan', '/train-plan.json']);
-    expect(invoke).toHaveBeenCalledWith('next', undefined, ['--train-plan', '/train-plan.json']);
-    invoke.mockClear();
-    await program.parseAsync(['node', 'yy', 'merge', 'reconcile', 'plan', 'T123']);
-    expect(invoke).toHaveBeenCalledWith('reconcile', undefined, ['plan', 'T123']);
-    invoke.mockClear();
-    await program.parseAsync(['node', 'yy', 'merge', 'reconcile', 'apply', 'T123',
-      '--receipt', '/reconcile.json', '--receipt-sha256', 'def']);
-    expect(invoke).toHaveBeenCalledWith('reconcile', undefined,
-      ['apply', 'T123', '--receipt', '/reconcile.json', '--receipt-sha256', 'def']);
-    invoke.mockClear();
-    await program.parseAsync(['node', 'yy', 'merge', 'refresh', 'plan', 'T123']);
-    expect(invoke).toHaveBeenCalledWith('refresh', undefined, ['plan', 'T123']);
-    invoke.mockClear();
-    await program.parseAsync(['node', 'yy', 'merge', 'refresh', 'apply', 'T123',
-      '--receipt', '/receipt.json', '--receipt-sha256', 'abc']);
-    expect(invoke).toHaveBeenCalledWith('refresh', undefined,
-      ['apply', 'T123', '--receipt', '/receipt.json', '--receipt-sha256', 'abc']);
-  });
-
-  it('keeps next TASK_ID optional and requires it for plan, resolve, review, and reopen', () => {
-    const program = new Command();
-    configureMergeQueueCommand(program, async () => undefined);
-    const merge = program.commands.find((command) => command.name() === 'merge');
-    expect(merge?.commands.map((command) => command.name())).toEqual(['status', 'drive', 'arbiter', 'plan', 'next', 'resolve', 'review', 'reopen', 'withdraw', 'reconcile', 'refresh']);
-    expect(merge?.commands[0]?.registeredArguments).toHaveLength(0);
-    expect(merge?.commands[1]?.registeredArguments).toHaveLength(0);
-    expect(merge?.commands[3]?.registeredArguments[0]?.required).toBe(true);
-    expect(merge?.commands[4]?.registeredArguments[0]?.required).toBe(false);
-    expect(merge?.commands[5]?.registeredArguments[0]?.required).toBe(true);
-    expect(merge?.commands[6]?.registeredArguments[0]?.required).toBe(true);
-    expect(merge?.commands[7]?.registeredArguments[0]?.required).toBe(true);
-    expect(merge?.commands[7]?.registeredArguments[0]?.required).toBe(true);
-  });
-
-  it('forwards the bounded withdraw operator reason', async () => {
-    const reasonInvoke = vi.fn(async () => undefined);
-    const reasonProgram = new Command().exitOverride().configureOutput({ writeOut: () => undefined });
-    configureMergeQueueCommand(reasonProgram, reasonInvoke);
-    await reasonProgram.parseAsync(['node', 'yy', 'merge', 'withdraw', 'T123',
-      '--reason', 'orphaned claim recovery']);
-    expect(reasonInvoke).toHaveBeenCalledWith('withdraw', 'T123',
-      ['--reason', 'orphaned claim recovery']);
-    const plainInvoke = vi.fn(async () => undefined);
-    const plainProgram = new Command().exitOverride().configureOutput({ writeOut: () => undefined });
-    configureMergeQueueCommand(plainProgram, plainInvoke);
-    await plainProgram.parseAsync(['node', 'yy', 'merge', 'withdraw', 'T123']);
-    expect(plainInvoke).toHaveBeenCalledWith('withdraw', 'T123');
-  });
-
-  it('documents observation, fenced ownership, and explicit recovery semantics', () => {
-    const program = new Command();
-    configureMergeQueueCommand(program, async () => undefined);
-    const merge = program.commands.find((command) => command.name() === 'merge');
-    const command = (name: string) => merge?.commands.find((entry) => entry.name() === name);
-    const arbiter = command('arbiter');
-    const arbiterCommand = (name: string) => arbiter?.commands.find((entry) => entry.name() === name);
-    expect(command('status')?.description()).toContain('Read-only');
-    expect(arbiterCommand('status')?.description()).toContain('Read-only');
-    expect(arbiterCommand('run')?.description()).toContain('Explicit mutation');
-    expect(command('next')?.description()).toContain('Explicit recovery mutation');
-    expect(command('next')?.description()).toContain('continue paused evidence');
-    expect(command('next')?.registeredArguments[0]?.description).toContain('evidence/review');
-    expect(command('resolve')?.description()).toContain('Explicit recovery mutation');
-  });
-
-  it('checkpoints only after successful terminal merge and Kanban finalization truth', async () => {
-    const checkpoint = vi.fn(async () => ({ attempted: true, ok: true }));
-    for (const operation of ['next', 'resolve'] as const) {
-      checkpoint.mockClear();
-      await checkpointMergeQueueAfterFinalization(operation, '/controller', 0, mergedResult, checkpoint);
-      expect(checkpoint).toHaveBeenCalledWith('/controller', 0);
-    }
-
-    for (const [operation, exitCode, result] of [
-      ['status', 0, mergedResult],
-      ['review', 0, mergedResult],
-      ['reopen', 0, mergedResult],
-      ['next', 2, mergedResult],
-      ['next', 0, { outcome: 'RISK_EVIDENCE_READY' }],
-      ['resolve', 0, { outcome: 'AWAITING_RISK' }],
-      ['next', 0, { outcome: 'MERGED', post_integration: { kanban_finalization: { status: 'failed' } } }],
-    ] as const) {
-      checkpoint.mockClear();
-      await checkpointMergeQueueAfterFinalization(operation, '/controller', exitCode, result, checkpoint);
-      expect(checkpoint).not.toHaveBeenCalled();
-    }
-  });
-
-  it('extracts noisy terminal JSON at invocation level while streaming stdout', async () => {
-    const root = await controllerFixture();
-    await writeMergeRuntime(root, [
-      'import json',
-      'print("managed runtime refresh: completed")',
-      `print(json.dumps(${JSON.stringify(mergedResult)}))`,
+  it('invokes the controller adapter without parsing or coupling projection output', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'native-merge-cli-'));
+    temporaryRoots.push(root);
+    await fs.ensureDir(path.join(root, '.juno_task/scripts'));
+    await fs.writeFile(path.join(root, '.juno_task/scripts/merge_queue.py'), [
+      '#!/usr/bin/env python3',
+      'import json, sys',
+      'print(json.dumps({"operation": sys.argv[1], "task": sys.argv[2]}))',
     ].join('\n'));
-    const checkpoint = vi.fn(async () => ({ attempted: true, ok: true }));
-    const streamed = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const output: string[] = [];
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      output.push(String(chunk));
+      return true;
+    });
 
-    await invokeMergeQueueAtController('next', root, { ...process.env }, undefined, checkpoint);
+    await invokeMergeAtController('land', root, { ...process.env }, 'T123');
 
-    expect(checkpoint).toHaveBeenCalledWith(root, 0);
-    expect(streamed.mock.calls.flatMap((row) => row).join('')).toContain('managed runtime refresh: completed');
+    expect(process.exitCode ?? 0).toBe(0);
+    expect(write).not.toHaveBeenCalled(); // Child inherits stdout directly.
+    expect(output).toEqual([]);
   });
 
-  it.each([
-    ['malformed terminal line', `print(${JSON.stringify(JSON.stringify(mergedResult))})\nprint("{not-json")`],
-    ['oversized terminal line', `print(${JSON.stringify(JSON.stringify(mergedResult))})\nprint("x" * ${MAX_MERGE_RESULT_LINE_CHARS + 1})`],
-    ['no terminal JSON', 'print("progress only")'],
-  ])('does not infer terminal merge success from %s', async (_name, body) => {
-    const root = await controllerFixture();
-    await writeMergeRuntime(root, body);
-    const checkpoint = vi.fn(async () => ({ attempted: true, ok: true }));
-    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-
-    await invokeMergeQueueAtController('next', root, { ...process.env }, undefined, checkpoint);
-
-    expect(checkpoint).not.toHaveBeenCalled();
+  it('keeps packaged runtime under the frozen 800-line production budget', async () => {
+    const repository = path.resolve(import.meta.dirname, '../../../..');
+    const runtime = await fs.readFile(
+      path.join(repository, 'juno-code/src/templates/scripts/merge_queue.py'), 'utf8',
+    );
+    const cli = await fs.readFile(
+      path.join(repository, 'juno-code/src/cli/commands/merge.ts'), 'utf8',
+    );
+    const integration = await fs.readFile(
+      path.join(repository, 'juno-code/src/templates/scripts/integration_workspace.py'), 'utf8',
+    );
+    expect(runtime.split('\n').length - 1 + cli.split('\n').length - 1 + 18)
+      .toBeLessThanOrEqual(800);
+    expect(integration).toContain('def integration_target_lock(');
+    expect(integration).not.toContain('import merge_queue');
+    expect(runtime).not.toContain('managed_agent_runner');
+    expect(runtime).not.toContain('risk_policy');
+    expect(runtime).not.toContain('arbiter');
+    expect(runtime).not.toContain('FIFO');
+    expect(runtime).toContain('update-ref');
   });
-
-  it('cleans real-Git Kanban finalization dirt and retries as an idempotent no-op', async () => {
-    const root = await controllerFixture();
-    for (const relative of ['tasks/T123.md', 'ledger/events.jsonl', 'state/tasks.json']) {
-      await fs.writeFile(path.join(root, '.juno_task', relative), 'durable merged truth\n');
-    }
-    expect(git(root, 'status', '--porcelain')).not.toBe('');
-    const previousTaskRoot = process.env.JUNO_TASK_ROOT;
-    const previousCheckpointActive = process.env.JUNO_CONTROLLER_CHECKPOINT_ACTIVE;
-    process.env.JUNO_TASK_ROOT = '';
-    delete process.env.JUNO_CONTROLLER_CHECKPOINT_ACTIVE;
-    try {
-      await checkpointMergeQueueAfterFinalization('next', root, 0, mergedResult);
-      expect(git(root, 'status', '--porcelain')).toBe('');
-      expect(git(root, 'show', '--name-only', '--format=', 'HEAD').split('\n').sort()).toEqual([
-        '.juno_task/ledger/events.jsonl',
-        '.juno_task/state/tasks.json',
-        '.juno_task/tasks/T123.md',
-      ]);
-      expect(git(root, 'show', 'HEAD:product.txt')).toBe('product');
-      const checkpointHead = git(root, 'rev-parse', 'HEAD');
-      await checkpointMergeQueueAfterFinalization('next', root, 0, mergedResult);
-      expect(git(root, 'rev-parse', 'HEAD')).toBe(checkpointHead);
-    } finally {
-      if (previousTaskRoot === undefined) delete process.env.JUNO_TASK_ROOT;
-      else process.env.JUNO_TASK_ROOT = previousTaskRoot;
-      if (previousCheckpointActive === undefined) delete process.env.JUNO_CONTROLLER_CHECKPOINT_ACTIVE;
-      else process.env.JUNO_CONTROLLER_CHECKPOINT_ACTIVE = previousCheckpointActive;
-    }
-  }, 30_000);
-
-  it('preserves a merged result and emits recovery when the real checkpointer fails', async () => {
-    const root = await controllerFixture();
-    await fs.writeFile(path.join(root, '.juno_task', 'tasks', 'T123.md'), 'durable merged truth\n');
-    await fs.writeFile(path.join(root, '.juno_task', 'scripts', 'controller_checkpoint.py'), '#!/usr/bin/env python3\nraise SystemExit(2)\n');
-    const before = git(root, 'rev-parse', 'HEAD');
-    const warning = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const previousTaskRoot = process.env.JUNO_TASK_ROOT;
-    const previousCheckpointActive = process.env.JUNO_CONTROLLER_CHECKPOINT_ACTIVE;
-    process.env.JUNO_TASK_ROOT = '';
-    delete process.env.JUNO_CONTROLLER_CHECKPOINT_ACTIVE;
-    try {
-      await expect(checkpointMergeQueueAfterFinalization('next', root, 0, mergedResult)).resolves.toBeUndefined();
-    } finally {
-      if (previousTaskRoot === undefined) delete process.env.JUNO_TASK_ROOT;
-      else process.env.JUNO_TASK_ROOT = previousTaskRoot;
-      if (previousCheckpointActive === undefined) delete process.env.JUNO_CONTROLLER_CHECKPOINT_ACTIVE;
-      else process.env.JUNO_CONTROLLER_CHECKPOINT_ACTIVE = previousCheckpointActive;
-    }
-    expect(git(root, 'rev-parse', 'HEAD')).toBe(before);
-    expect(git(root, 'status', '--porcelain')).toContain('.juno_task/tasks/T123.md');
-    expect(warning).toHaveBeenCalledWith(expect.stringContaining('WARNING: Controller checkpoint failed after finalization'));
-    expect(warning).toHaveBeenCalledWith(expect.stringContaining('blocker=unknown'));
-    expect(warning).toHaveBeenCalledWith(expect.stringContaining('yy doctor workspace'));
-    expect(warning).not.toHaveBeenCalledWith(expect.stringContaining('commit manually'));
-  }, 30_000);
 });

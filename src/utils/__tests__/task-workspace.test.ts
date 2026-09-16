@@ -43,12 +43,12 @@ describe('Bolt task workspace managed runtime', () => {
         'integration-workspace', 'script-installer', 'root-scripts-telemetry',
       ]);
       const [pure, adapter, integration, installer, telemetry] = policy.focused_validation;
-      expect(adapter?.resource).toEqual(installer?.resource);
-      expect(adapter?.resource).toMatchObject({
+      expect(adapter?.resource).toBeUndefined();
+      expect(installer?.resource).toMatchObject({
         id: 'yylo-real-git-managed-install',
         lock_path: '/tmp/yylo-focused-real-git-managed-install.lock',
       });
-      expect(adapter!.resource!.wait_timeout_seconds).toBe(1200);
+      expect(installer!.resource!.wait_timeout_seconds).toBe(1200);
       expect(pure?.resource).toBeUndefined();
       expect(integration?.resource).toBeUndefined();
       expect(telemetry?.resource).toBeUndefined();
@@ -59,7 +59,30 @@ describe('Bolt task workspace managed runtime', () => {
       );
       expect(installer?.argv).toContain('src/utils/__tests__/script-installer.test.ts');
       expect(integration?.argv).toContain('src/utils/__tests__/integration-workspace.test.ts');
+      expect(installer?.argv).toContain('--no-cache');
+      expect(integration?.argv).toContain('--no-cache');
     }
+  });
+
+  it('admits the bootstrapped yylo-skills gitlink as a selectable exact root', () => {
+    for (const policyPath of [
+      resolve(repository, '.juno_task/config/task-workspace.json'),
+      resolve(repository, 'juno-code/src/templates/config/task-workspace.json'),
+    ]) {
+      const policy = JSON.parse(readFileSync(policyPath, 'utf8')) as {
+        allowed_paths: string[];
+        selectable_paths: string[];
+      };
+      expect(policy.allowed_paths).not.toContain('yylo-skills');
+      expect(policy.selectable_paths).toEqual(['frontend', 'juno_kanban', 'yylo-skills']);
+    }
+
+    const runtime = readFileSync(
+      resolve(repository, 'juno-code/src/templates/scripts/task_workspace.py'),
+      'utf8',
+    );
+    expect(runtime).toContain('initialize_selected_gitlinks(worktree, selected_entries)');
+    expect(runtime).toContain('selected gitlink was not initialized at the target object');
   });
 
   it('routes benchmark changes through test, typecheck, and build', () => {
@@ -125,12 +148,10 @@ describe('Bolt task workspace managed runtime', () => {
       '.juno_task/scripts/install_requirements.sh',
       '.juno_task/scripts/invocation_correlation.py',
       '.juno_task/scripts/release_gate.py',
-      '.juno_task/scripts/release_train.py',
       '.juno_task/scripts/target_runtime_provenance.py',
       '.juno_task/scripts/task_workflow_helper.py',
       '.juno_task/scripts/task_workspace_decisions.py',
       '.juno_task/scripts/tests/test_task_workspace_decisions.py',
-      '.juno_task/scripts/tests/test_release_train.py',
       '.juno_task/scripts/tests/test_risk_policy.py',
       '.juno_task/scripts/wiki_lint.py',
       '.juno_task/scripts/worktree_hydration.py',
@@ -187,40 +208,10 @@ describe('Bolt task workspace managed runtime', () => {
       ]);
     }
 
-    const skillFiles = [
-      'kanban-workflow/SKILL.md',
-      'plan-kanban-tasks/SKILL.md',
-      'ralph-loop/SKILL.md',
-      'ralph-loop/references/first_check.md',
-      'understand-project/SKILL.md',
-    ];
-    const skillOutputs = [
-      ...skillFiles.map((file) => ({
-        source: `skills/codex/${file}`,
-        destination: `.agents/skills/${file}`,
-      })),
-      {
-        source: 'scripts/kanban.sh',
-        destination: '.agents/skills/ralph-loop/scripts/kanban.sh',
-      },
-      ...skillFiles.map((file) => ({
-        source: `skills/claude/${file}`,
-        destination: `.claude/skills/${file}`,
-      })),
-      {
-        source: 'scripts/kanban.sh',
-        destination: '.claude/skills/ralph-loop/scripts/kanban.sh',
-      },
-      ...skillFiles.map((file) => ({
-        source: `skills/pi/${file}`,
-        destination: `.pi/skills/${file}`,
-      })),
-      {
-        source: 'extensions/pi/juno-skill-preprocessor.ts',
-        destination: '.pi/extensions/juno-skill-preprocessor.ts',
-      },
-    ];
-    const nonSkillOutputs = [
+    // Agent skills ship through explicit, versioned remote acquisition from
+    // yylo-dev/yylo-skills releases; local admission covers only controller
+    // runtime assets and the Pi skill-preprocessor extension.
+    const managedOutputs = [
       {
         source: 'scripts/controller_workspace.py',
         destination: '.juno_task/scripts/controller_workspace.py',
@@ -234,6 +225,10 @@ describe('Bolt task workspace managed runtime', () => {
         destination: '.juno_task/scripts/controller_checkpoint.py',
       },
       {
+        source: 'scripts/controller_resolver.py',
+        destination: '.juno_task/scripts/controller_resolver.py',
+      },
+      {
         source: 'scripts/juno-toolchain-policy.sh',
         destination: '.juno_task/scripts/juno-toolchain-policy.sh',
       },
@@ -241,14 +236,13 @@ describe('Bolt task workspace managed runtime', () => {
         source: 'scripts/kanban.sh',
         destination: '.juno_task/scripts/kanban.sh',
       },
+      {
+        source: 'extensions/pi/juno-skill-preprocessor.ts',
+        destination: '.pi/extensions/juno-skill-preprocessor.ts',
+      },
     ];
-    expect(managed.admissionOutputs).toEqual(
-      expect.arrayContaining([
-        ...nonSkillOutputs,
-        ...skillOutputs,
-      ]),
-    );
-    expect(managed.admissionOutputs).toHaveLength(nonSkillOutputs.length + skillOutputs.length);
+    expect(managed.admissionOutputs).toEqual(expect.arrayContaining(managedOutputs));
+    expect(managed.admissionOutputs).toHaveLength(managedOutputs.length);
     expect(policy.allowed_paths).not.toEqual(
       expect.arrayContaining(['.agents', '.claude', '.pi', '.juno_task/scripts']),
     );
@@ -284,7 +278,11 @@ describe('Bolt task workspace managed runtime', () => {
     expect(testSource).toContain('test_sparse_metadata_controller_runtime_bootstrap');
     expect(testSource).toContain('test_orphan_metadata_only_controller_runtime_bootstrap_without_sparse_checkout');
     expect(testSource).toContain('test_runtime_bootstrap_refuses_product_bearing_metadata_controller');
-    execFileSync('python3', [tests], {
+    execFileSync('python3', [tests,
+      'TaskWorkspaceTests.test_sparse_metadata_controller_runtime_bootstrap_plan_apply_and_full_task_start',
+      'TaskWorkspaceTests.test_orphan_metadata_only_controller_runtime_bootstrap_without_sparse_checkout',
+      'TaskWorkspaceTests.test_runtime_bootstrap_refuses_product_bearing_metadata_controller',
+    ], {
       cwd: repository,
       env: { ...process.env, PYTHONPYCACHEPREFIX: '/tmp/juno-task-workspace-test-pycache' },
       stdio: 'pipe',

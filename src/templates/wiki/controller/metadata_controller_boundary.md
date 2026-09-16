@@ -22,7 +22,11 @@ Migration hash-binds config, plan, prompt, environment-source, and Git identity;
 every field receives a disposition. `agentProfile.roleHooks` selects controller
 hooks only for controllers and product hooks only for task/integration roles.
 `environmentBinding` requires explicit authority plus an absolute regular 0600
-file. Product paths stay product-only and lifecycle retires; the large plan
+file. Without a binding, the controller-root `.env.yylo` loads automatically as
+an ambient source under the same regular non-symlink 0600 checks; an unsafe
+file warns once and is skipped, a missing file stays silent, and an explicit
+binding stays authoritative without an ambient double load.
+Product paths stay product-only and lifecycle retires; the large plan
 survives behind a compact landing page, and exact prepare retry is idempotent.
 
 ## Ownership
@@ -40,7 +44,7 @@ The controller is a state store, never a product source or integration participa
 
 Product source, tests, package metadata, release tooling, generated product assets, and bulky workflow attempts are absent. Only top-level spec and final-receipt files cross the migration boundary; nested workflow/lifecycle/task-set evidence, nested receipt trees, and arbitrary state files are rejected. They stay in the preserved rollback controller instead of bloating every future controller commit. Task and ledger directories remain recursive because they are canonical segmented stores. A product branch may retain minimal project lifecycle config, prompts, and install inputs, but it must not contain the controller-private roots declared by `product_forbidden`.
 
-Controller execution comes from one released `yylo` installation outside every linked or unrelated mutable Git worktree and every Git ancestor. NVM global installs beneath the `~/.nvm` checkout must use `yy migrate runtime-install-rebind` with a fresh durable non-Git prefix (for example `~/.local/share/juno/runtimes/X.Y.Z`). The command either resolves the exact registry artifact and verifies its SHA-512/SHA-1 evidence, or accepts one external regular non-symlink npm pack tarball through `--artifact` and authenticates its bounded bytes, SHA-256, `yylo` name, and exact requested version. It installs only the authenticated tarball snapshot with lifecycle scripts disabled (offline for a local artifact) and records package evidence in an immutable success or rolled-back failure receipt before transactional rebind. A missing prerelease may use this exact local-artifact channel, but is never permission to copy a mutable source package by hand. The controller is the default agent entry point: that immutable package provisions ignored local `AGENTS.md`, `CLAUDE.md`, and the core Juno skills under `.agents/skills/`, `.claude/skills/`, and `.pi/skills/`. These files guide orchestration without becoming controller history. Product- or domain-specific skills stay with product code; after `yy task start`, the agent enters the returned worktree and loads its product instructions and skills there. `.juno_task/runtime/identity.json` and installed `.juno_task/scripts/` are also ignored local state. Rebinding that installed runtime preflights controller cleanliness and receipt immutability, rolls identity/config back on any failure, and must leave controller `HEAD`, tree, index, and product refs unchanged.
+Controller execution comes from one released `yylo` installation outside every linked or unrelated mutable Git worktree and every Git ancestor. NVM global installs beneath the `~/.nvm` checkout must use `yy migrate runtime-install-rebind` with a fresh durable non-Git prefix (for example `~/.local/share/juno/runtimes/X.Y.Z`). The command either resolves the exact registry artifact and verifies its SHA-512/SHA-1 evidence, or accepts one external regular non-symlink npm pack tarball through `--artifact` and authenticates its bounded bytes, SHA-256, `yylo` name, and exact requested version. It installs only the authenticated tarball snapshot with lifecycle scripts disabled (offline for a local artifact) and records package evidence in an immutable success or rolled-back failure receipt before transactional rebind. A missing prerelease may use this exact local-artifact channel, but is never permission to copy a mutable source package by hand. When an admitted Juno source target changes package templates and managed runtime without changing semver, use only the complete `yy integration runtime-adopt-source --previous-sha FULL_SHA --target-sha FULL_SHA --install-prefix FRESH_NON_GIT_PATH --output NEW_EXTERNAL_RECEIPT` transaction printed by task-start refusal. It checks a clean fixed target and registered integration owner, safely advances a clean stale detached owner to that exact local target under the target lock, packs and authenticates the exact source artifact without publication, installs outside Git, rebinds the clean controller and atomically selects the receipt-bound public `yy`/`yylo` launcher, refreshes the exact target transition, runs runtime-doctor, executes a fresh `yy merge --help` selection check, and verifies task-start runtime admission. Its receipt distinguishes generations by target SHA and artifact SHA-256, preserves prior executable/config/generation/launcher identity, rolls back only transaction-owned resources on interruption or refresh failure, and returns verified idempotent results for exact completed replay. Conflicting replay, dirty or divergent owners/controllers, changed artifacts, reused outputs or prefixes, customized overlap, and stale receipts fail closed before mutation. `runtime-install-rebind`, `runtime-refresh`, and `scripts update` are deliberately insufficient partial substitutes. The controller is the default agent entry point: that immutable package provisions ignored local `AGENTS.md`, `CLAUDE.md`, and the core Juno skills under `.agents/skills/`, `.claude/skills/`, and `.pi/skills/`. These files guide orchestration without becoming controller history. Product- or domain-specific skills stay with product code; after `yy task start`, the agent enters the returned worktree and loads its product instructions and skills there. `.juno_task/runtime/identity.json` and installed `.juno_task/scripts/` are also ignored local state. Rebinding that installed runtime preflights controller cleanliness and receipt immutability, rolls identity/config back on any failure, and must leave controller `HEAD`, tree, index, and product refs unchanged.
 
 ## Preservation-first migration
 
@@ -186,30 +190,27 @@ common directory and all protected worktrees.
 The controller branch remains separate because it owns Kanban state. A separate
 long-lived integration branch is not required merely to synchronize controller
 and product state. `integration-owner` is a protected clean worktree role for
-the real product target. Its checkout is detached while the merge queue owns the
-target-ref CAS window, then attached to the exact target for shared validation,
-servers, release, or deploy. A project may still choose a staging branch as an
-explicit product policy, but the controller never merges into it.
+the real product target. Keep its checkout detached while native delivery updates
+the target ref with expected-old protection; attach it to the exact target only
+for separately authorized shared validation, servers, release, or deploy. A
+project may still choose a staging branch as explicit product policy, but the
+controller never merges into it.
 
 ```text
 metadata controller branch/worktree (Kanban, ledger, decisions, receipts)
         | task start X                         | task start Y
         v                                      v
 feature/X branch + worktree              feature/Y branch + worktree
-  agent edits + focused tests              agent edits + focused tests
+  agent edits + project checks             agent edits + project checks
         | task finish                         | task finish
-        +---------------- merge queue --------+
-                              |
-                              v
-                  real product target ref (CAS guarded;
-                   integration owner detached)
-                              |
-                              v
-             attach clean integration-owner at exact target SHA
-                full suite, shared local stack, deploy manager
-                              |
-                              v
-                detach before the next queue mutation
+        v                                     v
+  immutable source X                    immutable source Y
+        | yy merge land X                     | independently selectable
+        v                                     v
+private native-Git candidate -- expected-old update --> product target ref
+        |
+        +-- automatic lifecycle projection --> Ledger
+            (`yy merge project X` retries projection)
 ```
 
 Run Kanban and task/merge orchestration from the metadata controller. Run agent
@@ -222,10 +223,11 @@ give each isolated ports and state; otherwise keep the shared stack solely in
 the integration-owner worktree.
 
 The transition is serialized: stop shared servers and require a clean checkout,
-detach the integration owner before the explicit `yy merge arbiter run` or typed
-`yy merge drive`, await its terminal receipt rather than polling, then attach the
-exact target for shared validation/deployment and detach before another mutation. Never leave the target ref attached while
-expecting queue CAS to advance it.
+detach the integration owner before the explicit `yy merge land TASK_ID`, read
+its Git-and-Ledger result, and run `yy merge project TASK_ID` only if projection
+needs recovery. Attach the exact target only for shared validation/deployment and detach before another
+mutation. Never leave the target ref attached while expecting native expected-old
+delivery to advance it.
 
 ## Refusal rules
 

@@ -11,6 +11,7 @@ import {
   MANAGED_CONTROLLER_ASSETS,
   MANAGED_PROMPT_MACROS,
   ManagedProjectAssets,
+  managedAssetRecordsIdentity,
 } from '../managed-project-assets.js';
 import { runBoundedTestProcess } from '../../test-utils/bounded-process.js';
 import { withManagedUpdateRollback } from '../managed-update-transaction.js';
@@ -46,6 +47,82 @@ describe('ManagedProjectAssets', {
     await fs.remove(projectDir);
   });
 
+  it('renders schema-valid consumer policies and keeps monorepo dogfood package-bound', async () => {
+    const remote = 'https://github.com/example/consumer.git';
+    await ManagedProjectAssets.update(projectDir, {
+      silent: true,
+      localization: { targetBranch: 'trunk', gitRemoteUrl: remote },
+    });
+
+    const taskPath = path.join(projectDir, '.juno_task/config/task-workspace.json');
+    const metadataPath = path.join(projectDir, '.juno_task/config/metadata-controller.json');
+    const hydrationPath = path.join(projectDir, '.juno_task/config/worktree-hydration.yaml');
+    const task = await fs.readJson(taskPath);
+    const metadata = await fs.readJson(metadataPath);
+    const hydration = await fs.readFile(hydrationPath, 'utf8');
+    expect(task.target_ref).toBe('refs/heads/trunk');
+    expect(task.workspace_root).toBe('@state/yylo/task-worktrees');
+    expect(task.full_suite_validation.id).toBe('consumer-full-suite-canary');
+    expect(task.validation_profiles).toBeUndefined();
+    expect(task.documentation_validation.public_identities).toEqual([remote]);
+    expect(metadata.controller_branch).toBe('refs/heads/juno/controller-metadata');
+    expect(metadata.product_ref).toBe('refs/heads/trunk');
+    expect(hydration).toContain('verify-clean');
+    expect(hydration).not.toContain('juno-code');
+    expect(hydration).not.toContain('juno-benchmark');
+
+    const validation = spawnSync('python3', ['-c', [
+      'import importlib.util, pathlib, sys',
+      `root=pathlib.Path(${JSON.stringify(projectDir)})`,
+      "p=root/'.juno_task/scripts/task_workspace.py'",
+      'sys.path.insert(0, str(p.parent))',
+      "s=importlib.util.spec_from_file_location('consumer_task_workspace', p)",
+      'm=importlib.util.module_from_spec(s); s.loader.exec_module(m)',
+      'm.load_config(root)',
+    ].join(';')], { encoding: 'utf8' });
+    expect(validation.status, validation.stderr).toBe(0);
+
+    await fs.writeFile(taskPath, `${JSON.stringify({ ...task, owner_value: true }, null, 2)}\n`);
+    const preserved = await ManagedProjectAssets.update(projectDir, {
+      silent: true,
+      localization: { targetBranch: 'main', gitRemoteUrl: 'https://example.test/new' },
+    });
+    expect(preserved.conflicts.map((entry) => entry.destination)).toContain(
+      '.juno_task/config/task-workspace.json',
+    );
+    expect((await fs.readJson(taskPath)).owner_value).toBe(true);
+
+    await ManagedProjectAssets.update(projectDir, {
+      force: true,
+      silent: true,
+      localization: { targetBranch: 'main', gitRemoteUrl: 'https://example.test/new' },
+    });
+    const forced = await fs.readJson(taskPath);
+    expect(forced.owner_value).toBeUndefined();
+    expect(forced.documentation_validation.public_identities).toEqual(['https://example.test/new']);
+    expect(JSON.stringify(forced)).not.toContain('askbudi/juno-mono');
+
+    const monorepo = await fs.mkdtemp(path.join(os.tmpdir(), 'juno-managed-monorepo-'));
+    try {
+      await fs.ensureDir(path.join(monorepo, '.juno_task'));
+      await fs.writeJson(path.join(monorepo, '.juno_task/config.json'), {});
+      await fs.outputJson(path.join(monorepo, 'juno-code/package.json'), {
+        name: '@yylo/cli', version: '0.0.0-test',
+      });
+      await ManagedProjectAssets.update(monorepo, {
+        silent: true,
+        localization: { targetBranch: 'consumer-branch', gitRemoteUrl: remote },
+      });
+      expect(await fs.readFile(
+        path.join(monorepo, '.juno_task/config/task-workspace.json'), 'utf8',
+      )).toBe(await fs.readFile(
+        path.join(process.cwd(), 'src/templates/config/task-workspace.json'), 'utf8',
+      ));
+    } finally {
+      await fs.remove(monorepo);
+    }
+  });
+
   it('keeps every checked-in managed destination bound to its inventory hash', async () => {
     const productRoot = path.resolve(process.cwd(), '..');
     const inventoryPath = path.join(productRoot, '.juno_task/managed-assets.json');
@@ -53,6 +130,18 @@ describe('ManagedProjectAssets', {
 
     const inventory = await fs.readJson(inventoryPath);
     expect(inventory.packageName).toBe('@yylo/cli');
+    const assetsSha256 = managedAssetRecordsIdentity(inventory.assets);
+    expect(inventory.instructionBundle.assetsSha256).toBe(assetsSha256);
+    const identityCore = {
+      schemaVersion: inventory.instructionBundle.schemaVersion,
+      semanticVersion: inventory.instructionBundle.semanticVersion,
+      packageVersion: inventory.instructionBundle.packageVersion,
+      assetCount: inventory.instructionBundle.assetCount,
+      assetsSha256,
+    };
+    expect(inventory.instructionBundle.bundleSha256).toBe(
+      sha256(JSON.stringify(identityCore)),
+    );
     for (const [destination, identity] of Object.entries(
       inventory.assets as Record<string, { sourceSha256: string; installedSha256: string }>,
     )) {
@@ -64,7 +153,7 @@ describe('ManagedProjectAssets', {
     }
   });
 
-  it('keeps every active lifecycle instruction surface on the sealed fenced contract', async () => {
+  it('keeps every active lifecycle instruction surface on the one-task native contract', async () => {
     const sourceRoot = path.join(process.cwd(), 'src/templates');
     const files = [
       'controller-agent/AGENTS.md', 'controller-agent/CLAUDE.md',
@@ -73,7 +162,6 @@ describe('ManagedProjectAssets', {
       'skills/canonical/ralph-loop/references/implement.md',
       'wiki/controller/git_worktree_lifecycle.md',
       'wiki/controller/metadata_controller_boundary.md',
-      'wiki/controller/sealed_release_epochs.md',
     ];
     const surfaces = (await Promise.all(files.map((file) => fs.readFile(
       path.join(sourceRoot, file), 'utf8',
@@ -84,11 +172,18 @@ describe('ManagedProjectAssets', {
       'Serialized delivery: `yy merge status|next|resolve`',
       'Use `yy merge status` and `yy merge next`',
     ]) expect(surfaces).not.toContain(obsolete);
+    for (const obsolete of [
+      'yy release', 'release train', 'immutable epoch', 'private train',
+      'history-preserving train',
+    ]) expect(surfaces.toLowerCase()).not.toContain(obsolete);
     for (const required of [
-      'yy merge arbiter status', 'yy merge arbiter run', 'fenced',
-      'complete-input', 'immutable epoch', 'history-preserving',
-      'expected-old-SHA', 'REVIEW_FINDINGS_EXHAUSTED',
+      'yy merge status', 'yy merge land TASK_ID', 'yy merge project TASK_ID',
+      'expected-old', 'zero models',
     ]) expect(surfaces).toContain(required);
+    for (const retired of [
+      'yy merge arbiter', 'yy merge drive', 'yy merge next', 'yy merge resolve',
+      'REVIEW_FINDINGS_EXHAUSTED',
+    ]) expect(surfaces).not.toContain(retired);
   });
 
   it('admits canonical controller runtime twins for coherent template changes', async () => {
@@ -124,19 +219,15 @@ describe('ManagedProjectAssets', {
     for (const destination of [
       'AGENTS.md',
       'CLAUDE.md',
-      '.agents/skills/ralph-loop/references/implement.md',
-      '.claude/skills/kanban-workflow/SKILL.md',
-      '.pi/skills/understand-project/SKILL.md',
       '.juno_task/prompts/lifecycle/task-implementation.md',
-      '.juno_task/wiki/controller/sealed_release_epochs.md',
       '.juno_task/workflows/yy-task-run.yaml',
-      '.juno_task/scripts/release_train.py',
     ]) {
       expect(manifest.assets[destination], destination).toBeDefined();
       expect(manifest.assets[destination].installedSha256).toBe(
         sha256(await fs.readFile(path.join(projectDir, destination), 'utf8')),
       );
     }
+    expect(Object.keys(manifest.assets).some((entry) => entry.includes('/skills/'))).toBe(false);
     expect(manifest.instructionBundle.assetCount).toBe(Object.keys(manifest.assets).length);
     expect((await ManagedProjectAssets.inspectGeneration(projectDir)).coherent).toBe(true);
 
@@ -192,6 +283,19 @@ describe('ManagedProjectAssets', {
     const report = await ManagedProjectAssets.inspectGeneration(projectDir);
     expect(report.coherent).toBe(true);
     expect(report.instructionBundle?.schemaVersion).toBe('juno_instruction_bundle.v1');
+  });
+
+  it('uses canonical UTF-8 ordering and encoding for managed record identity', () => {
+    const keys = ['😀', 'a', '.dot', 'é', 'A', '_under'];
+    const assets = Object.fromEntries(keys.map((destination, index) => [destination, {
+      type: 'script',
+      templateVersion: '1.2.3',
+      sourceSha256: String(index + 1).repeat(64),
+      installedSha256: String(index + 1).repeat(64),
+    }]));
+    expect(managedAssetRecordsIdentity(assets)).toBe(
+      'd965b07f2505b7a1c7c7c5dfb8151409191fc8dfa37b81b4bc9ec9a2db4c6f82',
+    );
   });
 
   it('writes one complete semantic instruction-bundle identity on fresh install', async () => {
@@ -261,19 +365,18 @@ describe('ManagedProjectAssets', {
     expect(dictionary.life_cycle).toContain('yy watch status|await');
     expect(dictionary.life_cycle).toContain('Never construct PID/log/footer');
     expect(dictionary.life_cycle).toContain('yy task preflight TASK_ID');
-    expect(dictionary.life_cycle).toContain('sole lifecycle-semantic review owner');
-    expect(dictionary.life_cycle).toContain('REVIEW_FINDINGS_EXHAUSTED');
+    expect(dictionary.life_cycle).toContain('Merge launches\n   zero models');
     expect(dictionary.life_cycle).not.toContain('launch a fresh read-only independent `yy pi` review');
-    expect(dictionary.life_cycle).toContain('complete-input');
-    expect(dictionary.life_cycle).toContain('one expected-old-');
-    expect(dictionary.life_cycle).toContain('RC cut, push, publication, deployment');
+    expect(dictionary.life_cycle).toContain('native-Git expected-old delivery');
+    expect(dictionary.life_cycle).toContain('Package preparation uses the repository maintainer');
+    expect(dictionary.life_cycle).toContain('RC/tag creation');
+    expect(dictionary.life_cycle).not.toContain('immutable epoch');
     expect(dictionary.clean_worktree).toContain('# Clean Bolt task workspaces');
     expect(dictionary.clean_worktree).toContain('yy task start TASK_ID');
     expect(dictionary.clean_worktree).toContain('yy task preflight TASK_ID');
-    expect(dictionary.clean_worktree).toContain('Implementation workers never');
-    expect(dictionary.clean_worktree).toContain('sole lifecycle-semantic review owner');
-    expect(dictionary.clean_worktree).toContain('REVIEW_FINDINGS_EXHAUSTED');
-    expect(dictionary.clean_worktree).toContain('expected-SHA CAS');
+    expect(dictionary.clean_worktree).toContain('yy merge land TASK_ID');
+    expect(dictionary.clean_worktree).toContain('yy merge project TASK_ID');
+    expect(dictionary.clean_worktree).toContain('launches zero models');
     expect(dictionary.reflect).toContain('# End-of-session reflection');
     expect(dictionary.reflect).toContain('REFLECTION_TABLE');
     expect(dictionary.reflect).toContain('complete reflection table');
@@ -284,15 +387,18 @@ describe('ManagedProjectAssets', {
     expect(dictionary.new_task_workflow).toContain('yy task start TASK_ID');
     expect(dictionary.new_task_workflow).toContain('yy task preflight TASK_ID');
     expect(dictionary.new_task_workflow).toContain('yy task finish TASK_ID');
-    expect(dictionary.new_task_workflow).toContain('sole lifecycle-semantic review owner');
-    expect(dictionary.new_task_workflow).toContain('REVIEW_FINDINGS_EXHAUSTED');
-    expect(dictionary.new_task_workflow).toContain('yy merge arbiter status');
-    expect(dictionary.new_task_workflow).toContain('explicitly sealed history-preserving epoch');
+    expect(dictionary.new_task_workflow).toContain('yy merge land TASK_ID');
+    expect(dictionary.new_task_workflow).toContain('yy merge project TASK_ID');
+    expect(dictionary.new_task_workflow).toContain('launches zero models');
+    expect(dictionary.new_task_workflow).toContain('maintainer-only');
+    expect(dictionary.new_task_workflow).not.toContain('release train');
+    expect(dictionary.new_task_workflow).not.toContain('immutable epoch');
     expect(dictionary.run_workflow).toContain('# Run a workflow or Bolt task');
     expect(dictionary.run_workflow).toContain('yy task preflight TASK_ID');
     expect(dictionary.run_workflow).toContain('read-only doctor support');
-    expect(dictionary.run_workflow).toContain('sole lifecycle-semantic review owner');
-    expect(dictionary.run_workflow).toContain('REVIEW_FINDINGS_EXHAUSTED');
+    expect(dictionary.run_workflow).toContain('yy merge land TASK_ID');
+    expect(dictionary.run_workflow).toContain('yy merge project TASK_ID');
+    expect(dictionary.run_workflow).toContain('launches zero models');
     expect(dictionary.migrate_juno_code_v1_to_v2).toContain('# Migrate a YYLO v1 project');
     expect(dictionary.migrate_juno_kanban_v1_to_v2).toContain('# Migrate juno-kanban v1 storage');
     expect(dictionary.migrate_juno_kanban_v1_to_v2).toContain('resolve its latest reviewed commit');
@@ -360,7 +466,9 @@ describe('ManagedProjectAssets', {
     ).toContain('Controller commits never merge or synchronize into a product target');
     expect(reviewPrompt).toContain('Never use bare `pi`');
     expect(reviewPrompt).toContain('Review only');
-    expect(reviewPrompt).toContain('do not edit, commit, update Kanban, launch another reviewer');
+    expect(reviewPrompt).toContain(
+      'do not edit, commit, update Kanban, create advisory tasks, launch another reviewer',
+    );
     expect(reviewPrompt).toContain('Return PASS only after reviewing the complete frozen candidate');
     expect(reviewPrompt).toContain('Return every independently actionable admitted defect');
     expect(reviewPrompt).toContain('Do not downgrade an out-of-scope idea');
@@ -381,10 +489,9 @@ describe('ManagedProjectAssets', {
         'utf8',
       );
       expect(controllerInstruction, relative).toContain('yy task preflight TASK_ID');
-      expect(controllerInstruction, relative).toContain('sole review owner');
-      expect(controllerInstruction, relative).toContain('REVIEW_FINDINGS_EXHAUSTED');
-      expect(controllerInstruction, relative).toContain('yy merge arbiter status');
-      expect(controllerInstruction, relative).toContain('sealed_release_epochs.md');
+      expect(controllerInstruction, relative).toContain('yy merge land TASK_ID');
+      expect(controllerInstruction, relative).toContain('yy merge project TASK_ID');
+      expect(controllerInstruction, relative).toContain('launches no models');
     }
     const installedWatcher = await fs.readFile(
       path.join(projectDir, '.juno_task/scripts/watch_progress.py'),
@@ -422,14 +529,10 @@ describe('ManagedProjectAssets', {
       expect(implementationReference).toContain('# Bolt implementation worker contract');
       expect(implementationReference).toContain('yy task start TASK_ID');
       expect(implementationReference).toContain('yy task finish TASK_ID');
-      expect(implementationReference).toContain('Never launch lifecycle-semantic reviewers');
-      expect(implementationReference).toContain(
-        'managed merge queue is the sole lifecycle-semantic review owner',
-      );
-      expect(implementationReference).toContain('Reviewer A then');
-      expect(implementationReference).toContain('at most one repair candidate');
-      expect(implementationReference).toContain('REVIEW_FINDINGS_EXHAUSTED');
-      expect(implementationReference).toContain('expected-SHA CAS');
+      expect(implementationReference).toContain('Tests and semantic reviews remain explicit');
+      expect(implementationReference).toContain('yy merge land TASK_ID');
+      expect(implementationReference).toContain('yy merge project TASK_ID');
+      expect(implementationReference).toContain('merge launches zero models');
       expect(implementationReference).toContain('controller checkpoint');
     }
 
@@ -630,6 +733,10 @@ describe('ManagedProjectAssets', {
       type: string;
     }>;
 
+    // This fixture exercises the package's own dogfood policy and Python suite.
+    await fs.outputJson(path.join(projectDir, 'juno-code/package.json'), {
+      name: '@yylo/cli', version: '0.0.0-test',
+    });
     await ManagedProjectAssets.update(projectDir, { silent: true });
     await ScriptInstaller.autoUpdate(projectDir, true);
 

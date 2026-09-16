@@ -118,12 +118,26 @@ classify_prebootstrap_command() {
                 shift
                 case "${1:-}" in 0|1|2|true|false|yes|no) shift ;; esac ;;
             --verbose=*|-v=*) shift ;;
-            *) PREBOOTSTRAP_COMMAND="$1"; PREBOOTSTRAP_SUBCOMMAND="${2:-}"; break ;;
+            *)
+                PREBOOTSTRAP_COMMAND="$1"
+                shift
+                # Machine framing belongs to the lifecycle facade and may be
+                # written before or after its operation without changing routing.
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        --raw|--ndjson) shift ;;
+                        --format|-f) [ "$#" -ge 2 ] || return 1; shift 2 ;;
+                        --format=*|-f=*) shift ;;
+                        *) break ;;
+                    esac
+                done
+                PREBOOTSTRAP_SUBCOMMAND="${1:-}"
+                break ;;
         esac
     done
     case "$PREBOOTSTRAP_COMMAND" in
-        -V|--version|info|where|benchmark|ledger|kanban|task|merge|integration|evidence) return 0 ;;
-        doctor) [ "${2:-}" = "workspace" ] && return 0 ;;
+        -V|--version|info|where|capabilities|benchmark|ledger|kanban|task|merge|integration|evidence|tmux) return 0 ;;
+        doctor) [ "$PREBOOTSTRAP_SUBCOMMAND" = "workspace" ] && return 0 ;;
     esac
     return 1
 }
@@ -261,14 +275,14 @@ route_registered_product_control() {
     local effective_operation resolution fields controller invocation role branch source runtime
     case "$operation:$PREBOOTSTRAP_SUBCOMMAND" in
         ledger:*|kanban:*) effective_operation=kanban ;;
-        task:status|task:preflight|task:recovery-plan|task:doctor|task:lease-status|task:|task:-h|task:--help) effective_operation=kanban ;;
-        task:start|task:run|task:recover-predispatch|task:recover-wall-budget|task:hydrate|task:finish|task:checkpoint|task:child-checkpoint|task:sync|task:recovery-authorize|task:recovery-apply|task:runtime-bootstrap|task:lease-heartbeat|task:lease-handoff|task:lease-successor|task:lease-revoke|task:lease-release) effective_operation=orchestration ;;
-        merge:status|merge:plan|merge:|merge:-h|merge:--help) effective_operation=kanban ;;
-        merge:next|merge:resolve|merge:review|merge:reopen|merge:reconcile|merge:refresh|merge:drive|merge:withdraw|merge:arbiter) effective_operation=orchestration ;;
+        task:status|task:admission|task:preflight|task:doctor|task:lease-status|task:state-archive-plan|task:state-archive-verify|task:state-archive-get|task:|task:-h|task:--help) effective_operation=kanban ;;
+        task:start|task:run|task:resume|task:recover-predispatch|task:recover-wall-budget|task:hydrate|task:finish|task:checkpoint|task:sync|task:runtime-bootstrap|task:lease-heartbeat|task:lease-handoff|task:lease-successor|task:lease-revoke|task:lease-release|task:state-archive-apply|task:state-archive-rollback) effective_operation=orchestration ;;
+        merge:status|merge:|merge:-h|merge:--help) effective_operation=kanban ;;
+        merge:land|merge:project) effective_operation=orchestration ;;
         evidence:status|evidence:|evidence:-h|evidence:--help) effective_operation=kanban ;;
         evidence:run|evidence:await) effective_operation=orchestration ;;
         integration:status|integration:|integration:-h|integration:--help) effective_operation=kanban ;;
-        integration:sync|integration:runtime-doctor|integration:runtime-refresh|integration:register|integration:repair|integration:push) effective_operation=orchestration ;;
+        integration:sync|integration:runtime-adopt-source|integration:runtime-doctor|integration:runtime-refresh|integration:register|integration:repair|integration:push) effective_operation=orchestration ;;
         *)
             echo "yylo: control-plane routing refused unknown $operation subcommand '$PREBOOTSTRAP_SUBCOMMAND'" >&2
             return 2 ;;
@@ -284,16 +298,26 @@ route_registered_product_control() {
     role="$(printf '%s\n' "$fields" | sed -n '3p')"
     branch="$(printf '%s\n' "$fields" | sed -n '4p')"
     source="$(printf '%s\n' "$fields" | sed -n '5p')"
-    [ "$controller" != "$invocation" ] || return 1
-    case "$role" in task|integration-owner) ;; *)
-        echo "yylo: control-plane routing refused persisted workspace role '$role'; run yy doctor workspace" >&2
-        return 2 ;;
-    esac
+    if [ "$controller" = "$invocation" ]; then
+        case "$role" in controller) ;; *)
+            echo "yylo: control-plane routing refused persisted workspace role '$role'; run yy doctor workspace" >&2
+            return 2 ;;
+        esac
+    else
+        case "$role" in task|integration-owner) ;; *)
+            echo "yylo: control-plane routing refused persisted workspace role '$role'; run yy doctor workspace" >&2
+            return 2 ;;
+        esac
+    fi
     runtime="$(git -C "$controller" config --worktree --get juno.controller.runtimeExecutable 2>/dev/null || true)"
     if [ -z "$runtime" ] || [ ! -f "$runtime" ]; then
         echo "yylo: registered controller runtime is missing or stale; run yy doctor workspace from '$invocation'" >&2
         return 2
     fi
+    # A selected runtime's own wrapper must continue locally rather than route
+    # back to its adjacent entrypoint forever. Older public launchers, including
+    # a controller-local invocation, delegate to the receipt-bound runtime.
+    [ "$runtime" -ef "$CLI_ENTRYPOINT" ] && return 1
     require_compatible_node || return $?
     local launcher_version runtime_version
     if grep -q 'YYLO_PREFLIGHT_ONLY' "$CLI_ENTRYPOINT" 2>/dev/null; then
@@ -383,13 +407,31 @@ finalize_bootstrap_failure() {
     local status=$?
     trap - EXIT
     finish_wrapper_invocation "$status"
+    if [ "${YYLO_BOOTSTRAP_MACHINE:-0}" = 1 ]; then
+        YYLO_BOOTSTRAP_EXIT="$status" "$YYLO_NODE_EXECUTABLE" -e '
+const code=Number(process.env.YYLO_BOOTSTRAP_EXIT)||1;
+process.stdout.write(JSON.stringify({schema_version:"juno_execution_envelope.v1",command:{name:"managed.run",version:1},status:"failure",session_id:null,provider:null,model:null,juno_version:process.env.YYLO_BOOTSTRAP_JUNO_VERSION||"unknown",error:{code:"BOOTSTRAP_FAILED",message:"Project bootstrap failed before managed execution",exit_code:code},cost:{completeness:"not_applicable",usd:null}})+"\n");
+' >&8
+    fi
+    exec 8>&- 2>/dev/null || true
     exit "$status"
 }
 
 main() {
-    # Help is terminal discovery. Hand it directly to the packaged Commander
-    # surface before lifecycle recording, routing, or project bootstrap.
+    # Control-plane help is runtime discovery, so it must use the controller's
+    # selected executable too. This deliberately happens before lifecycle
+    # recording and preserves terminal help semantics.
     if requests_help "$@"; then
+        if classify_prebootstrap_command "$@"; then
+            ROUTED_COMMAND_STATUS=""
+            route_registered_product_control "$PREBOOTSTRAP_COMMAND" "$@" || {
+                local status=$?
+                [ "$status" -eq 1 ] || return "$status"
+            }
+            if [ -n "$ROUTED_COMMAND_STATUS" ]; then
+                return "$ROUTED_COMMAND_STATUS"
+            fi
+        fi
         require_compatible_node || return $?
         if grep -q 'YYLO_HELP_PREFLIGHT_ONLY' "$CLI_ENTRYPOINT" 2>/dev/null; then
             local help_status=0
@@ -468,13 +510,20 @@ main() {
         # 4. Execute the command we pass to it
 
         if current_runtime_supports_lifecycle; then
-            # Source bootstrap under an EXIT finalizer. A bootstrap refusal is
-            # terminalized here; bootstrap's final exec preserves the invocation
-            # PID and hands lifecycle ownership to the current CLI.
+            YYLO_BOOTSTRAP_JUNO_VERSION="$(read_runtime_version "$CLI_ENTRYPOINT" || printf unknown)"
+            export YYLO_BOOTSTRAP_JUNO_VERSION
+            YYLO_BOOTSTRAP_MACHINE=0
+            for argument in "$@"; do
+                [ "$argument" = --execution-envelope ] && YYLO_BOOTSTRAP_MACHINE=1
+            done
+            # Preserve the caller's data descriptor. Bootstrap diagnostics are
+            # forced to stderr; the nested command restores stdout immediately
+            # before replacing itself with the TypeScript CLI.
+            exec 8>&1
             trap finalize_bootstrap_failure EXIT
             # shellcheck source=/dev/null
-            source "$BOOTSTRAP_SCRIPT" bash -c 'exec -a "$1" "$2" "${@:3}"' _ \
-                "$YYLO_LAUNCH_SURFACE_VALUE" "$YYLO_NODE_EXECUTABLE" "$CLI_ENTRYPOINT" "$@"
+            source "$BOOTSTRAP_SCRIPT" bash -c 'exec 1>&8; exec -a "$1" "$2" "${@:3}"' _ \
+                "$YYLO_LAUNCH_SURFACE_VALUE" "$YYLO_NODE_EXECUTABLE" "$CLI_ENTRYPOINT" "$@" 1>&2
         fi
         run_owned_command bash "$BOOTSTRAP_SCRIPT" bash -c 'exec -a "$1" "$2" "${@:3}"' _ \
             "$YYLO_LAUNCH_SURFACE_VALUE" "$YYLO_NODE_EXECUTABLE" "$CLI_ENTRYPOINT" "$@"
