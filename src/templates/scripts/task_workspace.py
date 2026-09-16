@@ -1485,6 +1485,34 @@ def target_json(repository: Path, target_sha: str, path: str) -> tuple[dict[str,
     return value, hashlib.sha256(data).hexdigest()
 
 
+# BEGIN GENERATED INSTRUCTION COMPATIBILITY POLICY
+INSTRUCTION_COMPATIBILITY = {"policySchema":"juno_instruction_bundle_compatibility.v1","manifestSchemas":[1,2],"declarationSchema":"juno_instruction_bundle_declaration.v1","identitySchema":"juno_instruction_bundle.v1","supportedMajor":"1","stableVersionPattern":"^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$","recovery":"Preserve the current generation; use an authenticated CLI package supporting this instruction schema/major before migration."}
+# END GENERATED INSTRUCTION COMPATIBILITY POLICY
+
+
+def instruction_version_compatible(value: Any) -> bool:
+    """Stable minor/patch revisions preserve the supported instruction contract."""
+    return (isinstance(value, str)
+            and re.fullmatch(INSTRUCTION_COMPATIBILITY["stableVersionPattern"], value) is not None
+            and value.split(".")[0] == INSTRUCTION_COMPATIBILITY["supportedMajor"])
+
+
+def instruction_declaration_compatible(schema: Any, declaration: Any) -> bool:
+    # bool is not a JSON integer schema, even though Python bool subclasses int.
+    if type(schema) is not int or schema not in INSTRUCTION_COMPATIBILITY["manifestSchemas"]:
+        return False
+    if schema == 1:
+        return declaration is None
+    return (isinstance(declaration, dict)
+            and set(declaration) == {"schemaVersion", "semanticVersion"}
+            and declaration.get("schemaVersion") == INSTRUCTION_COMPATIBILITY["declarationSchema"]
+            and instruction_version_compatible(declaration.get("semanticVersion")))
+
+
+def instruction_compatibility_error() -> str:
+    return "instruction_bundle_incompatible: " + INSTRUCTION_COMPATIBILITY["recovery"]
+
+
 def derived_output_admission(repository: Path, target_sha: str,
                              admitted_paths: list[str]) -> tuple[list[str], dict[str, Any]]:
     """Expand admitted canonical sources to exact, declared parity destinations."""
@@ -1520,13 +1548,10 @@ def derived_output_admission(repository: Path, target_sha: str,
     rows = managed.get("admissionOutputs")
     schema = managed.get("schemaVersion")
     instruction_declaration = managed.get("instructionBundle")
-    declaration_valid = (schema == 1 or (schema == 2 and any(
-        instruction_declaration == {
-            "schemaVersion": "juno_instruction_bundle_declaration.v1",
-            "semanticVersion": version}
-        for version in ("1.0.0", "1.1.0"))))
+    declaration_valid = instruction_declaration_compatible(schema, instruction_declaration)
     if not declaration_valid or not isinstance(managed.get("assets"), list) or not isinstance(rows, list):
-        raise TaskWorkspaceError(f"invalid generated-output declaration {MANAGED_OUTPUT_DECLARATION}")
+        raise TaskWorkspaceError(f"invalid generated-output declaration {MANAGED_OUTPUT_DECLARATION}; "
+                                 + instruction_compatibility_error())
     for row in rows:
         if (not isinstance(row, dict) or set(row) != {"source", "destination"}
                 or not isinstance(row.get("source"), str)
@@ -5683,8 +5708,9 @@ def _managed_inventory_identity_valid(inventory: Any) -> bool:
             "assetsSha256": identity.get("assetsSha256") if isinstance(identity, dict) else None}
     bundle_sha = hashlib.sha256(json.dumps(core, separators=(",", ":")).encode()).hexdigest()
     return bool(isinstance(identity, dict)
-                and identity.get("schemaVersion") == "juno_instruction_bundle.v1"
-                and identity.get("semanticVersion") in ("1.0.0", "1.1.0")
+                and set(identity) == set(core) | {"bundleSha256"}
+                and identity.get("schemaVersion") == INSTRUCTION_COMPATIBILITY["identitySchema"]
+                and instruction_version_compatible(identity.get("semanticVersion"))
                 and identity.get("packageVersion") == inventory["packageVersion"]
                 and identity.get("assetCount") == len(assets)
                 and identity.get("assetsSha256") == assets_sha
@@ -5695,13 +5721,13 @@ def _bind_instruction_bundle_identity(inventory: dict[str, Any]) -> None:
     if inventory.get("schemaVersion") != 2:
         return
     assets = inventory["assets"]
-    # Rebinding hashes must not downgrade an existing 1.1.0 identity.
+    # Hash rebinding preserves the admitted revision; absence is not a default.
     identity = inventory.get("instructionBundle")
-    semantic_version = (identity.get("semanticVersion")
-                        if isinstance(identity, dict) else "1.0.0")
-    if semantic_version not in ("1.0.0", "1.1.0"):
-        raise TaskWorkspaceError("unsupported managed instruction bundle version")
-    core = {"schemaVersion": "juno_instruction_bundle.v1", "semanticVersion": semantic_version,
+    semantic_version = identity.get("semanticVersion") if isinstance(identity, dict) else None
+    if not instruction_version_compatible(semantic_version):
+        raise TaskWorkspaceError("unsupported managed instruction bundle version; "
+                                 + instruction_compatibility_error())
+    core = {"schemaVersion": INSTRUCTION_COMPATIBILITY["identitySchema"], "semanticVersion": semantic_version,
             "packageVersion": inventory["packageVersion"], "assetCount": len(assets),
             "assetsSha256": _managed_inventory_records_identity(assets)}
     inventory["instructionBundle"] = {**core, "bundleSha256": hashlib.sha256(

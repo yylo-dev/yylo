@@ -799,7 +799,7 @@ def install_fake_kanban_wrapper(controller: Path, board: Path) -> Path:
 
 class InstructionBundleVersionTests(unittest.TestCase):
     def test_supported_versions_round_trip_without_downgrade(self) -> None:
-        for version in ("1.0.0", "1.1.0"):
+        for version in ("1.0.0", "1.1.0", "1.2.0", "1.999.42"):
             with self.subTest(version=version):
                 inventory = {"schemaVersion": 2, "packageName": "@yylo/cli",
                              "packageVersion": "0.2.3", "assets": {},
@@ -811,7 +811,7 @@ class InstructionBundleVersionTests(unittest.TestCase):
                 self.assertFalse(task_runtime._managed_inventory_identity_valid(inventory))
 
     def test_unknown_versions_are_not_silently_rebound(self) -> None:
-        for version in ("1.2.0", "2.0.0", None, [], {}):
+        for version in ("2.0.0", "01.0.0", "1.2.0-rc.1", "1.2.0\n", None, [], {}):
             with self.subTest(version=version):
                 inventory = {"schemaVersion": 2, "packageName": "@yylo/cli",
                              "packageVersion": "0.2.3", "assets": {},
@@ -2431,6 +2431,23 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
         started = self.payload("start", "X")
         self.assertEqual(started["state"], "WORKING")
 
+    def test_instruction_identity_writer_refuses_absent_revision(self) -> None:
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "instruction_bundle_incompatible"):
+            task_runtime._bind_instruction_bundle_identity({"schemaVersion": 2, "assets": {}})
+
+    def test_future_minor_instruction_declaration_admits_real_start(self) -> None:
+        self.install_declared_output_fixtures()
+        manifest = self.repository / task_runtime.MANAGED_OUTPUT_DECLARATION
+        value = json.loads(manifest.read_text())
+        value["schemaVersion"] = 2
+        value["instructionBundle"] = {
+            "schemaVersion": "juno_instruction_bundle_declaration.v1",
+            "semanticVersion": "1.42.3"}
+        manifest.write_text(json.dumps(value) + "\n")
+        git(self.repository, "add", task_runtime.MANAGED_OUTPUT_DECLARATION)
+        git(self.repository, "commit", "-m", "future compatible instruction declaration")
+        self.assertEqual(self.payload("start", "X")["state"], "WORKING")
+
     def test_installed_instruction_bundle_uses_canonical_utf8_record_identity(self) -> None:
         keys = ["😀", "a", ".dot", "é", "A", "_under"]
         assets = {destination: {
@@ -2440,7 +2457,8 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
         self.assertEqual(task_runtime._managed_inventory_records_identity(assets),
                          "d965b07f2505b7a1c7c7c5dfb8151409191fc8dfa37b81b4bc9ec9a2db4c6f82")
         inventory = {"schemaVersion": 2, "packageName": "@yylo/cli",
-                     "packageVersion": "1.2.3", "assets": assets}
+                     "packageVersion": "1.2.3", "assets": assets,
+                     "instructionBundle": {"semanticVersion": "1.2.0"}}
         task_runtime._bind_instruction_bundle_identity(inventory)
         self.assertTrue(task_runtime._managed_inventory_identity_valid(inventory))
 
