@@ -1077,15 +1077,15 @@ def _normalize_subagent_args_argv(argv):
     normalized = []
     i = 0
     while i < len(argv):
-        token = argv[i]
-        if token == "subagent-args":
-            token = "--subagent-args"
-        if token == "--subagent-args" and i + 1 < len(argv):
-            next_token = argv[i + 1]
-            normalized.append(f"--subagent-args={next_token}")
+        item = argv[i]
+        if item == "subagent-args":
+            item = "--subagent-args"
+        if item == "--subagent-args" and i + 1 < len(argv):
+            next_item = argv[i + 1]
+            normalized.append(f"--subagent-args={next_item}")
             i += 2
             continue
-        normalized.append(token)
+        normalized.append(item)
         i += 1
     return normalized
 

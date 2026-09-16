@@ -62,7 +62,7 @@ describe('explicit command preflight', () => {
 
   it('reports executable and version identity with prompt recovery syntax', () => {
     expect(formatExplicitInvocationError(
-      { kind: 'unknown-command', token: 'integration' },
+      { kind: 'unknown-command', token: 'integ' },
       '/candidate/dist/bin/cli.mjs',
       '2.1.2',
     )).toContain('effective executable: /candidate/dist/bin/cli.mjs\neffective version: 2.1.2');

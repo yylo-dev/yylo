@@ -28,7 +28,7 @@ async function fixture(): Promise<{ root: string; lockPath: string }> {
 async function owner(overrides: Partial<TestResourceLockOwner> = {}): Promise<TestResourceLockOwner> {
   return {
     pid: process.pid, processBirthId: (await processBirthIdentity(process.pid))!,
-    token: 'fixture-token', workload: 'fixture', process: 'vitest', cwd: process.cwd(),
+    token: 'fixture', workload: 'fixture', process: 'vitest', cwd: process.cwd(),
     startedAt: new Date().toISOString(), ...overrides,
   };
 }
@@ -125,7 +125,7 @@ describe('cross-language heavy test resource lock', () => {
     const { root, lockPath } = await fixture();
     await fs.writeJson(lockPath, await owner({
       processBirthId: `${(await processBirthIdentity(process.pid))!}-same-second-reused`,
-      token: 'stale-token', workload: 'same-second stale owner',
+      token: 'stale', workload: 'same-second stale owner',
     }));
     const diagnostics: string[] = [];
     const options = { lockPath, pollMs: 5, diagnosticIntervalMs: 20,
@@ -188,11 +188,11 @@ describe('cross-language heavy test resource lock', () => {
   it('never removes a successor when an obsolete token/inode releases', async () => {
     const { lockPath } = await fixture();
     const lease = await acquireTestResourceLock('obsolete', { lockPath });
-    const successor = await owner({ token: 'successor-token', workload: 'valid successor' });
+    const successor = await owner({ token: 'succ', workload: 'valid successor' });
     const temp = `${lockPath}.successor`;
     await fs.writeJson(temp, successor); await fs.rename(temp, lockPath);
     await lease.release();
-    expect((await fs.readJson(lockPath)).token).toBe('successor-token');
+    expect((await fs.readJson(lockPath)).token).toBe('succ');
   });
 
   it('fails closed for ownerless publication and leaves no acquisition temporaries', async () => {
@@ -211,7 +211,7 @@ describe('cross-language heavy test resource lock', () => {
     const { lockPath } = await fixture();
     const prefix = identity!.replace(/(:\d+)$/, '');
     await fs.writeJson(lockPath, await owner({
-      processBirthId: `${prefix}:1`, token: 'same-second-old', workload: 'same-second reuse',
+      processBirthId: `${prefix}:1`, token: 'reused', workload: 'same-second reuse',
     }));
     const lease = await acquireTestResourceLock('new precise birth', { lockPath });
     expect(lease.owner.token).not.toBe('same-second-old');

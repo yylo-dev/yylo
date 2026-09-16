@@ -212,7 +212,7 @@ class TestDownloadGitHubAttachments:
 
         paths = download_github_attachments(
             urls=urls,
-            token='ghp_test_token',
+            token='ghp_ok',
             repo='owner/repo',
             issue_number=1,
             downloader=mock_downloader
@@ -237,7 +237,7 @@ class TestDownloadGitHubAttachments:
 
         paths = download_github_attachments(
             urls=urls,
-            token='ghp_test_token',
+            token='ghp_ok',
             repo='owner/repo',
             issue_number=1,
             downloader=mock_downloader
@@ -255,7 +255,7 @@ class TestDownloadGitHubAttachments:
 
         paths = download_github_attachments(
             urls=urls,
-            token='ghp_test_token',
+            token='ghp_ok',
             repo='owner/repo',
             issue_number=1,
             downloader=mock_downloader
@@ -267,7 +267,7 @@ class TestDownloadGitHubAttachments:
         """Test with empty URL list."""
         paths = download_github_attachments(
             urls=[],
-            token='ghp_test_token',
+            token='ghp_ok',
             repo='owner/repo',
             issue_number=1,
             downloader=mock_downloader
@@ -284,7 +284,7 @@ class TestDownloadGitHubAttachments:
 
         download_github_attachments(
             urls=urls,
-            token='ghp_my_secret_token',
+            token='ghp_ok',
             repo='owner/repo',
             issue_number=1,
             downloader=mock_downloader
@@ -293,7 +293,7 @@ class TestDownloadGitHubAttachments:
         call_args = mock_downloader.download_file.call_args
         headers = call_args.kwargs.get('headers', {})
         assert 'Authorization' in headers
-        assert 'ghp_my_secret_token' in headers['Authorization']
+        assert 'ghp_ok' in headers['Authorization']
 
     def test_download_uses_issue_prefix(self, mock_downloader, tmp_path):
         """Test that filename prefix includes issue number."""
@@ -303,7 +303,7 @@ class TestDownloadGitHubAttachments:
 
         download_github_attachments(
             urls=urls,
-            token='ghp_test_token',
+            token='ghp_ok',
             repo='owner/repo',
             issue_number=42,
             downloader=mock_downloader
@@ -321,7 +321,7 @@ class TestDownloadGitHubAttachments:
 
         download_github_attachments(
             urls=urls,
-            token='ghp_test_token',
+            token='ghp_ok',
             repo='myorg/myrepo',
             issue_number=1,
             downloader=mock_downloader
