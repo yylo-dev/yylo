@@ -460,10 +460,10 @@ class TestValidateSlackEnvironment:
 
     def test_valid_token(self):
         """Should pass with valid bot token."""
-        with patch.dict(os.environ, {'SLACK_BOT_TOKEN': 'xoxb-valid-token'}, clear=False):
+        with patch.dict(os.environ, {'SLACK_BOT_TOKEN': 'xoxb-ok'}, clear=False):
             token, channel, errors = validate_slack_environment()
 
-            assert token == 'xoxb-valid-token'
+            assert token == 'xoxb-ok'
             assert errors == []
 
     def test_missing_token(self):
@@ -492,7 +492,7 @@ class TestValidateSlackEnvironment:
     def test_channel_from_env(self):
         """Should read channel from environment."""
         with patch.dict(os.environ, {
-            'SLACK_BOT_TOKEN': 'xoxb-valid-token',
+            'SLACK_BOT_TOKEN': 'xoxb-ok',
             'SLACK_CHANNEL': 'bug-reports'
         }, clear=False):
             token, channel, errors = validate_slack_environment()

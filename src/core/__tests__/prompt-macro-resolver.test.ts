@@ -39,14 +39,14 @@ describe('prompt-macro-resolver', () => {
   });
 
   it('keeps unresolved tokens unchanged and warns', () => {
-    const result = resolvePromptMacros('Use @@missing token', {
+    const result = resolvePromptMacros('Use @@miss token', {
       dictionary: {},
       maxDepth: 10,
     });
 
-    expect(result.resolvedPrompt).toBe('Use @@missing token');
+    expect(result.resolvedPrompt).toBe('Use @@miss token');
     expect(result.warnings).toEqual([
-      expect.objectContaining({ code: 'unresolved', key: 'missing', token: '@@missing' }),
+      expect.objectContaining({ code: 'unresolved', key: 'miss', token: '@@miss' }),
     ]);
   });
 

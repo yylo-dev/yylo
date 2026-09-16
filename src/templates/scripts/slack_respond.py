@@ -405,9 +405,9 @@ def validate_slack_environment() -> tuple[Optional[str], list[str]]:
         errors.append(
             "SLACK_BOT_TOKEN not found.\n"
             "  Set it via environment variable or in a .env file:\n"
-            "    export SLACK_BOT_TOKEN=xoxb-your-token-here\n"
+            "    export SLACK_BOT_TOKEN=<your-bot-token>\n"
             "  Or add to .env file:\n"
-            "    SLACK_BOT_TOKEN=xoxb-your-token-here\n"
+            "    SLACK_BOT_TOKEN=<your-bot-token>\n"
             f"\n  To generate a Slack bot token, visit:\n"
             f"    {SLACK_TOKEN_DOCS_URL}\n"
             "\n  Required OAuth scopes for bot token:\n"
@@ -444,10 +444,10 @@ Optional Environment Variables:
 
 Configuration Methods:
   1. Environment variables:
-     export SLACK_BOT_TOKEN=xoxb-your-token-here
+     export SLACK_BOT_TOKEN=<your-bot-token>
 
   2. .env file (in project root):
-     SLACK_BOT_TOKEN=xoxb-your-token-here
+     SLACK_BOT_TOKEN=<your-bot-token>
 
 Generating a Slack Bot Token:
   1. Go to https://api.slack.com/apps and create a new app
@@ -462,7 +462,7 @@ Generating a Slack Bot Token:
   Full tutorial: """ + SLACK_TOKEN_DOCS_URL + """
 
 Example .env file:
-  SLACK_BOT_TOKEN=xoxb-YOUR-BOT-TOKEN-HERE
+  SLACK_BOT_TOKEN=<your-bot-token>
   LOG_LEVEL=INFO
 """)
     print("=" * 70 + "\n")

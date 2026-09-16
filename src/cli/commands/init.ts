@@ -870,7 +870,7 @@ ${variables.EDITOR ? `using ${variables.EDITOR} as primary AI subagent` : ''}
       console.log(chalk.blue('🔧 Setting up Git repository...'));
 
       // Check if git is available
-      const { execSync } = await import('child_process');
+      const { execSync, spawnSync } = await import('child_process');
 
       try {
         execSync('git --version', { stdio: 'ignore' });
@@ -886,7 +886,8 @@ ${variables.EDITOR ? `using ${variables.EDITOR} as primary AI subagent` : ''}
           .replace(/^refs\/heads\//, '');
         const branch = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(requestedBranch) &&
           !requestedBranch.includes('..') ? requestedBranch : 'main';
-        execSync(`git init -b "${branch}"`, { cwd: targetDirectory, stdio: 'ignore' });
+        // Array-form spawn: the branch name never passes through a shell string.
+        spawnSync('git', ['init', '-b', branch], { cwd: targetDirectory, stdio: 'ignore' });
         console.log(chalk.green('   ✓ Initialized Git repository'));
       } catch (error) {
         // Git repository might already exist, that's okay
@@ -906,7 +907,8 @@ ${variables.EDITOR ? `using ${variables.EDITOR} as primary AI subagent` : ''}
             console.log(chalk.yellow('   ⚠️  Git remote "origin" already exists'));
           } else {
             // Add origin remote
-            execSync(`git remote add origin "${this.context.gitUrl}"`, {
+            // Array-form spawn: the URL never passes through a shell string.
+            spawnSync('git', ['remote', 'add', 'origin', this.context.gitUrl], {
               cwd: targetDirectory,
               stdio: 'ignore',
             });
@@ -937,7 +939,8 @@ ${variables.EDITOR ? `using ${variables.EDITOR} as primary AI subagent` : ''}
 
           const commitMessage = `Initial commit: ${this.context.task || 'Project initialization'}\n\n🤖 Generated with yylo using ${this.context.subagent} subagent\n🎯 Main Task: ${this.context.task}\n\n🚀 Generated with [yylo](https://github.com/yylo-dev/yylo)\n\nCo-Authored-By: Claude <noreply@anthropic.com>`;
 
-          execSync(`git commit -m "${commitMessage}"`, {
+          // Array-form spawn: the message is passed as a single argv element.
+          spawnSync('git', ['commit', '-m', commitMessage], {
             cwd: targetDirectory,
             stdio: 'ignore',
           });

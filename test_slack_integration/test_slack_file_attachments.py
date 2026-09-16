@@ -228,7 +228,7 @@ class TestDownloadMessageFiles:
 
         paths = download_message_files(
             files=files,
-            bot_token='xoxb-test-token',
+            bot_token='xoxb-ok',
             channel_id='C123',
             message_ts='1234567890.123456',
             downloader=mock_downloader
@@ -265,7 +265,7 @@ class TestDownloadMessageFiles:
 
         paths = download_message_files(
             files=files,
-            bot_token='xoxb-test-token',
+            bot_token='xoxb-ok',
             channel_id='C123',
             message_ts='1234567890.123456',
             downloader=mock_downloader
@@ -291,7 +291,7 @@ class TestDownloadMessageFiles:
 
         paths = download_message_files(
             files=files,
-            bot_token='xoxb-test-token',
+            bot_token='xoxb-ok',
             channel_id='C123',
             message_ts='1234567890.123456',
             downloader=mock_downloader
@@ -303,7 +303,7 @@ class TestDownloadMessageFiles:
         """Test with empty file list."""
         paths = download_message_files(
             files=[],
-            bot_token='xoxb-test-token',
+            bot_token='xoxb-ok',
             channel_id='C123',
             message_ts='1234567890.123456',
             downloader=mock_downloader
@@ -325,7 +325,7 @@ class TestDownloadMessageFiles:
 
         paths = download_message_files(
             files=files,
-            bot_token='xoxb-test-token',
+            bot_token='xoxb-ok',
             channel_id='C123',
             message_ts='1234567890.123456',
             downloader=mock_downloader
@@ -351,7 +351,7 @@ class TestDownloadMessageFiles:
 
         paths = download_message_files(
             files=files,
-            bot_token='xoxb-test-token',
+            bot_token='xoxb-ok',
             channel_id='C123',
             message_ts='1234567890.123456',
             downloader=mock_downloader
@@ -378,7 +378,7 @@ class TestDownloadMessageFiles:
 
         download_message_files(
             files=files,
-            bot_token='xoxb-my-secret-token',
+            bot_token='xoxb-ok',
             channel_id='C123',
             message_ts='1234567890.123456',
             downloader=mock_downloader
@@ -387,7 +387,7 @@ class TestDownloadMessageFiles:
         call_args = mock_downloader.download_file.call_args
         headers = call_args.kwargs.get('headers', {})
         assert 'Authorization' in headers
-        assert 'Bearer xoxb-my-secret-token' in headers['Authorization']
+        assert 'Bearer xoxb-ok' in headers['Authorization']
 
 
 @pytest.mark.skipif(not ATTACHMENTS_AVAILABLE, reason="attachment_downloader not available")
