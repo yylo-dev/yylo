@@ -14,6 +14,8 @@ export type IntegrationOptions = {
   replace?: boolean;
   dryRun?: boolean;
   apply?: string;
+  canonicalOwnerRefresh?: boolean;
+  preserveOwners?: string;
   previousSha?: string;
   targetSha?: string;
   installPrefix?: string;
@@ -125,6 +127,10 @@ export async function invokeIntegration(
     else if (options.apply) argv.push('--apply', path.resolve(options.apply));
     else throw new Error(`integration ${operation} requires --dry-run or --apply <receipt>`);
   }
+  if (operation === 'repair') {
+    if (options.canonicalOwnerRefresh) argv.push('--canonical-owner-refresh');
+    if (options.preserveOwners) argv.push('--preserve-owners', path.resolve(options.preserveOwners));
+  }
   const machine = resolveMachineOutput(process.argv.slice(2), { jsonFlag: true });
   const { exitCode } = await invokeMachineAwareChild({
     executable: 'python3', args: argv,
@@ -187,23 +193,32 @@ export function configureIntegrationCommand(
     .action((owner: string, options: { replace?: boolean }) =>
       invoke('register', options.replace ? { owner, replace: true } : { owner }));
   for (const operation of ['repair', 'push'] as const) {
-    integration
+    const command = integration
       .command(operation)
       .description(operation === 'repair'
         ? 'Plan or apply exact, receipt-bound integration topology repair'
         : 'Plan and publish by default, or use explicit plan/apply publication modes')
       .option('--dry-run', 'Persist and print a non-mutating plan receipt')
-      .option('--apply <receipt>', 'Apply one exact previously generated plan receipt')
-      .action((options: { dryRun?: boolean; apply?: string }) => {
-        if (options.dryRun && options.apply) {
-          throw new Error(`integration ${operation} accepts only one of --dry-run or --apply <receipt>`);
-        }
-        if (operation === 'repair' && !options.dryRun && !options.apply) {
-          throw new Error('integration repair requires exactly one of --dry-run or --apply <receipt>');
-        }
-        return invoke(operation, options.dryRun ? { dryRun: true }
-          : options.apply ? { apply: options.apply }
-            : {});
+      .option('--apply <receipt>', 'Apply one exact previously generated plan receipt');
+    if (operation === 'repair') {
+      command.option('--canonical-owner-refresh', 'Explicit offline non-legacy fast-forward; preserve all historical owners')
+        .option('--preserve-owners <approval>', 'Reviewed inventory JSON: approved_by, disposition=preserve-only, inventory_sha256');
+    }
+    command.action((options: IntegrationOptions) => {
+      if (options.dryRun && options.apply) {
+        throw new Error(`integration ${operation} accepts only one of --dry-run or --apply <receipt>`);
+      }
+      if (operation === 'repair' && !options.dryRun && !options.apply) {
+        throw new Error('integration repair requires exactly one of --dry-run or --apply <receipt>');
+      }
+      if (options.preserveOwners && !options.canonicalOwnerRefresh) {
+        throw new Error('--preserve-owners requires --canonical-owner-refresh');
+      }
+      return invoke(operation, {
+        ...(options.dryRun ? { dryRun: true } : options.apply ? { apply: options.apply } : {}),
+        ...(options.canonicalOwnerRefresh ? { canonicalOwnerRefresh: true } : {}),
+        ...(options.preserveOwners ? { preserveOwners: options.preserveOwners } : {}),
       });
+    });
   }
 }

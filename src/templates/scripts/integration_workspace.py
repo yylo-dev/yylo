@@ -1578,7 +1578,155 @@ def stale_owner_cache_migration(status: dict[str, Any], repository: Path,
     }
 
 
-def repair_plan(controller: Path) -> dict[str, Any]:
+def refresh_owner_inventory(controller: Path, repository: Path) -> dict[str, Any]:
+    """Read-only, exact registration/evidence inventory; no owner is disposable."""
+    owners = []
+    for candidate in owner_candidates(repository):
+        root = exact_root(Path(candidate["path"]), "retained owner")
+        config = Path(git(root, "rev-parse", "--path-format=absolute", "--git-path", "config.worktree"))
+        evidence = []
+        # Retained runtime receipts are evidence even when ignored by Git.
+        evidence_root = root / ".juno_task/runtime"
+        if evidence_root.exists():
+            for path in sorted(evidence_root.rglob("*")):
+                if path.is_symlink():
+                    raise IntegrationError("owner runtime evidence contains a symlink")
+                if path.is_file():
+                    evidence.append({"path": str(path.relative_to(root)),
+                                     "sha256": managed_sha256(path.read_bytes())})
+        if str(root) != registered_owner(repository):
+            # Historical adoption directories retain sibling receipts and artifacts.
+            # Never traverse other worktrees or treat these bytes as cleanup inputs.
+            for path in sorted(root.parent.iterdir()):
+                if path.is_symlink():
+                    raise IntegrationError("historical owner evidence contains a symlink")
+                if path.is_file():
+                    evidence.append({"path": str(path), "sha256": managed_sha256(path.read_bytes())})
+        locks = [str(path) for path in config.parent.glob("*.lock")]
+        owners.append({**worktree_identity(root), "locks": locks,
+                       "stable_registration": sorted(entry for entry in git(
+                           root, "config", "--worktree", "--null", "--list").split("\0")
+                           if not entry.startswith("juno.workspace.rolebase\n")),
+                       "role_base": worktree_config(root, "juno.workspace.roleBase"),
+                       "authority_unambiguous": all(len(git(root, "config", "--worktree", "--get-all", key,
+                                                          check=False).splitlines()) == 1
+                           for key in ("juno.workspace.role", "juno.workspace.roleAuthority", "juno.workspace.roleBase")),
+                       "submodules": submodule_state(root),
+                       "registration_sha256": managed_sha256(config.read_bytes()),
+                       "evidence": evidence})
+    state = task_workspace.read_state(controller)
+    producers = sorted(task_id for task_id, record in state["tasks"].items()
+                       if record.get("fencing", {}).get("state") == "ACTIVE"
+                       or record.get("state") in {"WORKING", "HYDRATING", "HYDRATION_FAILED"})
+    owner_processes = []
+    if not Path("/proc/self/cwd").exists():
+        owner_processes.append({"status": "unknown", "reason": "owner process observation unavailable"})
+    else:
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                cwd = (entry / "cwd").resolve(strict=True)
+                if any(cwd == Path(row["path"]) or Path(row["path"]) in cwd.parents for row in owners):
+                    owner_processes.append({"pid": entry.name, "cwd": str(cwd),
+                                            "stat": (entry / "stat").read_text()})
+            except (OSError, RuntimeError):
+                continue  # vanished or inaccessible process; registered leases remain authoritative
+    return {"registered_owner": registered_owner(repository), "owners": owners,
+            "owner_processes": sorted(owner_processes, key=lambda row: str(row)),
+            "worktrees": parse_worktrees(repository),
+            "task_state_sha256": json_digest(state), "active_producers": producers,
+            "task_policy_sha256": managed_sha256((controller / ".juno_task/config/task-workspace.json").read_bytes()),
+            "refs": git(repository, "for-each-ref", "--format=%(refname) %(objectname)"),
+            "repository_config_sha256": managed_sha256(Path(git(
+                repository, "rev-parse", "--path-format=absolute", "--git-path", "config")).read_bytes())}
+
+
+def assert_refresh_preserved(controller: Path, repository: Path,
+                             before: dict[str, Any], owner: Path,
+                             review: dict[str, Any]) -> dict[str, Any]:
+    if managed_sha256(Path(review["path"]).read_bytes()) != review["sha256"]:
+        raise IntegrationError("preserve-only approval evidence changed during apply")
+    observed = refresh_owner_inventory(controller, repository)
+    def stable(value: dict[str, Any]) -> dict[str, Any]:
+        result = dict(value)
+        result["owners"] = [({key: value for key, value in row.items()
+                             if key not in {"head", "role_base", "submodules", "registration_sha256", "clean"}}
+                             if row["path"] == str(owner) else row)
+                            for row in value["owners"]]
+        result["worktrees"] = [{key: value for key, value in row.items()
+                                if key != "HEAD" or row.get("worktree") != str(owner)}
+                               for row in value["worktrees"]]
+        return result
+    if stable(observed) != stable(before) or observed["active_producers"] or observed["owner_processes"]:
+        raise IntegrationError("owner refresh preservation readback mismatch")
+    return observed
+
+
+def canonical_owner_refresh(status: dict[str, Any], repository: Path,
+                            policy: dict[str, Any], controller: Path,
+                            preserve_owners: Path | None) -> dict[str, Any]:
+    inventory = refresh_owner_inventory(controller, repository)
+    inventory_hash = json_digest(inventory)
+    review = None
+    if preserve_owners is not None:
+        review_path = preserve_owners.expanduser().resolve()
+        data = review_path.read_bytes()
+        review = {"path": str(review_path), "sha256": managed_sha256(data),
+                  "approval": json.loads(data)}
+    approval = review["approval"] if review else {}
+    owner = status["integration"]["owner"] or {}
+    old, target = owner.get("head"), status["target"]["sha"]
+    gitlinks = (local_target_gitlink_evidence(Path(owner["path"]), repository, old, target)
+                if old and target else {})
+    allowed = {"integration_owner_stale", "integration_owner_role_base_stale",
+               "integration_owner_extra"}
+    checks = {
+        "explicit_preserve_only_review": bool(isinstance(approval, dict)
+            and set(approval) == {"approved_by", "disposition", "inventory_sha256"}
+            and isinstance(approval.get("approved_by"), str) and approval["approved_by"].strip()
+            and approval.get("disposition") == "preserve-only"
+            and approval.get("inventory_sha256") == inventory_hash),
+        "canonical_registration_exact": bool(owner and inventory["registered_owner"] == owner["path"]
+            and status["integration"]["status"] == "registered"
+            and len(git(repository, "config", "--local", "--get-all", OWNER_CONFIG,
+                        check=False).splitlines()) == 1),
+        "stale_fast_forward": bool(old and target and old != target
+            and owner.get("role_base") == old
+            and run(["git", "merge-base", "--is-ancestor", old, target], repository,
+                    check=False).returncode == 0),
+        "nonlegacy_findings_only": all(row["code"] in allowed for row in status["findings"]),
+        "no_active_producers": not inventory["active_producers"] and not inventory["owner_processes"],
+        "nonlegacy_source_and_target": bool(old and target and all(
+            not evidence["legacy_writer"]["present"] and not evidence["tracked_cache"]["present"]
+            for evidence in (version_cache_commit_evidence(repository, old),
+                             version_cache_commit_evidence(repository, target)))),
+        "all_owners_safe": bool(inventory["owners"]) and all(
+            row["clean"] and row["detached"] and row["full_checkout"] and not row["locks"]
+            and row["authority_unambiguous"]
+            and row["authority"] == policy["owner_role_authority"]
+            and row["head"] == row["role_base"]
+            and all(link["state"] == "exact" for link in row["submodules"])
+            and target and run(["git", "merge-base", "--is-ancestor", row["head"], target],
+                                  repository, check=False).returncode == 0
+            for row in inventory["owners"]),
+        "local_gitlink_transition": bool(gitlinks.get("topology_preserved")
+            and gitlinks.get("old_objects_available") and gitlinks.get("local_objects_available")),
+        "target_unattached": not status["target"]["holders"],
+    }
+    refusals = sorted(key for key, passed in checks.items() if not passed)
+    return {"disposition": "canonical_owner_refresh.v1", "eligible": not refusals,
+            "checks": checks, "refusals": refusals, "inventory": inventory,
+            "inventory_sha256": inventory_hash, "preserve_owners": review,
+            "submodules": gitlinks,
+            "expected_final": {"head": target, "tree": commit_tree(repository, target) if target else None,
+                "role_base": target, "role": "integration-owner",
+                "authority": policy["owner_role_authority"], "clean": True, "detached": True,
+                "full_checkout": True, "gitlinks": gitlinks.get("target", [])}}
+
+
+def repair_plan(controller: Path, *, canonical_refresh: bool = False,
+                preserve_owners: Path | None = None) -> dict[str, Any]:
     controller = exact_root(controller, "controller")
     policy, task_policy, policy_path = load_policy(controller)
     repository = task_workspace.product_repository(controller, task_policy)
@@ -1588,9 +1736,12 @@ def repair_plan(controller: Path) -> dict[str, Any]:
     blockers: list[str] = []
     target_sha = status["target"]["sha"]
     owner_path = owner["path"] if owner else None
-    migration = stale_owner_cache_migration(status, repository, policy)
+    migration = (canonical_owner_refresh(status, repository, policy, controller, preserve_owners)
+                 if canonical_refresh else stale_owner_cache_migration(status, repository, policy))
     migration_eligible = bool(migration and migration["eligible"])
-    if migration and not migration_eligible:
+    if canonical_refresh:
+        blockers.extend(f"canonical_owner_refresh:{reason}" for reason in migration["refusals"])
+    elif migration and not migration_eligible:
         blockers.extend(code for code in migration["finding_codes"]
                         if code not in migration["allowed_finding_codes"])
         blockers.extend(f"stale_owner_migration:{reason}"
@@ -1618,7 +1769,7 @@ def repair_plan(controller: Path) -> dict[str, Any]:
     rows = {str(row.get("worktree")): row for row in parse_worktrees(repository)}
     legacy_owner = git(repository, "config", "--local", "--get",
                        LEGACY_OWNER_CONFIG, check=False)
-    if legacy_owner:
+    if legacy_owner and not canonical_refresh:
         legacy_path = str(Path(legacy_owner).expanduser().resolve())
         legacy_row = rows.get(legacy_path)
         if legacy_row is None or legacy_row.get("prunable") is True:
@@ -1660,14 +1811,27 @@ def repair_plan(controller: Path) -> dict[str, Any]:
     return {**core, "plan_sha256": json_digest(core)}
 
 
-def repair(controller: Path, *, dry_run: bool, apply: Path | None) -> tuple[dict[str, Any], int]:
+def repair(controller: Path, *, dry_run: bool, apply: Path | None,
+           canonical_refresh: bool = False,
+           preserve_owners: Path | None = None) -> tuple[dict[str, Any], int]:
     controller = exact_root(controller, "controller")
     policy, task_policy, _ = load_policy(controller)
     repository = task_workspace.product_repository(controller, task_policy)
+    if preserve_owners and not canonical_refresh:
+        raise IntegrationError("--preserve-owners requires --canonical-owner-refresh")
     if dry_run:
-        plan = repair_plan(controller)
+        plan = repair_plan(controller, canonical_refresh=canonical_refresh, preserve_owners=preserve_owners)
         receipt = {**plan, "outcome": "planned" if not plan["blockers"] else "refused"}
-        reference = write_receipt(operation_receipt_path(controller, policy, "repair-plan"), receipt)
+        if canonical_refresh:
+            receipt_path = controller / policy["receipt_root"] / f"{json_digest(receipt)}-owner-refresh-plan.json"
+            if receipt_path.exists():
+                if json.loads(receipt_path.read_bytes()) != receipt:
+                    raise IntegrationError("immutable owner refresh plan collision")
+                reference = {"path": str(receipt_path), "sha256": managed_sha256(receipt_path.read_bytes())}
+            else:
+                reference = managed_receipt_write(receipt_path, receipt)
+        else:
+            reference = write_receipt(operation_receipt_path(controller, policy, "repair-plan"), receipt)
         return {**receipt, "receipt": reference}, 0 if not plan["blockers"] else 2
     if apply is None:
         raise IntegrationError("repair apply requires a plan receipt")
@@ -1675,7 +1839,21 @@ def repair(controller: Path, *, dry_run: bool, apply: Path | None) -> tuple[dict
         approved = json.loads(apply.expanduser().resolve().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise IntegrationError(f"invalid repair plan receipt: {exc}") from exc
-    current = repair_plan(controller)
+    approved_migration = approved.get("migration") or {}
+    approved_refresh = approved_migration.get("disposition") == "canonical_owner_refresh.v1"
+    if canonical_refresh and not approved_refresh:
+        raise IntegrationError("requested owner refresh does not match the approved plan")
+    canonical_refresh = approved_refresh
+    if canonical_refresh:
+        expected_path = (controller / policy["receipt_root"] /
+                         f"{json_digest(approved)}-owner-refresh-plan.json").resolve()
+        if apply.resolve() != expected_path:
+            raise IntegrationError("owner refresh requires the immutable controller plan receipt")
+        review = approved_migration.get("preserve_owners")
+        if preserve_owners and (not review or preserve_owners.resolve() != Path(review["path"])):
+            raise IntegrationError("preserve-only review does not match the approved plan")
+        preserve_owners = Path(review["path"]) if review else None
+    current = repair_plan(controller, canonical_refresh=canonical_refresh, preserve_owners=preserve_owners)
     approved_core = {key: value for key, value in approved.items()
                      if key not in {"plan_sha256", "outcome"}}
     if (approved.get("operation") != "repair" or approved.get("blockers")
@@ -1700,22 +1878,43 @@ def repair(controller: Path, *, dry_run: bool, apply: Path | None) -> tuple[dict
     reference = write_receipt(result_path, result)
     try:
         with integration_target_lock(repository, task_policy["target_ref"]):
-            locked = repair_plan(controller)
+            locked = repair_plan(controller, canonical_refresh=canonical_refresh, preserve_owners=preserve_owners)
             if locked["plan_sha256"] != current["plan_sha256"]:
                 raise IntegrationError("repair plan identity drifted while acquiring target lock")
             migration = locked.get("migration")
             migration_eligible = bool(migration and migration.get("eligible"))
             deferred_role_base: dict[str, Any] | None = None
+            if canonical_refresh:
+                # Exclusive, durable claim survives interruption and prevents replay even
+                # if an operator later restores the original checkout.
+                claim = controller / policy["receipt_root"] / f"{locked['plan_sha256']}-consumed.json"
+                managed_receipt_write(claim, {"plan": str(apply.resolve()), "result": str(result_path),
+                    "rollback": {"automatic": False, "requires_separate_owner_authority": True,
+                        "before": migration["inventory"], "target": locked["target"],
+                        "gitlinks": migration["submodules"]["old"]}})
+                result["rollback_receipt"] = str(claim)
+                reference = write_receipt(result_path, result)
             for action in locked["actions"]:
                 if migration_eligible and action["kind"] == "advance_role_base":
                     deferred_role_base = action
                     continue
+                if canonical_refresh:
+                    assert_refresh_preserved(controller, repository, migration["inventory"],
+                                             Path(locked["registered_owner"]), migration["preserve_owners"])
+                    if sha(repository, task_policy["target_ref"]) != locked["target"]["sha"]:
+                        raise IntegrationError("target moved during owner refresh; preserve interrupted checkout")
+                    result["pending_action"] = action
+                    reference = write_receipt(result_path, result)
                 if action["kind"] == "detach_target_holder":
                     root = Path(action["path"])
                     git(root, "switch", "--detach", action["head"])
                 elif action["kind"] == "refresh_owner":
                     root = Path(action["path"])
-                    git(root, "switch", "--detach", action["after"])
+                    if canonical_refresh:
+                        git(root, "-c", "protocol.allow=never", "-c", "submodule.recurse=false",
+                            "switch", "--detach", action["after"])
+                    else:
+                        git(root, "switch", "--detach", action["after"])
                 elif action["kind"] == "clear_legacy_integration_registration":
                     git(Path(action["repository"]), "config", "--local", "--unset-all",
                         action["key"])
@@ -1724,11 +1923,20 @@ def repair(controller: Path, *, dry_run: bool, apply: Path | None) -> tuple[dict
                 result["phases"].append({**action, "status": "complete"})
                 reference = write_receipt(result_path, result)
             owner = Path(current["registered_owner"])
-            git(owner, "submodule", "sync", "--recursive")
+            if not canonical_refresh:
+                git(owner, "submodule", "sync", "--recursive")
             update_args = ["submodule", "update", "--init", "--recursive", "--checkout"]
             if migration_eligible:
                 update_args.append("--no-fetch")
-            git(owner, *update_args)
+            if canonical_refresh:
+                assert_refresh_preserved(controller, repository, migration["inventory"], owner,
+                                         migration["preserve_owners"])
+                update_args.remove("--init")  # all old submodules must already be exact/local
+                result["pending_action"] = {"kind": "hydrate_target_submodules_no_fetch"}
+                reference = write_receipt(result_path, result)
+                git(owner, "-c", "protocol.allow=never", *update_args)
+            else:
+                git(owner, *update_args)
             if migration_eligible:
                 observed_links = sorted(
                     ({"path": row["path"], "sha": row["sha"]}
@@ -1740,11 +1948,23 @@ def repair(controller: Path, *, dry_run: bool, apply: Path | None) -> tuple[dict
                                          "gitlinks": observed_links})
                 reference = write_receipt(result_path, result)
             if deferred_role_base:
+                if canonical_refresh:
+                    assert_refresh_preserved(controller, repository, migration["inventory"], owner,
+                                             migration["preserve_owners"])
+                    if sha(repository, task_policy["target_ref"]) != locked["target"]["sha"]:
+                        raise IntegrationError("target moved before roleBase advancement")
+                    result["pending_action"] = deferred_role_base
+                    reference = write_receipt(result_path, result)
                 advance_owner_role_base(owner, deferred_role_base["before"],
                                         deferred_role_base["after"])
                 result["phases"].append({**deferred_role_base, "status": "complete"})
                 reference = write_receipt(result_path, result)
             after = status_payload(controller)
+            if canonical_refresh:
+                result["preserved_inventory"] = assert_refresh_preserved(
+                    controller, repository, migration["inventory"], owner, migration["preserve_owners"])
+                if after["target"] != locked["target"]:
+                    raise IntegrationError("target moved during owner refresh")
             if not after["ready"]:
                 raise IntegrationError("repair verification did not reach ready state")
             final_readback = None
@@ -1771,13 +1991,24 @@ def repair(controller: Path, *, dry_run: bool, apply: Path | None) -> tuple[dict
                 expected = {**migration["expected_final"], "legacy_findings": [], "ready": True}
                 if final_readback != expected:
                     raise IntegrationError("stale-owner migration final readback mismatch")
+            result.pop("pending_action", None)
             result.update({"outcome": "completed", "status": after,
                            "final_readback": final_readback})
             reference = write_receipt(result_path, result)
+            if canonical_refresh:
+                reference = managed_receipt_write(result_path.with_suffix(".completed.json"), result)
             return {**result, "receipt": reference}, 0
-    except (IntegrationError, task_workspace.TaskWorkspaceError, OSError) as exc:
+    except (IntegrationError, ManagedRuntimeError, task_workspace.TaskWorkspaceError, OSError) as exc:
         result.update({"outcome": "failed", "error": str(exc)})
+        if canonical_refresh:
+            try:
+                result["interrupted_status"] = status_payload(controller)
+            except (IntegrationError, task_workspace.TaskWorkspaceError, OSError) as observation_error:
+                result["observation_error"] = str(observation_error)
+            result["rollback_policy"] = "preserve checkout; no automatic reset; separate reviewed recovery required"
         reference = write_receipt(result_path, result)
+        if canonical_refresh:
+            reference = managed_receipt_write(result_path.with_suffix(".failed.json"), result)
         return {**result, "receipt": reference}, 2
 
 
@@ -2747,6 +2978,11 @@ def parser() -> argparse.ArgumentParser:
         mode = command.add_mutually_exclusive_group(required=name == "repair")
         mode.add_argument("--dry-run", action="store_true")
         mode.add_argument("--apply", type=Path)
+        if name == "repair":
+            command.add_argument("--canonical-owner-refresh", action="store_true",
+                                 help="explicit offline non-legacy owner refresh; requires reviewed preserve-only inventory")
+            command.add_argument("--preserve-owners", type=Path,
+                                 help="owner approval JSON: approved_by, disposition=preserve-only, inventory_sha256")
     return root
 
 
@@ -2783,7 +3019,9 @@ def main(argv: list[str] | None = None) -> int:
                 args.controller, args.owner, replace=args.replace,
                 runtime_executable=args.runtime_executable, runtime_version=args.runtime_version)
         elif args.operation == "repair":
-            payload, code = repair(args.controller, dry_run=args.dry_run, apply=args.apply)
+            payload, code = repair(args.controller, dry_run=args.dry_run, apply=args.apply,
+                                   canonical_refresh=args.canonical_owner_refresh,
+                                   preserve_owners=args.preserve_owners)
         else:
             payload, code = push(args.controller, dry_run=args.dry_run, apply=args.apply)
         print(json.dumps(payload, indent=2, sort_keys=True))

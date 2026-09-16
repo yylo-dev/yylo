@@ -259,7 +259,7 @@ class IntegrationWorkspaceTests(unittest.TestCase):
         return old, target, source
 
     def legacy_cache_submodule_migration_fixture(
-            self, *, admit_target_object: bool) -> tuple[str, str, str]:
+            self, *, admit_target_object: bool, nonlegacy: bool = False) -> tuple[str, str, str]:
         child_remote = self.root / "migration-child.git"
         child_source = self.root / "migration-child-source"
         git(self.root, "init", "--bare", str(child_remote))
@@ -280,9 +280,10 @@ class IntegrationWorkspaceTests(unittest.TestCase):
              "submodule", "add", str(child_remote), "vendor/child"], source)
         script = source / runtime.INSTALL_REQUIREMENTS_PATH
         script.parent.mkdir(parents=True, exist_ok=True)
-        script.write_text(
+        script.write_text("VERSION_CHECK_CACHE_DIR=/external/cache\n" if nonlegacy else
             'VERSION_CHECK_CACHE_DIR="${VERSION_CHECK_CACHE_DIR:-${PWD}/.juno_task}"\n')
-        (source / runtime.VERSION_CACHE_PATH).write_text("checked_at=1\n")
+        if not nonlegacy:
+            (source / runtime.VERSION_CACHE_PATH).write_text("checked_at=1\n")
         git(source, "add", ".")
         git(source, "commit", "-m", "legacy cache with child")
         old = git(source, "rev-parse", "HEAD")
@@ -298,7 +299,8 @@ class IntegrationWorkspaceTests(unittest.TestCase):
         git(source / "vendor/child", "checkout", "--detach", child_target)
         git(source, "add", "vendor/child")
         script.write_text("VERSION_CHECK_CACHE_DIR=/external/cache\n")
-        git(source, "rm", runtime.VERSION_CACHE_PATH)
+        if not nonlegacy:
+            git(source, "rm", runtime.VERSION_CACHE_PATH)
         git(source, "add", runtime.INSTALL_REQUIREMENTS_PATH)
         git(source, "commit", "-m", "advance child and remove checkout cache")
         target = git(source, "rev-parse", "HEAD")
@@ -612,6 +614,213 @@ class IntegrationWorkspaceTests(unittest.TestCase):
             runtime_version="0.2.2")
         self.assertEqual(refused_code, 2)
         self.assertIn("partial, tampered, or stale", refused["error"])
+
+    def owner_refresh_fixture(self, *, extras: int = 0) -> tuple[str, Path, list[Path]]:
+        runtime.register(self.controller, self.owner)
+        target = self.local_advance()
+        retained = []
+        for index in range(extras):
+            extra = self.root / f"historical-{index}" / "worktree"
+            extra.parent.mkdir()
+            (extra.parent / "receipt.json").write_text('{"preserve":true}\n')
+            git(self.repo, "worktree", "add", "--detach", str(extra), self.base)
+            for key, value in (("role", "integration-owner"), ("roleAuthority", runtime.AUTHORITY),
+                               ("roleBase", self.base)):
+                git(extra, "config", "--worktree", f"juno.workspace.{key}", value)
+            retained.append(extra)
+        review = self.root / "preserve-owners.json"
+        self.approve_owner_inventory(review)
+        return target, review, retained
+
+    def approve_owner_inventory(self, review: Path) -> None:
+        inventory = runtime.refresh_owner_inventory(self.controller, self.controller)
+        review.write_text(json.dumps({"approved_by": "fixture owner", "disposition": "preserve-only",
+                                     "inventory_sha256": runtime.json_digest(inventory)}))
+
+    def refresh_plan(self, review: Path | None = None) -> tuple[dict, int]:
+        return runtime.repair(self.controller, dry_run=True, apply=None,
+                              canonical_refresh=True, preserve_owners=review)
+
+    def test_nonlegacy_owner_refresh_preserves_four_historical_owners_and_refs(self) -> None:
+        target, review, extras = self.owner_refresh_fixture(extras=4)
+        legacy, code = runtime.repair(self.controller, dry_run=True, apply=None)
+        self.assertEqual(code, 2)
+        self.assertFalse(legacy["migration"]["eligible"])
+        before = runtime.refresh_owner_inventory(self.controller, self.controller)
+        planned, code = self.refresh_plan(review)
+        self.assertEqual(code, 0, planned)
+        receipt = Path(planned["receipt"]["path"])
+        original = receipt.read_bytes()
+        observed_commands = []
+        original_git = runtime.git
+        def observe(root, *args, **kwargs):
+            observed_commands.append(args)
+            return original_git(root, *args, **kwargs)
+        with mock.patch.object(runtime, "git", side_effect=observe):
+            applied, code = runtime.repair(self.controller, dry_run=False, apply=receipt)
+        self.assertEqual(code, 0, applied)
+        self.assertEqual(receipt.read_bytes(), original)
+        self.assertEqual(applied["final_readback"]["head"], target)
+        self.assertEqual(applied["final_readback"]["role_base"], target)
+        self.assertEqual(applied["preserved_inventory"]["refs"], before["refs"])
+        self.assertTrue(Path(applied["rollback_receipt"]).is_file())
+        self.assertTrue(any("--no-fetch" in args and "protocol.allow=never" in args
+                            for args in observed_commands))
+        self.assertFalse(any(args and args[0] in {"fetch", "push", "reset"} for args in observed_commands))
+        for extra in extras:
+            self.assertEqual(git(extra, "rev-parse", "HEAD"), self.base)
+            self.assertEqual((extra.parent / "receipt.json").read_text(), '{"preserve":true}\n')
+        replay, code = runtime.repair(self.controller, dry_run=False, apply=receipt)
+        self.assertEqual(code, 2, replay)
+
+    def test_nonlegacy_owner_refresh_local_gitlinks(self) -> None:
+        _, target, child_target = self.legacy_cache_submodule_migration_fixture(
+            admit_target_object=True, nonlegacy=True)
+        review = self.root / "approval.json"
+        self.approve_owner_inventory(review)
+        planned, code = self.refresh_plan(review)
+        self.assertEqual(code, 0, planned)
+        applied, code = runtime.repair(self.controller, dry_run=False,
+                                      apply=Path(planned["receipt"]["path"]))
+        self.assertEqual(code, 0, applied)
+        self.assertEqual(applied["final_readback"]["head"], target)
+        self.assertEqual(applied["final_readback"]["gitlinks"], [{"path": "vendor/child", "sha": child_target}])
+
+    def test_nonlegacy_owner_refresh_missing_gitlink_refuses_without_fetch(self) -> None:
+        old, _, _ = self.legacy_cache_submodule_migration_fixture(
+            admit_target_object=False, nonlegacy=True)
+        review = self.root / "approval.json"
+        self.approve_owner_inventory(review)
+        planned, code = self.refresh_plan(review)
+        self.assertEqual(code, 2, planned)
+        self.assertIn("canonical_owner_refresh:local_gitlink_transition", planned["blockers"])
+        self.assertEqual(git(self.owner, "rev-parse", "HEAD"), old)
+
+    def test_nonlegacy_owner_refresh_target_cas_movement_under_lock_is_preserved(self) -> None:
+        _, review, _ = self.owner_refresh_fixture()
+        planned, code = self.refresh_plan(review)
+        self.assertEqual(code, 0, planned)
+        original_git = runtime.git
+        def move_target(root, *args, **kwargs):
+            result = original_git(root, *args, **kwargs)
+            if "switch" in args and root == self.owner:
+                git(self.repo, "update-ref", "refs/heads/product", self.base)
+            return result
+        with mock.patch.object(runtime, "git", side_effect=move_target):
+            applied, code = runtime.repair(self.controller, dry_run=False,
+                                          apply=Path(planned["receipt"]["path"]))
+        self.assertEqual(code, 2, applied)
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/product"), self.base)
+        self.assertEqual(git(self.owner, "config", "--worktree", "--get", "juno.workspace.roleBase"), self.base)
+        self.assertTrue(Path(applied["rollback_receipt"]).exists())
+
+    def test_nonlegacy_owner_refresh_requires_exact_explicit_review(self) -> None:
+        _, review, _ = self.owner_refresh_fixture()
+        refused, code = self.refresh_plan()
+        self.assertEqual(code, 2)
+        self.assertIn("canonical_owner_refresh:explicit_preserve_only_review", refused["blockers"])
+        review.write_text(json.dumps({"approved_by": "owner", "disposition": "delete",
+                                     "inventory_sha256": refused["migration"]["inventory_sha256"]}))
+        refused, code = self.refresh_plan(review)
+        self.assertEqual(code, 2)
+
+    def test_nonlegacy_owner_refresh_rejects_unsafe_retained_owners(self) -> None:
+        _, review, extras = self.owner_refresh_fixture(extras=1)
+        extra = extras[0]
+        (extra / "dirty").write_text("retained dirty bytes\n")
+        self.approve_owner_inventory(review)
+        refused, code = self.refresh_plan(review)
+        self.assertEqual(code, 2)
+        self.assertIn("canonical_owner_refresh:all_owners_safe", refused["blockers"])
+        self.assertEqual((extra / "dirty").read_text(), "retained dirty bytes\n")
+
+    def test_nonlegacy_owner_refresh_rejects_conflicting_history_and_authority(self) -> None:
+        _, review, extras = self.owner_refresh_fixture(extras=1)
+        extra = extras[0]
+        (extra / "src/conflict").write_text("private history\n")
+        git(extra, "add", "src/conflict")
+        git(extra, "commit", "-m", "private history")
+        git(extra, "config", "--worktree", "juno.workspace.roleBase", git(extra, "rev-parse", "HEAD"))
+        self.approve_owner_inventory(review)
+        refused, code = self.refresh_plan(review)
+        self.assertEqual(code, 2)
+        self.assertIn("canonical_owner_refresh:all_owners_safe", refused["blockers"])
+        git(self.owner, "config", "--worktree", "juno.workspace.roleAuthority", "foreign")
+        self.approve_owner_inventory(review)
+        self.assertEqual(self.refresh_plan(review)[1], 2)
+
+    def test_nonlegacy_owner_refresh_rejects_active_owner_process(self) -> None:
+        _, review, extras = self.owner_refresh_fixture(extras=1)
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=extras[0])
+        try:
+            self.approve_owner_inventory(review)
+            refused, code = self.refresh_plan(review)
+            self.assertEqual(code, 2)
+            self.assertIn("canonical_owner_refresh:no_active_producers", refused["blockers"])
+        finally:
+            process.terminate()
+            process.wait()
+
+    def test_nonlegacy_owner_refresh_rejects_active_task_lease(self) -> None:
+        _, review, _ = self.owner_refresh_fixture()
+        state = runtime.task_workspace.read_state(self.controller)
+        state["tasks"]["active"] = {"state": "WORKING", "fencing": {"state": "ACTIVE"}}
+        runtime.task_workspace.write_state(self.controller, state)
+        self.approve_owner_inventory(review)
+        refused, code = self.refresh_plan(review)
+        self.assertEqual(code, 2)
+        self.assertIn("canonical_owner_refresh:no_active_producers", refused["blockers"])
+
+    def test_nonlegacy_owner_refresh_rejects_changed_evidence_and_extra_registration(self) -> None:
+        _, review, extras = self.owner_refresh_fixture(extras=1)
+        planned, code = self.refresh_plan(review)
+        self.assertEqual(code, 0, planned)
+        (extras[0].parent / "receipt.json").write_text("changed evidence\n")
+        refused, code = runtime.repair(self.controller, dry_run=False, apply=Path(planned["receipt"]["path"]))
+        self.assertEqual(code, 2, refused)
+        self.assertEqual(git(self.owner, "rev-parse", "HEAD"), self.base)
+        self.approve_owner_inventory(review)
+        planned, code = self.refresh_plan(review)
+        self.assertEqual(code, 0, planned)
+        git(extras[0], "config", "--worktree", "juno.workspace.historicalEvidence", "changed")
+        self.assertEqual(runtime.repair(self.controller, dry_run=False,
+                         apply=Path(planned["receipt"]["path"]))[1], 2)
+
+    def test_nonlegacy_owner_refresh_rejects_moved_target_and_remote_divergence(self) -> None:
+        _, review, _ = self.owner_refresh_fixture()
+        planned, code = self.refresh_plan(review)
+        self.assertEqual(code, 0, planned)
+        remote = self.remote_advance()
+        git(self.repo, "fetch", "origin")
+        self.approve_owner_inventory(review)
+        refused, code = self.refresh_plan(review)
+        self.assertEqual(code, 2)
+        self.assertIn("remote_diverged", refused["blockers"])
+        git(self.repo, "update-ref", "refs/heads/product", remote)
+        self.assertEqual(runtime.repair(self.controller, dry_run=False,
+                         apply=Path(planned["receipt"]["path"]))[1], 2)
+        self.assertEqual(git(self.owner, "rev-parse", "HEAD"), self.base)
+
+    def test_nonlegacy_owner_refresh_interruption_preserves_rollback_and_blocks_replay(self) -> None:
+        target, review, _ = self.owner_refresh_fixture()
+        planned, code = self.refresh_plan(review)
+        self.assertEqual(code, 0, planned)
+        receipt = Path(planned["receipt"]["path"])
+        with mock.patch.object(runtime, "advance_owner_role_base", side_effect=runtime.IntegrationError("interrupted")):
+            applied, code = runtime.repair(self.controller, dry_run=False, apply=receipt)
+        self.assertEqual(code, 2, applied)
+        self.assertEqual(git(self.owner, "rev-parse", "HEAD"), target)
+        self.assertEqual(git(self.owner, "config", "--worktree", "--get", "juno.workspace.roleBase"), self.base)
+        rollback = json.loads(Path(applied["rollback_receipt"]).read_bytes())
+        self.assertFalse(rollback["rollback"]["automatic"])
+        self.assertEqual(rollback["rollback"]["before"]["owners"][0]["head"], self.base)
+        # Simulate a separately authorized operator restoring only the clean detached
+        # fixture, then prove that the consumed plan cannot be reused at its old base.
+        git(self.owner, "switch", "--detach", self.base)
+        replay, code = runtime.repair(self.controller, dry_run=False, apply=receipt)
+        self.assertEqual(code, 2, replay)
+        self.assertIn("collision", replay["error"])
+        self.assertEqual(git(self.owner, "rev-parse", "HEAD"), self.base)
 
     def test_repair_detaches_exact_attached_canonical_owner(self) -> None:
         runtime.register(self.controller, self.owner)
