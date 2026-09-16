@@ -131,13 +131,10 @@ def managed_target_provenance(repository: Path, commit: str) -> dict[str, Any]:
         assets = manifest.get("assets") if isinstance(manifest, dict) else None
         schema = manifest.get("schemaVersion") if isinstance(manifest, dict) else None
         instruction_declaration = manifest.get("instructionBundle") if isinstance(manifest, dict) else None
-        declaration_valid = (schema == 1 or (schema == 2 and any(
-            instruction_declaration == {
-                "schemaVersion": "juno_instruction_bundle_declaration.v1",
-                "semanticVersion": version}
-            for version in ("1.0.0", "1.1.0"))))
+        declaration_valid = task_workspace.instruction_declaration_compatible(schema, instruction_declaration)
         if not declaration_valid or not isinstance(assets, list):
-            raise ManagedRuntimeError("target managed asset definition is invalid")
+            raise ManagedRuntimeError("target managed asset definition is invalid; "
+                                      + task_workspace.instruction_compatibility_error())
         package = managed_source_json(repository, commit, MANAGED_PACKAGE_PATH)
         version = package.get("version") if isinstance(package, dict) else None
         if (not isinstance(package, dict) or package.get("name") != "@yylo/cli"
@@ -228,13 +225,15 @@ def managed_target_provenance(repository: Path, commit: str) -> dict[str, Any]:
                     "assetsSha256": identity.get("assetsSha256") if isinstance(identity, dict) else None}
             bundle_sha = hashlib.sha256(json.dumps(core, separators=(",", ":")).encode()).hexdigest()
             if (not isinstance(identity, dict)
-                    or identity.get("schemaVersion") != "juno_instruction_bundle.v1"
-                    or identity.get("semanticVersion") not in ("1.0.0", "1.1.0")
+                    or set(identity) != set(core) | {"bundleSha256"}
+                    or identity.get("schemaVersion") != task_workspace.INSTRUCTION_COMPATIBILITY["identitySchema"]
+                    or not task_workspace.instruction_version_compatible(identity.get("semanticVersion"))
                     or identity.get("packageVersion") != version
                     or identity.get("assetCount") != len(manifest["assets"])
                     or identity.get("assetsSha256") != assets_sha
                     or identity.get("bundleSha256") != bundle_sha):
-                raise ManagedRuntimeError("installed managed instruction bundle is mixed or partial")
+                raise ManagedRuntimeError("installed managed instruction bundle is mixed or partial; "
+                                          + task_workspace.instruction_compatibility_error())
         mode = "installed"
     if not result:
         raise ManagedRuntimeError("target managed script set is empty or duplicated")
@@ -2635,7 +2634,20 @@ def adoption_restore_owner(owner: Path, before: dict[str, Any]) -> bool:
             and worktree_config(owner, "juno.workspace.roleBase") == old_base)
 
 
+def adoption_declaration_admission(controller: Path, repository: Path, target_sha: str) -> dict[str, Any]:
+    """Read-only operation admission, not an assertion based only on runtime parity."""
+    managed_target_provenance(repository, target_sha)
+    config = task_workspace.load_config(controller)
+    try:
+        _, admission = task_workspace.derived_output_admission(
+            repository, target_sha, config["allowed_paths"])
+    except task_workspace.TaskWorkspaceError as exc:
+        raise AdoptionError(f"task-start declaration admission refused: {exc}") from exc
+    return admission
+
+
 def adoption_task_start_admission(controller: Path, repository: Path, target_sha: str) -> dict[str, Any]:
+    admission = adoption_declaration_admission(controller, repository, target_sha)
     relative = task_workspace.RUNTIME_PATH
     target = managed_source_bytes(repository, target_sha,
                                      f"juno-code/src/templates/scripts/{Path(relative).name}")
@@ -2644,7 +2656,8 @@ def adoption_task_start_admission(controller: Path, repository: Path, target_sha
     return {"runtime_path": str(running_path), "target_path": relative,
             "running_sha256": hashlib.sha256(running).hexdigest() if running else None,
             "target_sha256": hashlib.sha256(target).hexdigest(),
-            "current": bool(running and running == target)}
+            "current": bool(running and running == target),
+            "declaration_admission": admission}
 
 
 def adoption_public_launcher_preflight(old_executable: str) -> list[dict[str, str]]:
@@ -2818,6 +2831,9 @@ def _source_runtime_adopt_locked(args: argparse.Namespace, controller: Path,
     rollback_receipt = output.with_name(f"{output.stem}-rollback.json")
     if any(path.exists() or path.is_symlink() for path in (artifact, install_receipt, rollback_receipt)):
         raise AdoptionError("source runtime adoption sidecar path already exists")
+    # Full target declaration/start compatibility must pass before owner movement,
+    # packing, installation or rebind. Script-byte equality is not admission.
+    adoption_declaration_admission(controller, repository, target_sha)
     # Freeze owner rollback identity only after every output, prefix,
     # generation, package, controller, launcher, and ancestry preflight passes.
     owner_before = adoption_owner_preflight(repository, target_ref, target_sha, owner)

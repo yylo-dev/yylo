@@ -1265,11 +1265,26 @@ class IntegrationWorkspaceTests(unittest.TestCase):
                                     "target managed asset entry is invalid"):
             runtime.managed_target_provenance(self.repo, malformed)
 
+    def test_adoption_readback_cannot_certify_runtime_bytes_without_declaration(self) -> None:
+        with (mock.patch.object(runtime, "adoption_declaration_admission",
+                                side_effect=runtime.AdoptionError("incompatible declaration")),
+              mock.patch.object(runtime, "managed_source_bytes") as read_bytes):
+            with self.assertRaisesRegex(runtime.AdoptionError, "incompatible declaration"):
+                runtime.adoption_task_start_admission(self.repo, self.repo, "a" * 40)
+            read_bytes.assert_not_called()
+
+    def test_adoption_declaration_preflight_precedes_mutation(self) -> None:
+        import inspect
+        source = inspect.getsource(runtime._source_runtime_adopt_locked)
+        admission = source.index("adoption_declaration_admission(")
+        for mutation in ("adoption_prepare_owner(", '"pack"', '"runtime-install-rebind"'):
+            self.assertLess(admission, source.index(mutation))
+
     def test_source_instruction_bundle_versions_remain_strict(self) -> None:
         declaration = self.repo / runtime.MANAGED_MANIFEST_PATH
         value = json.loads(declaration.read_text())
         value["schemaVersion"] = 2
-        for version in ("1.0.0", "1.1.0", "1.2.0", "2.0.0", None, [], {}):
+        for version in ("1.0.0", "1.1.0", "1.2.0", "1.999.42", "2.0.0", "01.0.0", None, [], {}):
             with self.subTest(version=version):
                 value["instructionBundle"] = {
                     "schemaVersion": "juno_instruction_bundle_declaration.v1",
@@ -1278,7 +1293,7 @@ class IntegrationWorkspaceTests(unittest.TestCase):
                 git(self.repo, "add", runtime.MANAGED_MANIFEST_PATH)
                 git(self.repo, "commit", "-m", "exercise instruction bundle version")
                 target = git(self.repo, "rev-parse", "HEAD")
-                if version in ("1.0.0", "1.1.0"):
+                if version in ("1.0.0", "1.1.0", "1.2.0", "1.999.42"):
                     runtime.managed_target_provenance(self.repo, target)
                 else:
                     with self.assertRaisesRegex(runtime.ManagedRuntimeError,

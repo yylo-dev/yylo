@@ -47,7 +47,8 @@
   ],
   "scripts": {
     "dev": "tsx src/bin/cli.ts",
-    "build": "npm run generate:implementation-contract -- --check && tsup && npm run build:copy-templates && npm run build:copy-services && npm run build:copy-extensions && npm run build:copy-wrapper && node scripts/clean-template-bytecode.mjs dist/templates",
+    "build": "npm run generate:instruction-compatibility -- --check && npm run generate:implementation-contract -- --check && tsup && npm run build:copy-templates && npm run build:copy-services && npm run build:copy-extensions && npm run build:copy-wrapper && node scripts/clean-template-bytecode.mjs dist/templates",
+    "generate:instruction-compatibility": "node scripts/generate-instruction-compatibility.mjs",
     "generate:implementation-contract": "node scripts/generate-implementation-contract.mjs",
     "test:implementation-contract": "node scripts/generate-implementation-contract.mjs --check",
     "build:copy-templates": "node scripts/copy-templates.mjs",
