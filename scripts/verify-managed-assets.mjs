@@ -13,12 +13,13 @@ if (manifest.schemaVersion !== 2 || !Array.isArray(manifest.assets) ||
     !/^\d+\.\d+\.\d+$/.test(manifest.instructionBundle?.semanticVersion ?? '')) {
   throw new Error('Unsupported managed asset/instruction-bundle manifest');
 }
-const assets = manifest.assets;
+const assets = [...manifest.assets, ...manifest.controllerOutputs];
 const manifestSource = readFileSync(path.join('src', 'templates', 'managed-assets.json'));
-const uniqueSources = new Set(assets.map((asset) => asset.source));
+// A wiki source may intentionally own both its top-level path and controller/
+// compatibility alias. Every destination still has exactly one package owner.
 const uniqueDestinations = new Set(assets.map((asset) => asset.destination));
-if (uniqueSources.size !== assets.length || uniqueDestinations.size !== assets.length) {
-  throw new Error('Managed asset manifest contains duplicate source or destination entries');
+if (uniqueDestinations.size !== assets.length) {
+  throw new Error('Managed asset manifest contains duplicate destination entries');
 }
 
 const retiredMergeReviewMarkers = [

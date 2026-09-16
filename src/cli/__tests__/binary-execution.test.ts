@@ -1151,6 +1151,57 @@ exit 1
       )).toBe('');
     });
 
+    it('reports stale nested guidance independently of matching versions and source-generation refusal', async () => {
+      const { ManagedProjectAssets } = await import('../../utils/managed-project-assets.js');
+      const currentVersion = (await fs.readJson(path.join(PROJECT_ROOT, 'package.json'))).version;
+      await fs.outputJson(path.join(tempDir, '.juno_task/config.json'), {
+        controllerWorkspace: { mode: 'metadata-only', policy: '.juno_task/config/metadata-controller.json' },
+      });
+      await ManagedProjectAssets.update(tempDir, { silent: true });
+      // Unit-test version is mocked as "test"; bind the fixture identity to the
+      // real binary version without changing any content hash.
+      const receiptPath = path.join(tempDir, '.juno_task/managed-assets.json');
+      const receipt = await fs.readJson(receiptPath);
+      receipt.packageVersion = currentVersion;
+      receipt.instructionBundle.packageVersion = currentVersion;
+      const { bundleSha256: _oldBundleHash, ...identity } = receipt.instructionBundle;
+      receipt.instructionBundle.bundleSha256 = createHash('sha256').update(JSON.stringify(identity)).digest('hex');
+      await fs.writeJson(receiptPath, receipt);
+      const alias = '.juno_task/wiki/controller/git_worktree_lifecycle.md';
+      const skill = '.pi/skills/ralph-loop/references/implement.md';
+      await fs.writeFile(path.join(tempDir, alias), 'yy merge arbiter run TASK_ID\n');
+      await fs.outputFile(path.join(tempDir, skill), 'Reviewer A then Reviewer B\nyy merge drive TASK_ID\n');
+      await fs.outputFile(path.join(tempDir, '.juno_task/runtime/task-hydration/active.json'), 'active owner bytes');
+      await fs.outputFile(path.join(tempDir, 'dirty-task.txt'), 'unrelated dirty bytes');
+      const paths = [alias, skill, 'AGENTS.md', '.juno_task/managed-assets.json',
+        '.juno_task/runtime/task-hydration/active.json', 'dirty-task.txt'];
+      const before = await Promise.all(paths.map((entry) => fs.readFile(path.join(tempDir, entry))));
+      expect((await fs.readJson(path.join(tempDir, '.juno_task/managed-assets.json'))).packageVersion).toBe(currentVersion);
+      const contentDoctor = await executeCLI(['scripts', 'doctor'], { expectError: true });
+      expect(contentDoctor.exitCode).toBe(1);
+      expect(contentDoctor.all).toContain('instruction-content drift');
+      expect(contentDoctor.all).toContain(`customized: ${alias}`);
+      expect(contentDoctor.all).toContain(`retired-lifecycle: ${skill}`);
+      expect(contentDoctor.all).toContain('yy skills status');
+      expect(contentDoctor.all).not.toContain('Source-generation binding:');
+      // Same version, incompatible exact source: report both independent causes,
+      // rather than aborting at binding admission and hiding stale instructions.
+      await fs.outputJson(path.join(tempDir, '.juno_task/runtime/managed-controller/generation.json'), {
+        schema_version: 'juno_managed_controller_runtime.v1',
+        target_sha: 'a'.repeat(40), package_version: currentVersion,
+        scripts: { '.juno_task/scripts/task_workspace.py': {
+          source_sha256: '0'.repeat(64), actual_sha256: '0'.repeat(64), classification: 'exact',
+        } },
+      });
+      const bindingDoctor = await executeCLI(['scripts', 'doctor'], { expectError: true });
+      expect(bindingDoctor.exitCode).toBe(1);
+      expect(bindingDoctor.all).toContain('Source-generation binding:');
+      expect(bindingDoctor.all).toContain('instruction-content drift');
+      expect(bindingDoctor.all).toContain(`retired-lifecycle: ${skill}`);
+      expect(bindingDoctor.all).toContain('yy integration runtime-doctor');
+      expect(await Promise.all(paths.map((entry) => fs.readFile(path.join(tempDir, entry))))).toEqual(before);
+    });
+
     it('recovers the exact target-bound metadata-controller bundle through scripts update', async () => {
       const currentPackageVersion = (await fs.readJson(
         path.join(PROJECT_ROOT, 'package.json'),
