@@ -2,7 +2,7 @@
 
 Audited: 2026-09-12 · Scanner: `plugin-scanner` 3.0.123 (installed by the pinned
 `hashgraph-online/ai-plugin-scanner-action` v1.2.635 — the same action used by
-the [awesome-ai-plugins](https://github.com/hashgraph-online/awesome-ai-plugins)
+the third-party `hashgraph-online/awesome-ai-plugins`
 catalog sweep) · Scan target: repository root, default profile, offline.
 
 This document is the rule-by-rule disposition of every scanner finding that
@@ -40,7 +40,7 @@ the values as opaque strings):
 | `test_slack_integration/test_slack_respond.py` | same | `xoxb-ok` |
 | `test_slack_integration/test_slack_file_attachments.py` | `xoxb-…test…` | `xoxb-ok` |
 | `test_github_integration/test_github_attachments.py` | `ghp_…test…` | `ghp_ok` |
-| `src/templates/scripts/slack_fetch.sh` / `slack_respond.sh` / `.py` ×2 | token-shaped placeholder in help text | `<your-bot-token>` |
+| `src/templates/scripts/slack_fetch.sh` / `slack_respond.sh` / `.py` ×2 | token-shaped placeholder in help text | Upstream changed these to `<your-bot-token>`; integration retains the existing non-secret placeholders until runtime twins can be updated together. |
 | `src/templates/scripts/parallel_runner.sh` | local variable named `token` holding argv strings | renamed to `item` |
 | `src/templates/scripts/tests/test_merge_queue.py` | `old_token` dummy string | shortened below pattern length |
 | `src/utils/__tests__/resource-lock.test.ts` | fixture-style lock dummy | `token: 'fixture'` |
@@ -71,7 +71,16 @@ array-form by construction) were never flagged and are unchanged.
 | Rule | Why |
 |---|---|
 | `RISKY_APPROVAL_DEFAULT` | `src/templates/services/README.md` documents that generated agent service worktrees run with `sandbox_mode` set to full access / headless auto-approval. This is by design: each service runs inside an **isolated git worktree**, and the safety boundary for repository changes is not interactive approval inside the worktree but (1) per-task admission receipts, (2) typed task/validation/merge boundaries, and (3) the **merge queue**, which owns risk-based review and requires separate human-fenced authority for push/release/deploy. Removing the literal would make the generated docs less precise. |
-| `PLUGIN_JSON_MISSING` / `PLUGIN_JSON_INVALID` / `PLUGIN_JSON_REQUIRED_FIELDS_UNCHECKED` | yylo is a standalone npm CLI (`@yylo/cli`), not a Codex plugin package. The scanner detects the `codex` ecosystem from repository markers (AGENTS.md and agent configuration) and then expects a `.codex-plugin/plugin.json` manifest. yylo orchestrates the Codex CLI as a subagent namespace; it is not an installable Codex plugin, so no plugin manifest exists to validate. (`plugin-scanner verify` reports the same class through its `plugin.json exists` readiness check; the catalog gates on the scan, which passes.) |
+| `PLUGIN_JSON_MISSING` / `PLUGIN_JSON_INVALID` / `PLUGIN_JSON_REQUIRED_FIELDS_UNCHECKED` | Historical baseline: the September 12 scan preceded the upstream `.codex-plugin/plugin.json` manifest now included in this checkout. Re-audit these rules against that manifest before relying on the baseline. |
+
+## Integration reconciliation (2026-09-16)
+
+The upstream hardening and scanner configuration are retained. Generated Python
+bytecode accidentally committed upstream is excluded from the reconciled source
+(the Python sources remain). Four Slack help-template placeholder changes are
+deferred to preserve the integration runtime/template contract within the admitted
+scope; this is not a claim that a fresh untrusted scanner run passes. The focused
+CLI tests and typecheck are separate from the external scanner audit.
 
 ## Reproduce
 

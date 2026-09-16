@@ -58,8 +58,8 @@ npm install --global '@yylo/cli@latest'
 
 # Explicit prerelease
 npm install --global '@yylo/cli@next'
-# Exact local/prerelease candidate for reproducible installs
-npm install -g @yylo/cli@0.2.3-rc.3
+# Exact version matching this checkout (once published)
+npm install -g @yylo/cli@0.2.3
 
 npm view '@yylo/cli' version dist-tags --json
 yy --version
