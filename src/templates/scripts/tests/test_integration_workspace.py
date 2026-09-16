@@ -51,7 +51,7 @@ class IntegrationWorkspaceTests(unittest.TestCase):
         self.runtime_refresh = self.runtime_refresh_patcher.start()
         self.runtime_inspect = self.runtime_inspect_patcher.start()
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.remote = self.root / "remote.git"
         self.repo = self.root / "repo"
         self.controller = self.root / "controller"
@@ -633,6 +633,22 @@ class IntegrationWorkspaceTests(unittest.TestCase):
         return target, review, retained
 
     def approve_owner_inventory(self, review: Path) -> None:
+        if not hasattr(self, "procfs"):
+            # Exercise the actual scanner with deterministic procfs entries on
+            # every host, including macOS. Production remains fail-closed when
+            # process observation is unavailable.
+            self.procfs = self.root / "procfs"
+            (self.procfs / "self").mkdir(parents=True)
+            (self.procfs / "self/cwd").symlink_to(self.root, target_is_directory=True)
+            def fixture_path(value, *parts):
+                if str(value) == "/proc":
+                    return self.procfs
+                if str(value) == "/proc/self/cwd":
+                    return self.procfs / "self/cwd"
+                return Path(value, *parts)
+            patcher = mock.patch.object(runtime, "Path", wraps=Path, side_effect=fixture_path)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         inventory = runtime.refresh_owner_inventory(self.controller, self.controller)
         review.write_text(json.dumps({"approved_by": "fixture owner", "disposition": "preserve-only",
                                      "inventory_sha256": runtime.json_digest(inventory)}))
@@ -751,12 +767,42 @@ class IntegrationWorkspaceTests(unittest.TestCase):
 
     def test_nonlegacy_owner_refresh_rejects_active_owner_process(self) -> None:
         _, review, extras = self.owner_refresh_fixture(extras=1)
+        process = self.procfs / "4242"
+        process.mkdir()
+        (process / "cwd").symlink_to(extras[0], target_is_directory=True)
+        (process / "stat").write_text("fixture process identity\n")
+        self.approve_owner_inventory(review)
+        inventory = runtime.refresh_owner_inventory(self.controller, self.controller)
+        self.assertEqual(inventory["owner_processes"], [{
+            "pid": "4242", "cwd": str(extras[0].resolve()), "stat": "fixture process identity\n",
+        }])
+        refused, code = self.refresh_plan(review)
+        self.assertEqual(code, 2)
+        self.assertIn("canonical_owner_refresh:no_active_producers", refused["blockers"])
+
+    def test_nonlegacy_owner_refresh_rejects_unavailable_process_observation(self) -> None:
+        _, review, _ = self.owner_refresh_fixture()
+        (self.procfs / "self/cwd").unlink()
+        self.approve_owner_inventory(review)
+        inventory = runtime.refresh_owner_inventory(self.controller, self.controller)
+        self.assertEqual(inventory["owner_processes"], [{
+            "status": "unknown", "reason": "owner process observation unavailable",
+        }])
+        refused, code = self.refresh_plan(review)
+        self.assertEqual(code, 2)
+        self.assertIn("canonical_owner_refresh:no_active_producers", refused["blockers"])
+        self.assertEqual(git(self.owner, "rev-parse", "HEAD"), self.base)
+
+    @unittest.skipUnless(Path("/proc/self/cwd").exists(), "requires host procfs")
+    def test_nonlegacy_owner_refresh_rejects_real_active_owner_process(self) -> None:
+        _, review, extras = self.owner_refresh_fixture(extras=1)
         process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=extras[0])
         try:
-            self.approve_owner_inventory(review)
-            refused, code = self.refresh_plan(review)
-            self.assertEqual(code, 2)
-            self.assertIn("canonical_owner_refresh:no_active_producers", refused["blockers"])
+            with mock.patch.object(runtime, "Path", Path):
+                self.approve_owner_inventory(review)
+                refused, code = self.refresh_plan(review)
+                self.assertEqual(code, 2)
+                self.assertIn("canonical_owner_refresh:no_active_producers", refused["blockers"])
         finally:
             process.terminate()
             process.wait()
