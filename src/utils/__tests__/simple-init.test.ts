@@ -19,7 +19,7 @@ const snap = () => ({ head: git('rev-parse', 'HEAD'), refs: git('show-ref'), wor
 beforeEach(async () => {
   originalEnv = { ...process.env };
   for (const key of Object.keys(process.env)) if (key.startsWith('JUNO_') || key.startsWith('YYLO_') || key.startsWith('GIT_')) delete process.env[key];
-  root = await fs.mkdtemp(path.join(os.tmpdir(), 'yylo-simple-init-'));
+  root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'yylo-simple-init-')));
   git('init', '-q'); git('config', 'user.email', 'fixture@example.test'); git('config', 'user.name', 'Fixture');
   await fs.writeFile(path.join(root, 'notebook.ipynb'), 'original');
   git('add', 'notebook.ipynb'); git('commit', '-qm', 'fixture');
@@ -163,7 +163,7 @@ describe('Advanced-to-Simple fresh-workspace conversion', () => {
     const before = snap(); const plan = await planSimpleConversion(root, destination);
     const write = fs.writeFile.bind(fs);
     vi.spyOn(fs, 'writeFile').mockImplementation(async (...args: Parameters<typeof fs.writeFile>) => {
-      if (String(args[0]) === path.join(destination, '.juno_task/config.json')) throw new Error('injected conversion interruption');
+      if (String(args[0]) === path.join(plan.root, '.juno_task/config.json')) throw new Error('injected conversion interruption');
       return write(...args);
     });
     await expect(applySimpleConversion(plan)).rejects.toThrow(/injected/);
