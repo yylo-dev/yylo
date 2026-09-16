@@ -73,6 +73,22 @@ describe('integration workspace CLI', () => {
     });
   });
 
+  it('forwards explicit isolated source adoption without owner movement', async () => {
+    const invoke = vi.fn(async () => undefined);
+    const program = new Command().exitOverride();
+    configureIntegrationCommand(program, invoke);
+    await program.parseAsync([
+      'node', 'yy', 'integration', 'runtime-adopt-source',
+      '--previous-sha', 'a'.repeat(40), '--target-sha', 'b'.repeat(40),
+      '--install-prefix', '/tmp/runtime-isolated', '--output', '/tmp/isolated.json',
+      '--isolated-source',
+    ]);
+    expect(invoke).toHaveBeenCalledWith('runtime-adopt-source', {
+      previousSha: 'a'.repeat(40), targetSha: 'b'.repeat(40),
+      installPrefix: '/tmp/runtime-isolated', output: '/tmp/isolated.json', isolatedSource: true,
+    });
+  });
+
   it('forwards explicit canonical owner registration', async () => {
     const invoke = vi.fn(async () => undefined);
     const program = new Command().exitOverride().configureOutput({ writeOut: () => undefined });
