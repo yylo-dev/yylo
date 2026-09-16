@@ -20,6 +20,7 @@ export type IntegrationOptions = {
   targetSha?: string;
   installPrefix?: string;
   output?: string;
+  isolatedSource?: boolean;
 };
 export type IntegrationInvoker = (
   operation: IntegrationOperation,
@@ -97,6 +98,7 @@ export async function invokeIntegration(
     }
     argv.push('--previous-sha', options.previousSha, '--target-sha', options.targetSha,
       '--install-prefix', path.resolve(options.installPrefix), '--output', path.resolve(options.output));
+    if (options.isolatedSource) argv.push('--isolated-source');
   }
   if (operation === 'runtime-doctor' || operation === 'runtime-refresh') {
     if (operation === 'runtime-refresh') {
@@ -170,7 +172,8 @@ export function configureIntegrationCommand(
     .requiredOption('--target-sha <sha>', 'Exact source target generation to adopt')
     .requiredOption('--install-prefix <path>', 'Fresh non-Git package installation prefix')
     .requiredOption('--output <path>', 'New immutable transaction receipt outside Git')
-    .action((options: { previousSha: string; targetSha: string; installPrefix: string; output: string }) =>
+    .option('--isolated-source', 'Build an exact private source checkout without moving the retained owner')
+    .action((options: IntegrationOptions) =>
       invoke('runtime-adopt-source', options));
   integration
     .command('runtime-refresh')

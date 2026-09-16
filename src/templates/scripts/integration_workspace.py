@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -2573,6 +2574,97 @@ def adoption_assert_target(repository: Path, target_ref: str, target_sha: str, o
     adoption_clean(owner, "integration owner")
 
 
+def adoption_preserved_owner(repository: Path, owner: Path) -> dict[str, Any]:
+    """Evidence only: a retained owner is not a source/build input or a write target."""
+    config = Path(adoption_git(owner, "rev-parse", "--path-format=absolute",
+                               "--git-path", "config.worktree"))
+    return {"registered_path": registered_owner(repository),
+            "head": adoption_git(owner, "rev-parse", "HEAD"),
+            "role_base": worktree_config(owner, "juno.workspace.roleBase"),
+            "registration_sha256": adoption_digest(config), "moved": False}
+
+
+def adoption_assert_preserved_source(repository: Path, target_ref: str, target_sha: str,
+                                     owner: Path, before: dict[str, Any]) -> None:
+    if adoption_git(repository, "rev-parse", f"{target_ref}^{{commit}}") != target_sha:
+        raise AdoptionError("source runtime adoption refused because the target ref moved")
+    if adoption_preserved_owner(repository, owner) != before:
+        raise AdoptionError("retained integration owner identity changed; refusing adoption")
+
+
+def adoption_isolated_source(repository: Path, target_sha: str, destination: Path) -> Path:
+    """Create an independently registered exact checkout, never a protected owner.
+
+    Do not reuse ignored dist/node_modules from an integration or task checkout.
+    The temporary repository shares only immutable Git objects, not worktree
+    registration, task state, hooks, configuration, or dependency directories.
+    """
+    if not re.fullmatch(r"[0-9a-f]{40}", target_sha):
+        raise AdoptionError("isolated source requires an exact commit identity")
+    if destination.exists() or destination.is_symlink():
+        raise AdoptionError("isolated source destination must be absent")
+    adoption_git(repository, "cat-file", "-e", f"{target_sha}^{{commit}}")
+    adoption_run(["git", "clone", "--shared", "--no-checkout", "--", str(repository),
+                  str(destination)], repository)
+    adoption_git(destination, "-c", "core.hooksPath=/dev/null", "checkout", "--detach", target_sha)
+    if adoption_git(destination, "rev-parse", "HEAD") != target_sha:
+        raise AdoptionError("isolated source checkout identity mismatch")
+    adoption_clean(destination, "isolated source")
+    return destination
+
+
+def adoption_build_run(argv: list[str], cwd: Path, timeout_seconds: float = 900) -> None:
+    """Bound output memory and terminate only this build's process group on timeout."""
+    with tempfile.TemporaryFile() as output:
+        process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL,
+                                   stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            code = process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            # The group can outlive its leader; kill remaining build children too.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            raise AdoptionError("isolated source build timed out") from exc
+        if code:
+            output.seek(0, os.SEEK_END)
+            output.seek(max(0, output.tell() - 4000))
+            raise AdoptionError(output.read().decode(errors="replace") or "isolated source build failed")
+
+
+def adoption_pack_isolated(repository: Path, target_sha: str, artifact: Path) -> None:
+    if artifact.exists() or artifact.is_symlink():
+        raise AdoptionError("isolated source artifact destination must be absent")
+    with tempfile.TemporaryDirectory(prefix="yylo-isolated-source-") as temporary:
+        root = Path(temporary)
+        source = adoption_isolated_source(repository, target_sha, root / "source")
+        package = source / "juno-code"
+        if not (package / "package-lock.json").is_file():
+            raise AdoptionError("isolated source requires its checked-in package lock")
+        # Hydration and prepack build are bounded and task-local; never borrow
+        # dependencies or built output from the retained integration owner.
+        for argv in (["npm", "ci"], ["npm", "pack", "--pack-destination", str(root)]):
+            adoption_build_run(argv, package)
+        adoption_clean(source, "built isolated source")
+        packs = list(root.glob("*.tgz"))
+        if len(packs) != 1 or packs[0].is_symlink():
+            raise AdoptionError("isolated source build must produce exactly one artifact")
+        with artifact.open("xb") as stream:
+            stream.write(packs[0].read_bytes())
+            stream.flush()
+            os.fsync(stream.fileno())
+
+
 def adoption_owner_preflight(repository: Path, target_ref: str, target_sha: str,
                              owner: Path) -> dict[str, Any]:
     """Freeze a clean detached owner's rollback identity without moving it."""
@@ -2748,7 +2840,8 @@ def adoption_verify_public_dispatch(selection: dict[str, Any]) -> None:
 
 
 def adoption_replay(receipt_path: Path, controller: Path, repository: Path, target_ref: str,
-                    previous_sha: str, target_sha: str, prefix: Path) -> dict[str, Any] | None:
+                    previous_sha: str, target_sha: str, prefix: Path,
+                    isolated_source: bool = False) -> dict[str, Any] | None:
     if not receipt_path.exists():
         return None
     receipt = adoption_read_json(receipt_path, "source runtime adoption receipt")
@@ -2757,8 +2850,16 @@ def adoption_replay(receipt_path: Path, controller: Path, repository: Path, targ
             or receipt.get("repository") != str(repository) or receipt.get("target_ref") != target_ref
             or receipt.get("previous_sha") != previous_sha or receipt.get("target_sha") != target_sha
             or receipt.get("install_prefix") != str(prefix)
+            or receipt.get("source_mode", "integration-owner") != (
+                "isolated" if isolated_source else "integration-owner")
             or adoption_git(repository, "rev-parse", f"{target_ref}^{{commit}}") != target_sha):
         raise AdoptionError("prior source runtime adoption receipt conflicts with the exact requested transaction")
+    if isolated_source:
+        owner = receipt.get("integration_owner", {})
+        owner_path = owner.get("path")
+        if (not isinstance(owner_path, str) or registered_owner(repository) != owner_path
+                or adoption_preserved_owner(repository, Path(owner_path)) != owner.get("before")):
+            raise AdoptionError("completed source runtime adoption retained owner identity drifted")
     artifact = Path(receipt.get("artifact", {}).get("path", ""))
     if not artifact.is_file() or adoption_digest(artifact) != receipt.get("artifact", {}).get("sha256"):
         raise AdoptionError("completed source runtime adoption artifact identity drifted")
@@ -2791,7 +2892,8 @@ def _source_runtime_adopt_locked(args: argparse.Namespace, controller: Path,
     output = adoption_exact_external(args.output, controller, "adoption receipt")
     prefix = adoption_exact_external(args.install_prefix, controller, "runtime install prefix")
     prior = adoption_replay(output, controller, repository, target_ref,
-                            previous_sha, target_sha, prefix)
+                            previous_sha, target_sha, prefix,
+                            isolated_source=bool(getattr(args, "isolated_source", False)))
     if prior is not None:
         return prior
     if output.exists() or output.is_symlink():
@@ -2803,7 +2905,9 @@ def _source_runtime_adopt_locked(args: argparse.Namespace, controller: Path,
     if not owner_value:
         raise AdoptionError("source runtime adoption requires a registered integration owner")
     owner = Path(owner_value).resolve()
-    adoption_clean(owner, "integration owner")
+    isolated_source = bool(getattr(args, "isolated_source", False))
+    if not isolated_source:
+        adoption_clean(owner, "integration owner")
     adoption_git(repository, "merge-base", "--is-ancestor", previous_sha, target_sha)
     generation_path = controller / MANAGED_GENERATION_PATH
     generation = adoption_read_json(generation_path, "managed runtime generation")
@@ -2836,20 +2940,35 @@ def _source_runtime_adopt_locked(args: argparse.Namespace, controller: Path,
     adoption_declaration_admission(controller, repository, target_sha)
     # Freeze owner rollback identity only after every output, prefix,
     # generation, package, controller, launcher, and ancestry preflight passes.
-    owner_before = adoption_owner_preflight(repository, target_ref, target_sha, owner)
+    owner_before = (adoption_preserved_owner(repository, owner) if isolated_source else
+                    adoption_owner_preflight(repository, target_ref, target_sha, owner))
+
+    def assert_source() -> None:
+        if isolated_source:
+            adoption_assert_preserved_source(repository, target_ref, target_sha, owner, owner_before)
+        else:
+            adoption_assert_target(repository, target_ref, target_sha, owner)
+
+    if isolated_source:
+        assert_source()
     rebound = False
     prefix_owned = False
     dispatch: dict[str, Any] | None = None
     try:
-        # Owner movement is the first mutation and remains inside rollback scope.
-        adoption_prepare_owner(repository, target_ref, target_sha, owner, owner_before)
-        with tempfile.TemporaryDirectory(prefix="yylo-source-pack-") as temporary:
-            adoption_run(["npm", "pack", "--pack-destination", temporary], owner / "juno-code")
-            packs = list(Path(temporary).glob("*.tgz"))
-            if len(packs) != 1:
-                raise AdoptionError("npm pack did not produce exactly one source artifact")
-            artifact.write_bytes(packs[0].read_bytes())
-        adoption_assert_target(repository, target_ref, target_sha, owner)
+        if isolated_source:
+            # No topology reconciliation or global task inactivity is needed:
+            # neither retained worktrees nor task state are inputs to this build.
+            adoption_pack_isolated(repository, target_sha, artifact)
+        else:
+            # Legacy owner movement remains explicit and inside rollback scope.
+            adoption_prepare_owner(repository, target_ref, target_sha, owner, owner_before)
+            with tempfile.TemporaryDirectory(prefix="yylo-source-pack-") as temporary:
+                adoption_run(["npm", "pack", "--pack-destination", temporary], owner / "juno-code")
+                packs = list(Path(temporary).glob("*.tgz"))
+                if len(packs) != 1:
+                    raise AdoptionError("npm pack did not produce exactly one source artifact")
+                artifact.write_bytes(packs[0].read_bytes())
+        assert_source()
         if os.environ.get("YYLO_SOURCE_ADOPTION_TEST_MUTATE_ARTIFACT") == "1":
             artifact.write_bytes(artifact.read_bytes() + b"drift")
         metadata = Path(__file__).with_name("metadata_controller.py")
@@ -2870,12 +2989,12 @@ def _source_runtime_adopt_locked(args: argparse.Namespace, controller: Path,
         prefix_owned = True
         dispatch = adoption_public_launchers(old_executable, new_executable, launcher_before)
         adoption_verify_public_dispatch(dispatch)
-        adoption_assert_target(repository, target_ref, target_sha, owner)
+        assert_source()
         if os.environ.get("YYLO_SOURCE_ADOPTION_TEST_FAIL_AFTER_REBIND") == "1":
             raise AdoptionError("injected interruption after runtime rebind")
         refresh = managed_runtime_refresh(controller, repository, previous_sha, target_sha,
                                              task_id="source-adoption")
-        adoption_assert_target(repository, target_ref, target_sha, owner)
+        assert_source()
         doctor = managed_runtime_inspect(controller, repository, target_sha)
         admission = adoption_task_start_admission(controller, repository, target_sha)
         if not doctor["healthy"] or not admission["current"]:
@@ -2891,8 +3010,9 @@ def _source_runtime_adopt_locked(args: argparse.Namespace, controller: Path,
                                 "sha256": adoption_digest(install_receipt)},
                    "refresh_receipt": refresh["receipt"], "doctor": {"healthy": True},
                    "runtime_generation": admission, "dispatch": dispatch,
+                   "source_mode": "isolated" if isolated_source else "integration-owner",
                    "integration_owner": {"path": str(owner), "before": owner_before,
-                                         "after_head": target_sha},
+                                         "after_head": owner_before["head"] if isolated_source else target_sha},
                    "rollback_identity": before,
                    "duration_seconds": time.monotonic() - started,
                    "operator_steps": {"before": 5, "after": 2,
@@ -2927,7 +3047,8 @@ def _source_runtime_adopt_locked(args: argparse.Namespace, controller: Path,
                 if owned:
                     shutil.rmtree(prefix)
                 prefix_removed = not prefix.exists()
-            owner_restored = adoption_restore_owner(owner, owner_before)
+            owner_restored = (adoption_preserved_owner(repository, owner) == owner_before
+                              if isolated_source else adoption_restore_owner(owner, owner_before))
             rollback.update({"complete": bool(dispatch_restored and runtime_restored
                                                and prefix_removed and owner_restored
                                                and adoption_controller_config(controller, "juno.controller.runtimeExecutable") == old_executable
@@ -2978,6 +3099,8 @@ def parser() -> argparse.ArgumentParser:
     source_adopt.add_argument("--target-sha", required=True)
     source_adopt.add_argument("--install-prefix", type=Path, required=True)
     source_adopt.add_argument("--output", type=Path, required=True)
+    source_adopt.add_argument("--isolated-source", action="store_true",
+                              help="build an exact private source checkout; never move the retained owner")
     runtime_refresh = commands.add_parser("runtime-refresh", allow_abbrev=False)
     runtime_refresh.add_argument("--previous-sha", required=True)
     runtime_refresh.add_argument("--target-sha")
@@ -3044,7 +3167,7 @@ def main(argv: list[str] | None = None) -> int:
             payload, code = push(args.controller, dry_run=args.dry_run, apply=args.apply)
         print(json.dumps(payload, indent=2, sort_keys=True))
         return code
-    except (IntegrationError, ManagedRuntimeError,
+    except (IntegrationError, ManagedRuntimeError, AdoptionError,
             task_workspace.TaskWorkspaceError, OSError, json.JSONDecodeError) as exc:
         print(f"integration-workspace: {exc}", file=sys.stderr)
         return 2
