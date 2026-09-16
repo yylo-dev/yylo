@@ -93,6 +93,25 @@ describe('integration workspace CLI', () => {
     expect(invoke).toHaveBeenLastCalledWith(operation, { apply: '/tmp/plan.json' });
   });
 
+  it('forwards explicit non-legacy preserve-only planning without activating a runtime', async () => {
+    const invoke = vi.fn(async () => undefined);
+    const program = new Command().exitOverride();
+    configureIntegrationCommand(program, invoke);
+    await program.parseAsync(['node', 'yy', 'integration', 'repair', '--dry-run',
+      '--canonical-owner-refresh', '--preserve-owners', '/tmp/owner-approval.json']);
+    expect(invoke).toHaveBeenCalledWith('repair', { dryRun: true, canonicalOwnerRefresh: true,
+      preserveOwners: '/tmp/owner-approval.json' });
+  });
+
+  it('rejects preserve-only approval without an explicit refresh mode', async () => {
+    const invoke = vi.fn(async () => undefined);
+    const program = new Command().exitOverride();
+    configureIntegrationCommand(program, invoke);
+    await expect(program.parseAsync(['node', 'yy', 'integration', 'repair', '--dry-run',
+      '--preserve-owners', '/tmp/owner-approval.json'])).rejects.toThrow('requires --canonical-owner-refresh');
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
   it('treats bare integration push as explicit plan-and-publish authority', async () => {
     const invoke = vi.fn(async () => undefined);
     const program = new Command().exitOverride().configureOutput({ writeOut: () => undefined });
