@@ -1234,7 +1234,20 @@ class IntegrationWorkspaceTests(unittest.TestCase):
         self.assertEqual(value.get("schemaVersion"), 2)
         self.assertEqual(value.get("instructionBundle"), {
             "schemaVersion": "juno_instruction_bundle_declaration.v1",
-            "semanticVersion": "1.0.0"})
+            "semanticVersion": "1.1.0"})
+        outputs = {entry["destination"]: entry for entry in value["controllerOutputs"]}
+        aliases = {
+            ".juno_task/wiki/controller/git_worktree_lifecycle.md": ".juno_task/wiki/git_worktree_lifecycle.md",
+            ".juno_task/wiki/controller/yy_pi_progress.md": ".juno_task/wiki/watching_progress.md",
+            ".juno_task/wiki/controller/task_dependency_hydration.md": ".juno_task/wiki/task_dependency_hydration.md",
+        }
+        self.assertEqual(set(outputs), {"AGENTS.md", "CLAUDE.md", *aliases})
+        assets = {entry["destination"]: entry for entry in value["assets"]}
+        for alias, canonical in aliases.items():
+            self.assertEqual(outputs[alias]["source"], assets[canonical]["source"])
+            self.assertEqual(outputs[alias]["type"], "wiki")
+        self.assertFalse(any("/skills/" in destination for destination in outputs),
+                         "independent skills must not become CLI-managed outputs")
         allowed_keys = [{"source", "destination", "installClass", "type"},
                         {"source", "destination", "installClass", "type", "macro"}]
         for asset in value["assets"]:
