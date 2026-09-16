@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url';
 import fs from 'fs-extra';
 import managedAssetManifest from '../templates/managed-assets.json';
 import { version as packageVersion } from '../version.js';
+import {
+  assertInstructionVersion, instructionDeclarationCompatible, INSTRUCTION_IDENTITY_SCHEMA,
+} from './instruction-bundle-compatibility.js';
 import type { TargetBoundManagedRecovery } from './managed-controller-recovery.js';
 import {
   assertPackageSource,
@@ -31,6 +34,9 @@ type ManagedControllerOutputDefinition = {
   type: string;
 };
 
+if (!instructionDeclarationCompatible(managedAssetManifest.schemaVersion, managedAssetManifest.instructionBundle)) {
+  throw new Error('instruction_bundle_incompatible: package declaration requires a compatible CLI');
+}
 const INSTRUCTION_BUNDLE_DECLARATION =
   managedAssetManifest.instructionBundle as InstructionBundleDeclaration;
 const MANAGED_ASSET_DEFINITIONS = managedAssetManifest.assets as ManagedAssetDefinition[];
@@ -282,6 +288,7 @@ function instructionBundleIdentity(
   assets: Record<string, ManagedAssetRecord>,
   identityVersion = packageVersion,
 ): ManagedInstructionBundleIdentity {
+  assertInstructionVersion(INSTRUCTION_BUNDLE_DECLARATION.semanticVersion);
   const core = {
     schemaVersion: 'juno_instruction_bundle.v1' as const,
     semanticVersion: INSTRUCTION_BUNDLE_DECLARATION.semanticVersion,
@@ -303,8 +310,9 @@ function validateManifest(manifest: unknown, manifestPath: string): ManagedAsset
   }
   if (parsed.schemaVersion === 2) {
     const identity = parsed.instructionBundle;
-    if (identity?.schemaVersion !== 'juno_instruction_bundle.v1' ||
-        typeof identity.semanticVersion !== 'string' ||
+    assertInstructionVersion(identity?.semanticVersion);
+    if (identity?.schemaVersion !== INSTRUCTION_IDENTITY_SCHEMA ||
+        Object.keys(identity).sort().join(',') !== 'assetCount,assetsSha256,bundleSha256,packageVersion,schemaVersion,semanticVersion' ||
         typeof identity.packageVersion !== 'string' ||
         !Number.isInteger(identity.assetCount) ||
         !/^[0-9a-f]{64}$/.test(identity.assetsSha256) ||
