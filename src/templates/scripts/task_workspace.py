@@ -1520,9 +1520,11 @@ def derived_output_admission(repository: Path, target_sha: str,
     rows = managed.get("admissionOutputs")
     schema = managed.get("schemaVersion")
     instruction_declaration = managed.get("instructionBundle")
-    declaration_valid = (schema == 1 or (schema == 2 and instruction_declaration == {
-        "schemaVersion": "juno_instruction_bundle_declaration.v1",
-        "semanticVersion": "1.0.0"}))
+    declaration_valid = (schema == 1 or (schema == 2 and any(
+        instruction_declaration == {
+            "schemaVersion": "juno_instruction_bundle_declaration.v1",
+            "semanticVersion": version}
+        for version in ("1.0.0", "1.1.0"))))
     if not declaration_valid or not isinstance(managed.get("assets"), list) or not isinstance(rows, list):
         raise TaskWorkspaceError(f"invalid generated-output declaration {MANAGED_OUTPUT_DECLARATION}")
     for row in rows:
@@ -5682,7 +5684,7 @@ def _managed_inventory_identity_valid(inventory: Any) -> bool:
     bundle_sha = hashlib.sha256(json.dumps(core, separators=(",", ":")).encode()).hexdigest()
     return bool(isinstance(identity, dict)
                 and identity.get("schemaVersion") == "juno_instruction_bundle.v1"
-                and identity.get("semanticVersion") == "1.0.0"
+                and identity.get("semanticVersion") in ("1.0.0", "1.1.0")
                 and identity.get("packageVersion") == inventory["packageVersion"]
                 and identity.get("assetCount") == len(assets)
                 and identity.get("assetsSha256") == assets_sha
@@ -5693,7 +5695,13 @@ def _bind_instruction_bundle_identity(inventory: dict[str, Any]) -> None:
     if inventory.get("schemaVersion") != 2:
         return
     assets = inventory["assets"]
-    core = {"schemaVersion": "juno_instruction_bundle.v1", "semanticVersion": "1.0.0",
+    # Rebinding hashes must not downgrade an existing 1.1.0 identity.
+    identity = inventory.get("instructionBundle")
+    semantic_version = (identity.get("semanticVersion")
+                        if isinstance(identity, dict) else "1.0.0")
+    if semantic_version not in ("1.0.0", "1.1.0"):
+        raise TaskWorkspaceError("unsupported managed instruction bundle version")
+    core = {"schemaVersion": "juno_instruction_bundle.v1", "semanticVersion": semantic_version,
             "packageVersion": inventory["packageVersion"], "assetCount": len(assets),
             "assetsSha256": _managed_inventory_records_identity(assets)}
     inventory["instructionBundle"] = {**core, "bundleSha256": hashlib.sha256(

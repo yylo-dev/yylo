@@ -797,6 +797,30 @@ def install_fake_kanban_wrapper(controller: Path, board: Path) -> Path:
     return wrapper
 
 
+class InstructionBundleVersionTests(unittest.TestCase):
+    def test_supported_versions_round_trip_without_downgrade(self) -> None:
+        for version in ("1.0.0", "1.1.0"):
+            with self.subTest(version=version):
+                inventory = {"schemaVersion": 2, "packageName": "@yylo/cli",
+                             "packageVersion": "0.2.3", "assets": {},
+                             "instructionBundle": {"semanticVersion": version}}
+                task_runtime._bind_instruction_bundle_identity(inventory)
+                self.assertEqual(inventory["instructionBundle"]["semanticVersion"], version)
+                self.assertTrue(task_runtime._managed_inventory_identity_valid(inventory))
+                inventory["instructionBundle"]["bundleSha256"] = "0" * 64
+                self.assertFalse(task_runtime._managed_inventory_identity_valid(inventory))
+
+    def test_unknown_versions_are_not_silently_rebound(self) -> None:
+        for version in ("1.2.0", "2.0.0", None, [], {}):
+            with self.subTest(version=version):
+                inventory = {"schemaVersion": 2, "packageName": "@yylo/cli",
+                             "packageVersion": "0.2.3", "assets": {},
+                             "instructionBundle": {"semanticVersion": version}}
+                self.assertFalse(task_runtime._managed_inventory_identity_valid(inventory))
+                with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "unsupported"):
+                    task_runtime._bind_instruction_bundle_identity(inventory)
+
+
 class SemVerValidationTests(unittest.TestCase):
     def test_accepts_stable_prerelease_build_and_combined_versions(self) -> None:
         accepted = {
