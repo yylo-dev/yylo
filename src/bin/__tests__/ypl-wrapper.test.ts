@@ -193,6 +193,12 @@ describe('ypl wrapper', () => {
       await fs.chmod(path.join(binDir, 'yylo'), 0o755);
       await fs.symlink('yylo', path.join(binDir, 'yy'));
       await fs.writeFile(path.join(binDir, 'cli.mjs'), 'unused\n');
+      // Bootstrap admission resolves the workspace through the installed package,
+      // not the project's scripts. Include that real resolver in the fixture.
+      await fs.copy(
+        path.join(PROJECT_ROOT, 'src/templates/scripts/controller_resolver.py'),
+        path.join(tempDir, 'templates/scripts/controller_resolver.py'),
+      );
       await fs.writeFile(
         path.join(scriptsDir, 'bootstrap.sh'),
         '#!/usr/bin/env bash\nprintf "cwd=%s\\n" "$PWD"\nprintf "arg=%s\\n" "$@"\n',
@@ -202,7 +208,7 @@ describe('ypl wrapper', () => {
         reject: false,
         env: { ...process.env, PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}` },
       });
-      expect(result.exitCode).toBe(0);
+      expect(result.exitCode, result.stderr).toBe(0);
       expect(result.stdout).toContain(`cwd=${await fs.realpath(tempDir)}`);
       expect(result.stdout).toContain('arg=pi');
       expect(result.stdout).toContain(`arg=${tempDir}`);
