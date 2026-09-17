@@ -20,6 +20,26 @@ def git(root: Path, *args: str) -> str:
 
 
 class ManagedAgentRunnerTests(unittest.TestCase):
+    def test_neutral_reviewer_does_not_inherit_controller_authority(self):
+        args = runner.argparse.Namespace(mode='reviewer', controller_root=str(self.controller),
+            controller_branch='controller', tool_id='review', task_id='TASK',
+            agent_root=str(self.candidate), authority_map=None)
+        authority = ('JUNO_TASK_ROOT', 'JUNO_CONTROLLER_BRANCH', 'JUNO_WORKSPACE_ROLE',
+                     'JUNO_WORKSPACE_ENFORCEMENT', 'TASK_ROOT')
+        with mock.patch.dict(os.environ, {key: 'inherited' for key in authority}), \
+                mock.patch.object(runner, 'managed_node_contract', return_value=({'executable': '/usr/bin/node'}, os.environ['PATH'])):
+            env, contract = runner.clean_environment(args, self.tmp / 'capture', self.tmp / 'metadata')
+            for key in authority: self.assertNotIn(key, env)
+            self.assertEqual(contract['workspace_role'], 'unregistered')
+            self.assertEqual(env['JUNO_CONTROLLER_CHECKPOINT_ACTIVE'], '1')
+            self.assertEqual(env['YYLO_PROJECT_BOOTSTRAP_WRITES'], '0')
+            args.mode = 'worker'
+            env, contract = runner.clean_environment(args, self.tmp / 'capture', self.tmp / 'metadata',
+                                                      identity={'admission_kind': None})
+            self.assertEqual(env['JUNO_TASK_ROOT'], str(self.controller))
+            self.assertEqual(env['TASK_ROOT'], str(self.candidate))
+            self.assertEqual(contract['workspace_role'], 'task')
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="managed-agent-test-"))
         self.controller = self.tmp / "controller"; self.controller.mkdir()

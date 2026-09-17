@@ -34,7 +34,11 @@ Shared execution leases exclude generation writers. Active task pins bind the
 original attempt to its authenticated retained runtime. If a Juno source target
 advances beyond that old reader, the fully admitted current source reader may
 continue the same attempt only with shared-state compatibility; the retained pin,
-lease, hydration and creation receipt are not rewritten. Retained fallback invokes
+lease, hydration and creation receipt are not rewritten. Agent first-use routing
+uses the registered CLI option grammar and actual `--cwd`, not a launcher's
+scratch directory or an option-like prompt/file value. Neutral reviewers receive
+no controller authority assertions; their quiet output preserves the complete
+structured result even when streaming events are suppressed. Retained fallback invokes
 the old **executable**, not merely old scripts under the new executable. If that
 complete runtime cannot be proved safe, the command refuses precisely instead of
 promising availability.
