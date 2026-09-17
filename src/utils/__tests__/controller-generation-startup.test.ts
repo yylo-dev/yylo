@@ -7,12 +7,13 @@ import { assessControllerGeneration, ensureControllerGeneration } from '../contr
 import { generationCommandKind, generationInvocationContext } from '../controller-generation-command.js';
 import { Command } from 'commander';
 
-const engine = vi.hoisted(() => ({ plan: vi.fn(), apply: vi.fn(), recover: vi.fn(), ready: vi.fn() }));
+const engine = vi.hoisted(() => ({ plan: vi.fn(), apply: vi.fn(), recover: vi.fn(), ready: vi.fn(), discover: vi.fn() }));
 vi.mock('../controller-generation-migration.js', () => ({
   GENERATION_MIGRATION_ROOT: '.juno_task/runtime/generation-migration',
   prepareControllerGeneration: engine.plan, applyControllerGeneration: engine.apply,
   recoverControllerGeneration: engine.recover, assertControllerGenerationReady: engine.ready,
   packagedGenerationRoot: () => '/package',
+  discoverInstalledGeneration: engine.discover,
 }));
 
 describe('operation-specific first-use generation dispatch', () => {
@@ -64,6 +65,18 @@ describe('operation-specific first-use generation dispatch', () => {
       sha256: createHash('sha256').update(bytes).digest('hex') }, expect.any(Object));
     await fs.writeFile(artifact, 'corrupt cache');
     expect(await assessControllerGeneration(controller, candidate)).toMatchObject({ disposition: 'refused', code: 'package_provenance_invalid' });
+    expect(engine.apply).not.toHaveBeenCalled();
+  });
+
+  it('discovers global npm packages without a hidden lock through full engine authentication', async () => {
+    candidate = path.join(root, 'global/lib/node_modules/@yylo/cli');
+    await fs.outputJson(path.join(candidate, 'package.json'), { name: '@yylo/cli', version: '0.2.5' });
+    const evidence = { root: candidate, artifact: path.join(root, 'cached.tgz'), sha256: 'c'.repeat(64) };
+    engine.discover.mockResolvedValue({ evidence });
+    expect((await assessControllerGeneration(controller, candidate)).disposition).toBe('migration_required');
+    expect(engine.plan).toHaveBeenCalledWith(controller, evidence, expect.any(Object));
+    engine.discover.mockResolvedValue({ evidence: null });
+    expect(await assessControllerGeneration(controller, candidate)).toMatchObject({ disposition: 'refused' });
     expect(engine.apply).not.toHaveBeenCalled();
   });
 

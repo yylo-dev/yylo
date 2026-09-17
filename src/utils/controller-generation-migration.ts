@@ -173,9 +173,13 @@ async function maintenance<T>(projectDir: string, operation: string, request?: u
   }
 }
 
+export function discoverInstalledGeneration(packageRoot: string, cache: string): Promise<{ evidence: InstalledGenerationEvidence | null }> {
+  return maintenance(packageRoot, 'discover', { root: packageRoot, cache });
+}
+
 export function prepareControllerGeneration(projectDir: string, candidate: InstalledGenerationEvidence,
-  previous: InstalledGenerationEvidence): Promise<ControllerGenerationPlan> {
-  return maintenance(projectDir, 'plan', { candidate, previous });
+  previous: InstalledGenerationEvidence, repair = false): Promise<ControllerGenerationPlan> {
+  return maintenance(projectDir, repair ? 'repair-plan' : 'plan', { candidate, previous });
 }
 
 export function applyControllerGeneration(projectDir: string, plan: ControllerGenerationPlan): Promise<ControllerGenerationResult> {

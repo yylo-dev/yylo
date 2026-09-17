@@ -217,6 +217,94 @@ def authenticate(evidence: dict[str, str]) -> dict[str, Any]:
             "executable": str(root / "dist/bin/cli.mjs")}
 
 
+def discover_installed(root: Path, cache: Path) -> dict[str, str] | None:
+    """Bounded offline global-npm discovery. Cache keys never establish identity.
+
+    npm global installs omit the hidden lock. Authenticate content-addressed
+    cached tarballs against the *complete* installation, not version equality.
+    This read-only fallback creates neither npm receipts nor package metadata.
+    """
+    if root.absolute() != root.resolve() or cache.absolute() != cache.resolve():
+        raise Refusal("package_provenance_invalid", "symlinked installation/cache")
+    manifest = snapshot(safe(root, 'package.json'))
+    if manifest is None:
+        return None
+    package = decode_json(content(manifest))
+    if package.get('name') not in {'@yylo/cli', 'juno-code'}:
+        return None
+    index = safe(cache, '_cacache/index-v5')
+    if not index.is_dir():
+        return None
+    candidates = {}
+    count = size = 0
+    for directory, directories, filenames in os.walk(index, followlinks=False):
+        for name in directories + filenames:
+            if (Path(directory) / name).is_symlink():
+                raise Refusal('package_provenance_invalid', 'symlinked npm cache index')
+        for name in filenames:
+            p = Path(directory) / name
+            count += 1
+            size += p.stat().st_size
+            if count > 20000 or size > 32 * 1024 * 1024:
+                raise Refusal('package_provenance_bounds', 'npm cache index exceeds offline discovery bound')
+            # cacache buckets are append-only: the last valid entry for a key
+            # wins, including tombstones. Bucket SHA-1 protects framing only.
+            for line in p.read_bytes().splitlines():
+                try:
+                    checksum, payload = line.split(b'\t', 1)
+                    if hashlib.sha1(payload).hexdigest().encode() != checksum:
+                        continue
+                    row = json.loads(payload)
+                    key = row['key']
+                    if isinstance(key, str) and (key.startswith('pacote:tarball:')
+                            or (key.startswith('make-fetch-happen:request-cache:') and '.tgz' in key)):
+                        candidates[key] = row
+                except (ValueError, KeyError, TypeError):
+                    continue
+    seen = set()
+    # Stable newest-first order avoids unpacking older versions in the common case.
+    rows = sorted(candidates.values(), key=lambda row: str(row.get('time', '')), reverse=True)
+    for row in rows:
+        integrity = row.get('integrity', '')
+        if not isinstance(integrity, str) or not re.fullmatch(r'sha512-[A-Za-z0-9+/]+={0,2}', integrity):
+            continue
+        try:
+            checksum = base64.b64decode(integrity[7:], validate=True).hex()
+        except ValueError:
+            continue
+        if len(checksum) != 128 or checksum in seen:
+            continue
+        seen.add(checksum)
+        if len(seen) > 2048:
+            raise Refusal('package_provenance_bounds', 'too many offline artifact candidates')
+        artifact = safe(cache, f'_cacache/content-v2/sha512/{checksum[:2]}/{checksum[2:4]}/{checksum[4:]}')
+        if not artifact.is_file() or artifact.stat().st_size > LIMIT:
+            continue
+        packed = artifact.read_bytes()
+        if hashlib.sha512(packed).hexdigest() != checksum:
+            continue
+        try:
+            with tarfile.open(fileobj=io.BytesIO(packed), mode='r:gz') as archive:
+                found = None
+                unpacked = 0
+                for number, member in enumerate(archive):
+                    unpacked += member.size
+                    if unpacked > LIMIT or number >= 10000:
+                        raise Refusal('package_provenance_bounds', 'candidate archive exceeds bounds')
+                    if member.name == 'package/package.json':
+                        if member.isfile() and member.size <= 1024 * 1024:
+                            found = archive.extractfile(member).read()
+                        break
+                if found != content(manifest):
+                    continue
+            evidence = {'root': str(root), 'artifact': str(artifact), 'sha256': digest(packed)}
+            authenticate(evidence)
+            return evidence
+        except (Refusal, tarfile.TarError, KeyError, ValueError, EOFError):
+            continue
+    return None
+
+
 def assets(package: dict[str, Any]) -> dict[str, dict[str, Any]]:
     declaration = decode_json(package["files"]["dist/templates/managed-assets.json"])
     if not compatibility.instruction_declaration_compatible(declaration.get("schemaVersion"),
@@ -323,14 +411,16 @@ assert t._managed_inventory_identity_valid(json.loads((root/'.juno_task/managed-
             raise Refusal("proposed_admission_failed", result.stderr.decode(errors="replace")[-4000:])
 
 
-def plan(root: Path, candidate_evidence: dict[str, str], previous_evidence: dict[str, str]) -> dict[str, Any]:
+def plan(root: Path, candidate_evidence: dict[str, str], previous_evidence: dict[str, str],
+         repair: bool = False) -> dict[str, Any]:
     root = root.resolve()
     assert_ready(root)
-    return prepare(root, candidate_evidence, previous_evidence)
+    return prepare(root, candidate_evidence, previous_evidence, repair=repair)
 
 
 def prepare(root: Path, candidate_evidence: dict[str, str], previous_evidence: dict[str, str],
-            frozen: dict[str, Any] | None = None, attempt: str | None = None) -> dict[str, Any]:
+            frozen: dict[str, Any] | None = None, attempt: str | None = None,
+            repair: bool = False) -> dict[str, Any]:
     """Pure preparation, also used to authenticate recovery against frozen preimages."""
     authority = registration(root)
     def observe(name):
@@ -367,7 +457,7 @@ def prepare(root: Path, candidate_evidence: dict[str, str], previous_evidence: d
     old_assets, new_assets = assets(previous), assets(candidate)
     inventory_image = observe(INVENTORY)
     inventory = decode_json(content(inventory_image))
-    if inventory.get("packageName") != old_name or inventory.get("packageVersion") != old_version:
+    if inventory.get("packageName") != old_name or (not repair and inventory.get("packageVersion") != old_version):
         raise Refusal("previous_inventory_unverified", "package mismatch")
     check = copy.deepcopy(inventory)
     if adapter == "juno-code-2.1.3-rc.0.32" and check.get("schemaVersion") == 1:
@@ -375,21 +465,28 @@ def prepare(root: Path, candidate_evidence: dict[str, str], previous_evidence: d
     if not compatibility._managed_inventory_identity_valid(check):
         raise Refusal("previous_inventory_unverified", "malformed or forged identity")
     before, after = {}, {}
+    review_required = [INVENTORY] if repair and inventory.get('packageVersion') != old_version else []
     for name, record in inventory["assets"].items():
         relative(name)
         if name not in old_assets and name != POLICY:
             continue  # no write ownership over independent skills or localized config
         observed = observe(name)
         if observed is None or observed["sha256"] != record["installedSha256"]:
-            raise Refusal("managed_preimage_modified", name)
-        if name in old_assets and (observed["sha256"] != digest(old_assets[name]["data"])
+            if not repair or name == POLICY:
+                raise Refusal("managed_preimage_modified", name)
+            review_required.append(name)
+        if name in old_assets and (observed is None or observed["sha256"] != digest(old_assets[name]["data"])
                                   or record["sourceSha256"] != observed["sha256"]):
-            raise Refusal("previous_inventory_unverified", name)
+            if not repair:
+                raise Refusal("previous_inventory_unverified", name)
+            review_required.append(name)
     for name in sorted(set(old_assets) | set(new_assets)):
         observed = observe(name)
         if name in old_assets and observed is not None:
             if observed["sha256"] != digest(old_assets[name]["data"]):
-                raise Refusal("managed_preimage_modified", name)
+                if not repair:
+                    raise Refusal("managed_preimage_modified", name)
+                review_required.append(name)
         elif observed is not None:
             raise Refusal("new_destination_occupied", name)
         before[name] = observed
@@ -473,6 +570,8 @@ def prepare(root: Path, candidate_evidence: dict[str, str], previous_evidence: d
     body = {"schema_version": SCHEMA, "controller": str(root), "authority": authority, "adapter": adapter,
             "candidate": candidate_evidence, "previous": previous_evidence, "before": before, "after": after,
             "guards": guards, "active_pins": pins, "attempt": attempt or secrets.token_hex(16)}
+    if repair:
+        body.update(repair=True, review_required=sorted(set(review_required)))
     return {**body, "id": digest(encoded(body))}
 
 
@@ -672,7 +771,7 @@ def apply(root: Path, value: dict[str, Any], boundary=None) -> dict[str, Any]:
         assert_ready(root)
         check_plan(value, root)
         # Recompute from authenticated packages and live preimages under the lock.
-        if prepare(root, value["candidate"], value["previous"], attempt=value["attempt"]) != value:
+        if prepare(root, value["candidate"], value["previous"], attempt=value["attempt"], repair=value.get('repair', False)) != value:
             raise Refusal("plan_stale", "exact proposed generation changed")
         journal = ROOT + "/" + value["id"]
         if any(safe(root, journal + "/" + outcome + ".json").exists()
@@ -715,7 +814,7 @@ def recover(root: Path, transaction_id: str, rollback: bool = False, boundary=No
         # A self-hash is integrity, not write authority. Reconstruct the complete
         # authenticated adapter output against frozen preimages before any writes.
         reconstructed = prepare(root, value["candidate"], value["previous"],
-                                frozen={**value["before"], **value["guards"]}, attempt=value["attempt"])
+                                frozen={**value["before"], **value["guards"]}, attempt=value["attempt"], repair=value.get('repair', False))
         if reconstructed != value:
             raise Refusal("journal_authority_invalid", "write set is not the authenticated generation projection")
         fence = safe(root, ROOT + "/fence.json")
@@ -839,7 +938,7 @@ def pinned_task_runtime(root: Path, task_id: str) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(allow_abbrev=False)
-    parser.add_argument("operation", choices=["plan", "apply", "resume", "rollback", "ready", "hold-lock", "hold-read", "task-pin", "runtime-ready"])
+    parser.add_argument("operation", choices=["plan", "repair-plan", "discover", "apply", "resume", "rollback", "ready", "hold-lock", "hold-read", "task-pin", "runtime-ready"])
     parser.add_argument("--controller", type=Path, required=True)
     parser.add_argument("--request", type=Path)
     parser.add_argument("--transaction-id")
@@ -862,8 +961,10 @@ def main() -> int:
             return 0
         if args.operation == "task-pin":
             answer = pinned_task_runtime(args.controller, request["task_id"])
-        elif args.operation == "plan":
-            answer = plan(args.controller, request["candidate"], request["previous"])
+        elif args.operation == "discover":
+            answer = {'evidence': discover_installed(Path(request['root']), Path(request['cache']))}
+        elif args.operation in {"plan", "repair-plan"}:
+            answer = plan(args.controller, request["candidate"], request["previous"], repair=args.operation == 'repair-plan')
         elif args.operation == "apply":
             answer = apply(args.controller, request)
         elif args.operation in {"resume", "rollback"}:

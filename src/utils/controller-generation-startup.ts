@@ -4,7 +4,7 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import {
   assertControllerGenerationReady, prepareControllerGeneration, applyControllerGeneration,
-  recoverControllerGeneration, GENERATION_MIGRATION_ROOT,
+  recoverControllerGeneration, GENERATION_MIGRATION_ROOT, discoverInstalledGeneration,
   type InstalledGenerationEvidence, type ControllerGenerationPlan,
 } from './controller-generation-migration.js';
 import { assertSafeManagedWritePath } from './managed-update-transaction.js';
@@ -32,10 +32,11 @@ async function installedEvidence(root: string): Promise<InstalledGenerationEvide
     if (path.basename(modules) !== 'node_modules') return undefined;
     const lock = await safeJson(modules, '.package-lock.json');
     const entry = lock?.packages?.[`node_modules/${pkg.name}`];
+    const cache = path.resolve(process.env.npm_config_cache || path.join(os.homedir(), '.npm'));
+    if (!lock) return (await discoverInstalledGeneration(root, cache)).evidence ?? undefined;
     if (!entry || entry.version !== pkg.version || !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(entry.integrity ?? '')) return undefined;
     const digest = Buffer.from(entry.integrity.slice(7), 'base64').toString('hex');
     if (digest.length !== 128) return undefined;
-    const cache = path.resolve(process.env.npm_config_cache || path.join(os.homedir(), '.npm'));
     const artifact = path.join(cache, '_cacache/content-v2/sha512', digest.slice(0, 2), digest.slice(2, 4), digest.slice(4));
     await assertSafeManagedWritePath(cache, artifact);
     if (!(await fs.pathExists(artifact))) return undefined;
@@ -162,6 +163,17 @@ export async function assessControllerGeneration(controller: string, packageRoot
     return { disposition: 'refused', controller, code: detail.split(':', 1)[0] ?? 'generation_invalid', detail,
       safeNextAction: 'Preserve controller bytes and prior runtime. Inspect yy scripts generation doctor; install authenticated side-by-side packages with retained artifact evidence before migration. Do not copy scripts or retarget the project.' };
   }
+}
+
+/** Explicit reviewed recovery only; never selected by automatic assessment. */
+export async function prepareInstalledControllerRepair(controller: string, packageRoot: string): Promise<ControllerGenerationPlan> {
+  const candidate = await installedEvidence(path.resolve(packageRoot));
+  const identity = await safeJson(controller, '.juno_task/runtime/identity.json');
+  const previousRoot = typeof identity?.executable === 'string'
+    ? path.resolve(path.dirname(identity.executable), '../..') : undefined;
+  const previous = previousRoot ? await installedEvidence(previousRoot) : undefined;
+  if (!candidate || !previous) throw new Error('generation_provenance_required: authenticated candidate and previous artifacts required');
+  return prepareControllerGeneration(controller, candidate, previous, true);
 }
 
 /** No prompt and no network. Only the engine can authenticate and mutate the write set. */

@@ -124,6 +124,49 @@ class GenerationTests(unittest.TestCase):
     def plan(self):
         return migration.plan(self.controller, self.candidate, self.previous)
 
+    def test_global_npm_cache_discovery_authenticates_complete_installed_package(self):
+        import hashlib
+        import base64
+        cache = self.root / 'cache'
+        packed = Path(self.candidate['artifact']).read_bytes()
+        digest = hashlib.sha512(packed).hexdigest()
+        target = cache / '_cacache/content-v2/sha512' / digest[:2] / digest[2:4] / digest[4:]
+        write(target, packed)
+        entry = migration.encoded({'key': 'pacote:tarball:file:/external/release.tgz',
+            'integrity': 'sha512-' + base64.b64encode(bytes.fromhex(digest)).decode(), 'time': 1}).rstrip(b'\n')
+        write(cache / '_cacache/index-v5/aa/bb/key', b'\n' + hashlib.sha1(entry).hexdigest().encode() + b'\t' + entry + b'\n')
+        result = migration.discover_installed(Path(self.candidate['root']), cache)
+        self.assertEqual(result['sha256'], self.candidate['sha256'])
+        self.assertEqual(result['artifact'], str(target))
+        write(Path(self.candidate['root']) / 'dist/bin/cli.mjs', b'tampered')
+        self.assertIsNone(migration.discover_installed(Path(self.candidate['root']), cache))
+        write(target, b'corrupt cache')
+        self.assertIsNone(migration.discover_installed(Path(self.candidate['root']), cache))
+
+    def test_mixed_inventory_requires_explicit_reviewed_repair_and_preserves_preimages(self):
+        p = self.controller / migration.INVENTORY
+        value = json.loads(p.read_text())
+        value['packageVersion'] = '0.2.3-rc.3'
+        write(p, value)
+        write(self.controller / 'AGENTS.md', b'custom instruction to preserve')
+        with self.assertRaisesRegex(migration.Refusal, 'previous_inventory_unverified'):
+            self.plan()
+        plan = migration.plan(self.controller, self.candidate, self.previous, repair=True)
+        self.assertTrue(plan['repair'])
+        self.assertIn('AGENTS.md', plan['review_required'])
+        before = (self.controller / 'AGENTS.md').read_bytes()
+        migration.apply(self.controller, plan)
+        self.assertEqual((self.controller / migration.ROOT / plan['id'] / 'previous/AGENTS.md').read_bytes(), before)
+        self.assertEqual(json.loads(p.read_text())['packageVersion'], '0.2.4')
+        self.assertEqual(migration.plan(self.controller, self.candidate, self.candidate)['active_pins']['ABC123']['attempt'], 3)
+
+    def test_mixed_repair_refuses_a_stale_reviewed_preimage(self):
+        plan = migration.plan(self.controller, self.candidate, self.previous, repair=True)
+        write(self.controller / 'AGENTS.md', b'changed after owner review')
+        with self.assertRaisesRegex(migration.Refusal, 'plan_stale'):
+            migration.apply(self.controller, plan)
+        self.assertFalse((self.controller / migration.ROOT / 'fence.json').exists())
+
     def test_complete_generation_preserves_dirty_files_skills_state_and_target(self):
         write(self.controller / 'unrelated.txt', b'dirty unrelated\x00')
         write(self.controller / '.pi/skills/independent/SKILL.md', b'independent dirty skill')
