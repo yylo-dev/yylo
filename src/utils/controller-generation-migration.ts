@@ -19,6 +19,7 @@ export interface InstalledGenerationEvidence {
 export interface ControllerGenerationPlan {
   schema_version: 'yylo_controller_generation_transaction.v1';
   id: string;
+  attempt: string;
   controller: string;
   candidate: InstalledGenerationEvidence;
   previous: InstalledGenerationEvidence;

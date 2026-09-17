@@ -21,6 +21,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import secrets
 import subprocess
 import sys
 import tarfile
@@ -315,7 +316,7 @@ def plan(root: Path, candidate_evidence: dict[str, str], previous_evidence: dict
 
 
 def prepare(root: Path, candidate_evidence: dict[str, str], previous_evidence: dict[str, str],
-            frozen: dict[str, Any] | None = None) -> dict[str, Any]:
+            frozen: dict[str, Any] | None = None, attempt: str | None = None) -> dict[str, Any]:
     """Pure preparation, also used to authenticate recovery against frozen preimages."""
     authority = registration(root)
     def observe(name):
@@ -457,7 +458,7 @@ def prepare(root: Path, candidate_evidence: dict[str, str], previous_evidence: d
     admission(root, candidate, proposed, authority)
     body = {"schema_version": SCHEMA, "controller": str(root), "authority": authority, "adapter": adapter,
             "candidate": candidate_evidence, "previous": previous_evidence, "before": before, "after": after,
-            "guards": guards, "active_pins": pins}
+            "guards": guards, "active_pins": pins, "attempt": attempt or secrets.token_hex(16)}
     return {**body, "id": digest(encoded(body))}
 
 
@@ -485,6 +486,8 @@ def check_plan(value: dict[str, Any], root: Path, rollback: bool = False) -> Non
     body = {key: item for key, item in value.items() if key != "id"}
     if value.get("schema_version") != SCHEMA or value.get("controller") != str(root) or value.get("id") != digest(encoded(body)):
         raise Refusal("journal_corrupt", "plan identity mismatch")
+    if not isinstance(value.get("attempt"), str) or not re.fullmatch(r"[0-9a-f]{32}", value["attempt"]):
+        raise Refusal("journal_corrupt", "invalid transaction attempt")
     if registration(root) != value["authority"]:
         raise Refusal("registration_changed", "controller or product target moved")
     for name, expected in value["guards"].items():
@@ -655,9 +658,12 @@ def apply(root: Path, value: dict[str, Any], boundary=None) -> dict[str, Any]:
         assert_ready(root)
         check_plan(value, root)
         # Recompute from authenticated packages and live preimages under the lock.
-        if plan(root, value["candidate"], value["previous"]) != value:
+        if prepare(root, value["candidate"], value["previous"], attempt=value["attempt"]) != value:
             raise Refusal("plan_stale", "exact proposed generation changed")
         journal = ROOT + "/" + value["id"]
+        if any(safe(root, journal + "/" + outcome + ".json").exists()
+               for outcome in ("completed", "rolled_back")):
+            raise Refusal("transaction_terminal", "prepare a fresh attempt; terminal journals cannot be reused")
         publish(safe(root, journal + "/intent.json"), encoded(value), immutable=True)
         if boundary:
             boundary("intent")
@@ -695,7 +701,7 @@ def recover(root: Path, transaction_id: str, rollback: bool = False, boundary=No
         # A self-hash is integrity, not write authority. Reconstruct the complete
         # authenticated adapter output against frozen preimages before any writes.
         reconstructed = prepare(root, value["candidate"], value["previous"],
-                                frozen={**value["before"], **value["guards"]})
+                                frozen={**value["before"], **value["guards"]}, attempt=value["attempt"])
         if reconstructed != value:
             raise Refusal("journal_authority_invalid", "write set is not the authenticated generation projection")
         fence = safe(root, ROOT + "/fence.json")
