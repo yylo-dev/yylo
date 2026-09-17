@@ -54,7 +54,7 @@ export function generationCommandKind(args: string[]): 'read' | 'execute' | 'mai
 }
 
 /** Runs before any installer or local runtime selection. Discovery never migrates. */
-export async function prepareControllerCommand(cwd: string, commandArgs: string[], rawArgs: string[]): Promise<boolean> {
+export async function prepareControllerCommand(cwd: string, commandArgs: string[], rawArgs: string[], invocationCwd = cwd): Promise<boolean> {
   const kind = generationCommandKind(commandArgs);
   if (kind === 'skip') return false;
   // Presence only; routing/authority comes exclusively from the installed resolver.
@@ -129,7 +129,7 @@ export async function prepareControllerCommand(cwd: string, commandArgs: string[
   console.error(`Using retained controller runtime: ${assessment.reason}`);
   const exit = await new Promise<number>((resolve, reject) => {
     const child = spawn(process.execPath, [assessment.executable, ...rawArgs], {
-      cwd, stdio: 'inherit', env: { ...process.env, YYLO_GENERATION_REDISPATCH: assessment.executable },
+      cwd: invocationCwd, stdio: 'inherit', env: { ...process.env, YYLO_GENERATION_REDISPATCH: assessment.executable },
     });
     const signals = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'] as const;
     const forwarding = signals.map(signal => {

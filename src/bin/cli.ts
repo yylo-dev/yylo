@@ -2263,7 +2263,7 @@ async function main(): Promise<void> {
     process.exitCode = error.exitCode;
     return;
   }
-  if (!generationContext.version && await prepareControllerCommand(generationContext.cwd, generationArgs, cliArgs)) return;
+  if (!generationContext.version && await prepareControllerCommand(generationContext.cwd, generationArgs, cliArgs, process.cwd())) return;
   // Implicit startup writes require resolver-confirmed controller identity. Do
   // this once, before any project installer, and let invalid registration fail
   // closed before command parsing or agent dispatch. Explicit update commands

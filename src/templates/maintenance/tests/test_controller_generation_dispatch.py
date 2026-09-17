@@ -6,6 +6,7 @@ representative generations, not claims about a historical published tarball.
 """
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -164,6 +165,14 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         self.assertEqual(invoke('task', 'start', 'Z', cli=str(unsupported / 'dist/bin/cli.mjs'))['state'], 'WORKING')
         self.assertEqual((controller / migration.CURRENT).read_bytes(), marker)
         self.assertEqual((controller / 'AGENTS.md').read_bytes(), b'candidate guidance\n')
+        relative = subprocess.run(['node', str(unsupported / 'dist/bin/cli.mjs'), 'pi',
+            '-w', os.path.relpath(controller, root), '-f', 'missing-relative-prompt.txt'],
+            cwd=root, env=env, capture_output=True, text=True, timeout=120)
+        self.assertNotEqual(relative.returncode, 0)  # Missing input must never launch a model.
+        self.assertIn('Using retained controller runtime:', relative.stderr)
+        clean_stderr = re.sub(r'\x1b\[[0-9;]*m', '', relative.stderr)
+        self.assertIn('Working directory: ' + str(root), [line.strip() for line in clean_stderr.splitlines()])
+        self.assertNotIn(str(controller / controller.name), relative.stderr)
         failed = []
         for cli in (executable, str(unsupported / 'dist/bin/cli.mjs')):
             failed.append(subprocess.run(['node', cli, 'task', 'start', 'MISSING'], cwd=controller, env=env,
