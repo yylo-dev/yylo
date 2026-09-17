@@ -289,6 +289,26 @@ class GenerationTests(unittest.TestCase):
         for name, expected in value['before'].items():
             self.assertEqual(migration.snapshot(migration.path_for(self.controller, name, value['authority'])), expected)
 
+    def test_rollback_retry_has_distinct_attempt_and_independent_recovery(self):
+        first = self.plan()
+        def crash(boundary):
+            if boundary == 'readback':
+                raise InterruptedError()
+        with self.assertRaises(InterruptedError):
+            migration.apply(self.controller, first, boundary=crash)
+        migration.recover(self.controller, first['id'], rollback=True)
+        with self.assertRaisesRegex(migration.Refusal, 'transaction_terminal'):
+            migration.apply(self.controller, first, boundary=crash)
+        self.assertFalse((self.controller / migration.ROOT / 'fence.json').exists())
+        second = self.plan()
+        self.assertNotEqual(first['id'], second['id'])
+        with self.assertRaises(InterruptedError):
+            migration.apply(self.controller, second, boundary=crash)
+        self.assertEqual(migration.recover(self.controller, second['id'])['outcome'], 'completed')
+        self.assertFalse((self.controller / migration.ROOT / first['id'] / 'completed.json').exists())
+        self.assertFalse((self.controller / migration.ROOT / second['id'] / 'rolled_back.json').exists())
+        self.assertFalse((self.controller / migration.ROOT / 'fence.json').exists())
+
     def test_directory_parents_are_durable_before_activation(self):
         value = self.plan()
         seen = []
