@@ -141,7 +141,9 @@ def scenario(artifact, historical=False):
         executable = candidate_root / 'dist/bin/cli.mjs'
 
         def invoke(*args):
-            result = subprocess.run(['node', str(executable), *args], cwd=controller, env=env,
+            command = ['node', str(executable)] if historical else [str(candidate_bin / 'yy')]
+            result = subprocess.run([*command, *args], cwd=controller,
+                                    env={**env, 'PATH': str(candidate_bin) + os.pathsep + env['PATH']},
                                     capture_output=True, text=True, timeout=180)
             if result.returncode:
                 try:
@@ -177,7 +179,11 @@ def scenario(artifact, historical=False):
         assert (controller / 's1034-out.txt').read_bytes() == b'unrelated output\x00preserved'
         assert (controller / '.pi/skills/independent/SKILL.md').read_bytes() == b'independent custom skill'
         if historical:
-            dependency = candidate_root / 'dist/templates/scripts/metadata_controller.py'
+            # Activation retains an immutable executable. Tamper that *active*
+            # dependency, not the now-unused mutable npm installation.
+            active_root = Path(json.loads((controller / migration.CURRENT).read_text())['candidate']['root'])
+            assert active_root != candidate_root
+            dependency = active_root / 'dist/templates/scripts/metadata_controller.py'
             original = dependency.read_bytes()
             marker = root / 'untrusted-import-ran'
             try:

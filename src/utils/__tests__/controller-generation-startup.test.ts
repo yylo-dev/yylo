@@ -4,16 +4,17 @@ import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { assessControllerGeneration, ensureControllerGeneration } from '../controller-generation-startup.js';
-import { generationCommandKind, generationInvocationContext } from '../controller-generation-command.js';
+import { assertExternalGenerationPlan, generationCommandKind, generationInvocationContext } from '../controller-generation-command.js';
 import { Command } from 'commander';
 
-const engine = vi.hoisted(() => ({ plan: vi.fn(), apply: vi.fn(), recover: vi.fn(), ready: vi.fn(), discover: vi.fn() }));
+const engine = vi.hoisted(() => ({ plan: vi.fn(), apply: vi.fn(), recover: vi.fn(), ready: vi.fn(), discover: vi.fn(), retain: vi.fn() }));
 vi.mock('../controller-generation-migration.js', () => ({
   GENERATION_MIGRATION_ROOT: '.juno_task/runtime/generation-migration',
   prepareControllerGeneration: engine.plan, applyControllerGeneration: engine.apply,
   recoverControllerGeneration: engine.recover, assertControllerGenerationReady: engine.ready,
   packagedGenerationRoot: () => '/package',
   discoverInstalledGeneration: engine.discover,
+  retainInstalledGeneration: engine.retain,
 }));
 
 describe('operation-specific first-use generation dispatch', () => {
@@ -32,7 +33,9 @@ describe('operation-specific first-use generation dispatch', () => {
       });
     }
     await fs.outputJson(path.join(controller, '.juno_task/runtime/identity.json'), { executable: path.join(previous, 'dist/bin/cli.mjs') });
-    engine.plan.mockResolvedValue({ id, controller, before: {}, after: {} });
+    const evidence = { root: candidate, artifact: path.join(root, 'candidate.tgz'), sha256: 'b'.repeat(64) };
+    engine.plan.mockResolvedValue({ id, controller, candidate: evidence, previous: { ...evidence, root: previous }, before: {}, after: {} });
+    engine.retain.mockResolvedValue({ evidence });
     engine.apply.mockResolvedValue({ id, outcome: 'completed' });
     engine.ready.mockResolvedValue(undefined);
   });
@@ -40,6 +43,16 @@ describe('operation-specific first-use generation dispatch', () => {
     if (oldCache === undefined) delete process.env.npm_config_cache;
     else process.env.npm_config_cache = oldCache;
     await fs.remove(root);
+  });
+
+  it('refuses plan destinations inside even malformed repositories without interpreting Git errors', async () => {
+    const external = path.join(root, 'private-plan.json');
+    await expect(assertExternalGenerationPlan(external)).resolves.toBeUndefined();
+    await fs.outputFile(path.join(root, '.git'), 'malformed gitfile');
+    await expect(assertExternalGenerationPlan(external)).rejects.toThrow('outside Git');
+    await fs.remove(path.join(root, '.git'));
+    await fs.outputFile(path.join(root, 'HEAD'), 'malformed bare repo');
+    await expect(assertExternalGenerationPlan(external)).rejects.toThrow('outside Git');
   });
 
   it('doctor assesses the same migration without writes or apply', async () => {
@@ -93,6 +106,17 @@ describe('operation-specific first-use generation dispatch', () => {
     expect(engine.apply).toHaveBeenCalledWith(controller, expect.objectContaining({ id }));
     expect(engine.ready).toHaveBeenCalledWith(controller);
   });
+  it('reuses a retained copy for the same global artifact without migrating back to a mutable npm path', async () => {
+    const previous = path.join(root, 'previous');
+    await fs.outputJson(path.join(controller, '.juno_task/runtime/generation-migration/current.json'), {
+      candidate: { root: previous, artifact: path.join(root, 'previous.tgz'), sha256: 'b'.repeat(64) },
+    });
+    expect((await assessControllerGeneration(controller, candidate)).disposition).toBe('ready');
+    expect(engine.plan).toHaveBeenCalledWith(controller, expect.objectContaining({ root: candidate }), expect.any(Object));
+    expect(engine.plan).toHaveBeenLastCalledWith(controller, expect.objectContaining({ root: previous }), expect.objectContaining({ root: previous }));
+    expect(engine.retain).not.toHaveBeenCalled();
+  });
+
   it('never applies unknown or customized state', async () => {
     engine.plan.mockRejectedValue(new Error('managed_preimage_modified: .juno_task/scripts/task_workspace.py'));
     const result = await assessControllerGeneration(controller, candidate);

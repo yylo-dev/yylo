@@ -158,7 +158,7 @@ async function maintenance<T>(projectDir: string, operation: string, request?: u
     }
     if (transactionId) args.push('--transaction-id', transactionId);
     try {
-      const { stdout } = await execFile('python3', args, { cwd: projectDir, maxBuffer: 64 * 1024 * 1024 });
+      const { stdout } = await execFile('python3', args, { cwd: projectDir, maxBuffer: 64 * 1024 * 1024, timeout: operation === 'retain' ? 180_000 : 120_000 });
       return JSON.parse(stdout) as T;
     } catch (error) {
       const output = (error as { stdout?: string }).stdout;
@@ -171,6 +171,11 @@ async function maintenance<T>(projectDir: string, operation: string, request?: u
   } finally {
     await fs.remove(temporary);
   }
+}
+
+export function retainInstalledGeneration(projectDir: string, evidence: InstalledGenerationEvidence,
+  cache: string, state: string): Promise<{ evidence: InstalledGenerationEvidence }> {
+  return maintenance(projectDir, 'retain', { evidence, cache, state });
 }
 
 export function discoverInstalledGeneration(packageRoot: string, cache: string): Promise<{ evidence: InstalledGenerationEvidence | null }> {
