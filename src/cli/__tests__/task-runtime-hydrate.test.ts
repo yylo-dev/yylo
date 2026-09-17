@@ -1,8 +1,10 @@
 import os from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import path from 'node:path';
 import fs from 'fs-extra';
 import { afterEach, describe, expect, it } from 'vitest';
-import { selectTaskWorkspaceRuntime } from '../commands/task.js';
+import { selectTaskWorkspaceRuntime, withTaskPythonBytecodeBoundary } from '../commands/task.js';
 
 const roots: string[] = [];
 
@@ -39,6 +41,29 @@ afterEach(async () => {
 });
 
 describe('task hydrate recovery runtime routing', () => {
+  it('neither consumes sibling bytecode nor writes into packaged modules', async () => {
+    const { packaged } = await fixture();
+    const directory = path.dirname(packaged);
+    const helper = path.join(directory, 'helper.py');
+    const execute = promisify(execFile);
+    await fs.writeFile(helper, 'value = "bad!"\n');
+    const stamp = await fs.stat(helper);
+    await execute('python3', ['-c', 'import py_compile,sys; py_compile.compile(sys.argv[1], doraise=True)', helper]);
+    await fs.writeFile(helper, 'value = "good"\n');
+    await fs.utimes(helper, stamp.atime, stamp.mtime);
+    await fs.writeFile(path.join(directory, 'fresh.py'), 'value = 42\n');
+    await fs.writeFile(packaged, 'import helper, fresh\nassert helper.value == "good"\nassert fresh.value == 42\n');
+    const before = await fs.readdir(path.join(directory, '__pycache__'));
+    let cache = '';
+    await withTaskPythonBytecodeBoundary(process.env, async (flags, env) => {
+      cache = env.PYTHONPYCACHEPREFIX!;
+      expect(env.PYTHONDONTWRITEBYTECODE).toBe('1');
+      await execute('python3', [...flags, packaged], { env });
+    });
+    expect(await fs.readdir(path.join(directory, '__pycache__'))).toEqual(before);
+    expect(await fs.pathExists(cache)).toBe(false);
+  });
+
   it('uses the protocol-checked package runtime instead of a stale selected runtime', async () => {
     const { controller, packaged } = await fixture();
     await expect(selectTaskWorkspaceRuntime(controller, 'hydrate', [packaged]))
