@@ -3,7 +3,7 @@ import fs from 'fs-extra';
 import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
-import { assessControllerGeneration, ensureControllerGeneration } from '../controller-generation-startup.js';
+import { assessControllerGeneration, ensureControllerGeneration, prepareInstalledControllerRepair } from '../controller-generation-startup.js';
 import { assertExternalGenerationPlan, generationCommandKind, generationInvocationContext } from '../controller-generation-command.js';
 import { Command } from 'commander';
 
@@ -115,6 +115,16 @@ describe('operation-specific first-use generation dispatch', () => {
     expect(engine.plan).toHaveBeenCalledWith(controller, expect.objectContaining({ root: candidate }), expect.any(Object));
     expect(engine.plan).toHaveBeenLastCalledWith(controller, expect.objectContaining({ root: previous }), expect.objectContaining({ root: previous }));
     expect(engine.retain).not.toHaveBeenCalled();
+  });
+
+  it('binds explicit repair plans to the retained candidate before owner review', async () => {
+    const retained = { root: path.join(root, 'immutable'), artifact: path.join(root, 'retained.tgz'), sha256: 'b'.repeat(64) };
+    engine.retain.mockResolvedValue({ evidence: retained });
+    await prepareInstalledControllerRepair(controller, candidate);
+    expect(engine.plan).toHaveBeenNthCalledWith(1, controller, expect.objectContaining({ root: candidate }), expect.any(Object), true);
+    expect(engine.retain).toHaveBeenCalledOnce();
+    expect(engine.plan).toHaveBeenLastCalledWith(controller, retained, expect.any(Object), true);
+    expect(engine.apply).not.toHaveBeenCalled();
   });
 
   it('never applies unknown or customized state', async () => {
