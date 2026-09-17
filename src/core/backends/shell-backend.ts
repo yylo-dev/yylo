@@ -965,6 +965,11 @@ export class ShellBackend implements Backend {
 
       const isPiLiveMode = isPython && subagentType === 'pi' && request.arguments?.live === true;
       const shouldAttachLiveTerminal = isPiLiveMode && process.stdout.isTTY === true;
+      if (isPython && subagentType === 'pi' && !isPiLiveMode) {
+        // Python stdout is an internal pipe, not the user's output destination.
+        // Override inherited hints so redirected/nested runs cannot leak ANSI.
+        env.JUNO_PI_OUTPUT_TTY = process.stdout.isTTY === true ? '1' : '0';
+      }
 
       if (this.config!.debug && isPiLiveMode) {
         engineLogger.debug(

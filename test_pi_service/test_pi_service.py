@@ -2074,7 +2074,7 @@ class TestRunPiRawToolOutputBuffering:
 
         out = capsys.readouterr().out
         assert '"event":"toolcall_end"' not in out
-        assert out.count("[TOOL]") == 1
+        assert out.count("[tool:bash]") == 1
         assert "[TOOL_RESPONSE]\n  hi\n[/TOOL_RESPONSE]" in out
 
     def test_slow_tool_emits_running_then_completion_without_repeating_input(self, monkeypatch, capsys):
@@ -2093,7 +2093,7 @@ class TestRunPiRawToolOutputBuffering:
         assert rc == 0
 
         out = capsys.readouterr().out
-        assert out.count("[TOOL]") == 2
+        assert out.count("[tool:bash]") == 2
         assert '"status":"running"' in out
         assert '"status":"done"' in out
         running, completed = out.split("\n\n", 1)
@@ -4375,6 +4375,35 @@ class TestSemanticHeadlessRenderer:
         assert '"cost_usd":0.5001' in output
         assert output.endswith("[/STATUS]")
 
+    @pytest.mark.parametrize("hint,expected", [("1", True), ("0", False)])
+    def test_outer_terminal_color_hint(self, monkeypatch, hint, expected):
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+        monkeypatch.setenv("JUNO_PI_OUTPUT_TTY", hint)
+        assert self.svc._color_enabled() is expected
+        for style in (self.svc._style_thinking, self.svc._style_assistant,
+                      self.svc._style_semantic_input, self.svc._style_semantic_response):
+            assert ("\x1b[" in style("sample")) is expected
+        monkeypatch.setenv("NO_COLOR", "")
+        assert self.svc._color_enabled() is False
+
+    @pytest.mark.parametrize("nested", [False, True])
+    @pytest.mark.parametrize("color", [False, True])
+    def test_replacement_diff_preserves_lines_and_plain_signs(self, monkeypatch, nested, color):
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setenv("JUNO_PI_OUTPUT_TTY", "1" if color else "0")
+        replacement = {"oldText": "old\n\nlast", "newText": "new\n"}
+        args = {"path": "file.py", "edits": [replacement]} if nested else replacement
+        output = self.svc._semantic_tool_block(
+            {"id": 1, "tool": "edit", "args": args}, status="done", result="ok")
+        plain = self.svc._strip_ansi_sequences(output)
+        assert plain.startswith("[tool:edit]") and plain.endswith("[/edit]")
+        assert "- old" in plain and "- last" in plain and "+ new" in plain
+        assert "oldText:" in plain and "newText:" in plain
+        assert (self.svc.ANSI_RED in output) is color
+        assert (self.svc.ANSI_GREEN in output) is color
+        assert ("\x1b" in output) is color
+
     def test_fast_tool_is_one_complete_semantic_block(self):
         self.svc._format_semantic_event({
             "type": "tool_execution_start", "toolCallId": "fast", "toolName": "bash",
@@ -4384,7 +4413,8 @@ class TestSemanticHeadlessRenderer:
             "type": "tool_execution_end", "toolCallId": "fast", "toolName": "bash",
             "durationMs": 80, "result": "a\nb", "isError": False,
         })
-        assert output.count("[TOOL]") == 1
+        assert output.count("[tool:bash]") == 1
+        assert output.endswith("[/bash]")
         assert '"status":"done","duration":"0.08s"' in output
         assert "[INPUT]\n  printf 'a\n  b'\n[/INPUT]" in output
         assert "[TOOL_RESPONSE]\n  a\n  b\n[/TOOL_RESPONSE]" in output
@@ -4410,8 +4440,8 @@ class TestSemanticHeadlessRenderer:
         })
         assert '"tool":"bash"' in other and "  pwd" in other and "  /tmp" in other
         assert '"tool":"read"' in read and '"path":"a"' in read and "  A" in read
-        assert _parse_display_header(other.split("\n", 1)[0].replace("[TOOL] ", ""))["id"] != \
-               _parse_display_header(read.split("\n", 1)[0].replace("[TOOL] ", ""))["id"]
+        assert _parse_display_header(other.split("\n", 1)[0].replace("[tool:bash] ", ""))["id"] != \
+               _parse_display_header(read.split("\n", 1)[0].replace("[tool:read] ", ""))["id"]
 
     def test_completion_wins_timer_race(self, monkeypatch):
         callbacks = []

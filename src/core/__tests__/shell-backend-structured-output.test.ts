@@ -225,6 +225,36 @@ time.sleep(30)
     expect(await fs.pathExists(marker)).toBe(false);
   });
 
+  it.each([true, false])('forwards outer terminal capability to piped Pi output (TTY=%s)', async (tty) => {
+    const { servicesDir, workingDir } = await createStubClaudeService();
+    await fs.writeFile(path.join(servicesDir, 'pi.py'), `#!/usr/bin/env python3
+import json, os, sys
+print(json.dumps({"type":"result","result":json.dumps({"hint":os.environ.get("JUNO_PI_OUTPUT_TTY"),"tty":sys.stdout.isatty()})}))
+`, { mode: 0o755 });
+    const descriptor = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
+    const previousHint = process.env.JUNO_PI_OUTPUT_TTY;
+    try {
+      Object.defineProperty(process.stdout, 'isTTY', { value: tty, configurable: true });
+      process.env.JUNO_PI_OUTPUT_TTY = tty ? '0' : '1';
+      const backend = new ShellBackend();
+      backend.configure({ workingDirectory: workingDir, servicesPath: servicesDir,
+        enableJsonStreaming: true, outputRawJson: true });
+      await backend.initialize();
+      const result = await backend.execute({
+        toolName: 'pi_subagent', arguments: { instruction: 'test', project_path: workingDir },
+        timeout: 15000, priority: 'normal',
+        metadata: { sessionId: 'tty-test', iterationNumber: 1 },
+      });
+      const payload = JSON.parse(JSON.parse(result.content).result);
+      expect(payload).toEqual({ hint: tty ? '1' : '0', tty: false });
+    } finally {
+      if (descriptor) Object.defineProperty(process.stdout, 'isTTY', descriptor);
+      else delete (process.stdout as { isTTY?: boolean }).isTTY;
+      if (previousHint === undefined) delete process.env.JUNO_PI_OUTPUT_TTY;
+      else process.env.JUNO_PI_OUTPUT_TTY = previousHint;
+    }
+  });
+
   it('emits JSON-parsable stdout even when capture file is absent', async () => {
     const { servicesDir, workingDir } = await createStubClaudeService();
 
