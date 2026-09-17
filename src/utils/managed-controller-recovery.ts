@@ -6,6 +6,12 @@ import fs from 'fs-extra';
 import managedAssetManifest from '../templates/managed-assets.json';
 import { version as packageVersion } from '../version.js';
 
+// One package-owned maintenance engine; first-use callers consume these APIs.
+export {
+  prepareControllerGeneration, applyControllerGeneration, recoverControllerGeneration,
+  assertControllerGenerationReady,
+} from './controller-generation-migration.js';
+
 const execFile = promisify(execFileCallback);
 const SHA_PATTERN = /^[0-9a-f]{40,64}$/;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;

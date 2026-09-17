@@ -12,6 +12,7 @@ import fs from 'fs-extra';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import managedAssetManifest from '../templates/managed-assets.json';
+import { assertControllerGenerationReady } from './controller-generation-migration.js';
 import {
   resolveTargetBoundManagedRecovery,
   type ManagedControllerGenerationReceipt,
@@ -124,6 +125,7 @@ export class ScriptInstaller {
   static async assertManagedControllerPackageUpdateAllowed(
     projectDir: string,
   ): Promise<TargetBoundManagedRecovery | null> {
+    await assertControllerGenerationReady(projectDir);
     if (!(await this.isMetadataOnlyController(projectDir))) return null;
     const generationPath = path.join(projectDir, MANAGED_CONTROLLER_GENERATION);
     if (!(await fs.pathExists(generationPath))) return null;
