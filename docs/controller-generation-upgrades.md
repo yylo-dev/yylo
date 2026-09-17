@@ -32,8 +32,19 @@ discovery. Index framing and SHA-512 content hashes are checked, then the comple
 installed package is compared with the tarball; a cache key or version match alone
 never authenticates a candidate. Missing/evicted evidence still refuses without
 network acquisition. Discovery reads at most 20,000 index files / 32 MiB and 2,048
-unique candidate artifacts; a larger cache requires an explicit artifact-bound
-installation rather than unbounded startup work.
+unique candidate artifacts, with a 30-second discovery deadline; a larger cache
+requires an explicit artifact-bound installation rather than unbounded startup
+work. Nonregular cache entries and ambiguous repository paths are rejected.
+
+Before automatic activation, the candidate is retained in a content-addressed
+prefix under `${XDG_STATE_HOME:-$HOME/.local/state}/yylo/installed-generations`.
+This uses the authenticated tarball and offline npm with lifecycle scripts,
+network access, audit and funding requests disabled. If dependencies are absent
+from the offline cache, activation refuses without changing the controller.
+The controller binds this retained executable, not the mutable global npm path,
+so the next global install cannot erase the previous generation needed for
+migration or rollback. An unchanged global artifact reuses its verified retained
+copy; doctors remain read-only and do not install anything.
 A semver string, matching one script, or an arbitrary package directory is not
 sufficient evidence. Unknown or customized state is preserved, not overwritten.
 
