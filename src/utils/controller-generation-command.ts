@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import fs from 'fs-extra';
 import path from 'node:path';
 import { constants } from 'node:os';
+import { Command } from 'commander';
 import { resolveController } from './controller-resolver.js';
 import { ScriptInstaller } from './script-installer.js';
 import { packagedGenerationRoot, recoverControllerGeneration, acquireControllerGenerationReadLease, GENERATION_MIGRATION_ROOT } from './controller-generation-migration.js';
@@ -15,6 +16,31 @@ export async function releaseControllerCommand(): Promise<void> {
   if (release) await release();
 }
 
+const AGENT_COMMANDS = ['pi', 'claude', 'cursor', 'codex', 'gemini', 'start', 'continue', 'contiue', 'cn', 'cc', 'clone', 'loop'];
+
+/** Use the registered CLI option grammar, not a scan through prompt/file values. */
+export function generationInvocationContext(program: Command, argv: string[], commandArgs: string[], cwd: string): { cwd: string; version: boolean } {
+  if (commandArgs.length && commandArgs[0] !== 'scripts' && !AGENT_COMMANDS.includes(commandArgs[0]!)) return { cwd, version: false };
+  const chain = [program];
+  for (const token of commandArgs) {
+    const child = chain[0]!.commands.find(command => command.name() === token || command.aliases().includes(token));
+    if (!child) break;
+    chain.unshift(child);
+  }
+  // A separate parser avoids modifying the command later used for execution.
+  const parser = new Command().allowUnknownOption().exitOverride().configureOutput({ writeErr: () => {} });
+  const flags = new Set<string>();
+  for (const command of chain) for (const option of command.options) {
+    const names = [option.short, option.long].filter((name): name is string => !!name);
+    if (names.some(name => flags.has(name))) continue;
+    parser.addOption(option);
+    names.forEach(name => flags.add(name));
+  }
+  parser.parseOptions(argv);
+  const options = parser.opts();
+  return { cwd: typeof options.cwd === 'string' ? path.resolve(cwd, options.cwd) : cwd, version: options.version === true };
+}
+
 export function generationCommandKind(args: string[]): 'read' | 'execute' | 'maintenance' | 'skip' {
   const [command = '', operation = ''] = args;
   if (command === 'scripts' && operation === 'generation') return 'maintenance';
@@ -23,7 +49,7 @@ export function generationCommandKind(args: string[]): 'read' | 'execute' | 'mai
       || (command === 'integration' && ['status', 'runtime-doctor'].includes(operation))
       || (command === 'task' && ['status', 'admission', 'preflight', 'doctor', 'lease-status', 'evidence-status'].includes(operation))) return 'read';
   if (['task', 'merge'].includes(command) && operation && !['local', 'runtime-bootstrap'].includes(operation)) return 'execute';
-  if (['pi', 'cc', 'start', 'continue', 'loop'].includes(command)) return 'execute';
+  if (!command || AGENT_COMMANDS.includes(command)) return 'execute';
   return 'skip';
 }
 
