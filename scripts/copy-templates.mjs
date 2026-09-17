@@ -4,7 +4,7 @@ import path from 'node:path';
 
 const sourceRoot = 'src/templates';
 const destinationRoot = 'dist/templates';
-const directories = ['scripts', 'prompts', 'wiki', 'config', 'controller-agent', 'workflows'];
+const directories = ['scripts', 'maintenance', 'prompts', 'wiki', 'config', 'controller-agent', 'workflows'];
 const retiredMarker = '# Retired';
 
 for (const directory of directories) {

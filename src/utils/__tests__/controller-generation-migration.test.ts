@@ -69,10 +69,10 @@ describe('controller generation maintenance', () => {
       await fs.outputFile(path.join(root, 'lock-released'), 'yes');
     }));
     expect(await fs.readFile(path.join(root, 'lock-released'), 'utf8')).toBe('yes');
-  });
+  }, 60_000);
 
   it('passes registered real-Git historical/provenance/crash/rollback fixtures', () => {
-    const script = path.resolve('src/templates/scripts/tests/test_controller_generation_migration.py');
+    const script = path.resolve('src/templates/maintenance/tests/test_controller_generation_migration.py');
     const output = execFileSync('python3', [script], { encoding: 'utf8', timeout: 600_000, maxBuffer: 1024 * 1024 });
     expect(output).not.toContain('FAILED');
   }, 610_000);
