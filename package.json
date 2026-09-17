@@ -42,6 +42,7 @@
     "scripts/test-support/task_workspace_fixture.py",
     "scripts/test-performance/task-workspace-duration-weights.v1.json",
     "README.md",
+    "docs/controller-generation-upgrades.md",
     "CHANGELOG.md",
     "assets/yylo-logo-square-neon-green.png"
   ],
@@ -65,6 +66,7 @@
     "test:simple": "npm test -- src/utils/__tests__/simple-init.test.ts src/utils/__tests__/simple-workspace-routing.test.ts src/core/__tests__/simple-startup.test.ts src/core/__tests__/session-simple.test.ts",
     "test:simple-package": "node scripts/verify-simple-package.mjs",
     "test:managed-assets": "node scripts/verify-managed-assets.mjs",
+    "test:controller-upgrade": "node scripts/verify-controller-upgrade.mjs",
     "test:skill-contracts": "node scripts/verify-skill-argument-contracts.mjs",
     "test:template-bytecode-package": "node scripts/verify-template-bytecode-cleanup.mjs",
     "test:installed-test-fixture-package": "node scripts/verify-installed-test-fixture.mjs",
