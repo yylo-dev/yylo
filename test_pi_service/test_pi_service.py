@@ -19,6 +19,14 @@ import time
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def isolated_terminal_environment(monkeypatch):
+    # Running tests from yy pi must not inherit the outer renderer's TTY hint.
+    monkeypatch.delenv("JUNO_PI_OUTPUT_TTY", raising=False)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+
 # ---------------------------------------------------------------------------
 # Helper: load PiService from the template source tree
 # ---------------------------------------------------------------------------
@@ -2006,6 +2014,40 @@ class TestRunPiRawToolOutputBuffering:
         def kill(self):
             self.returncode = -9
 
+    @pytest.mark.parametrize("pretty", ["true", "false"])
+    def test_rich_presentation_preserves_raw_stream_and_capture(self, monkeypatch, capsys, pretty):
+        monkeypatch.setenv("JUNO_PI_OUTPUT_TTY", "1")
+        events = [
+            {"type": "tool_execution_start", "toolCallId": "color", "toolName": "bash", "args": {"command": "test"}},
+            {"type": "tool_execution_end", "toolCallId": "color", "toolName": "bash", "result": "\x1b[32mgreen\x1b[2J"},
+            {"type": "message_update", "assistantMessageEvent": {"type": "text_end", "content": "**Answer**"}},
+            {"type": "agent_end", "messages": [{"role": "assistant", "content": [{"type": "text", "text": "**Answer**"}]}]},
+        ]
+        raw = [json.dumps(event) + "\n" for event in events]
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: self._FakeProcess(raw))
+        assert self.svc.run_pi(["pi", "--mode", "json"], _make_args(pretty=pretty, verbose=False)) == 0
+        out = capsys.readouterr().out
+        if pretty == "false":
+            assert out == "".join(raw)
+        else:
+            assert "\x1b[32mgreen" in out
+            assert "\x1b[2J" not in out
+            assert "\x1b[1mAnswer" in out
+        assert self.svc.last_result_event["result"] == "**Answer**"
+
+    def test_raw_tool_lines_keep_safe_shell_colors(self, monkeypatch, capsys):
+        monkeypatch.setenv("JUNO_PI_OUTPUT_TTY", "1")
+        raw = [
+            '{"type":"tool_execution_start","toolCallId":"raw","toolName":"bash"}\n',
+            '\x1b[32mGREEN\x1b[2J\n',
+            '{"type":"tool_execution_end","toolCallId":"raw","toolName":"bash","result":""}\n',
+        ]
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: self._FakeProcess(raw))
+        assert self.svc.run_pi(["pi", "--mode", "json"], _make_args(pretty="true", verbose=False)) == 0
+        out = capsys.readouterr().out
+        assert "\x1b[32mGREEN" in out and "\x1b[2J" not in out
+        assert out.count("GREEN") == 1
+
     def test_raw_tool_lines_are_buffered_and_attached_to_tool_event(self, monkeypatch, capsys):
         """Non-JSON lines during tool execution are not printed out-of-order."""
         stdout_lines = [
@@ -3722,9 +3764,10 @@ class TestHeadlessUiContract:
         assert self.svc.ANSI_BLUE in header
         assert self.svc.ANSI_YELLOW in header
         assert self.svc.ANSI_BOLD in header
-        assert self.svc.ANSI_DIM in self.svc._style_thinking("reason")
+        assert self.svc.ANSI_DIM not in self.svc._style_thinking("reason")
         assert self.svc.ANSI_ITALIC in self.svc._style_thinking("reason")
-        assert self.svc.ANSI_BOLD in self.svc._style_assistant("answer")
+        assert self.svc._style_assistant("answer") == "answer"
+        assert self.svc.ANSI_BOLD in self.svc._style_assistant("**answer**")
         result = self.svc._colorize_result("ok\n[3 lines, 20 characters truncated]\ntail")
         assert self.svc.ANSI_GREEN in result
         assert self.svc.ANSI_YELLOW in result
@@ -4381,9 +4424,10 @@ class TestSemanticHeadlessRenderer:
         monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
         monkeypatch.setenv("JUNO_PI_OUTPUT_TTY", hint)
         assert self.svc._color_enabled() is expected
-        for style in (self.svc._style_thinking, self.svc._style_assistant,
-                      self.svc._style_semantic_input, self.svc._style_semantic_response):
+        for style in (self.svc._style_thinking, self.svc._style_semantic_input):
             assert ("\x1b[" in style("sample")) is expected
+        assert self.svc._style_assistant("sample") == "sample"
+        assert self.svc._style_semantic_response("sample") == "sample"
         monkeypatch.setenv("NO_COLOR", "")
         assert self.svc._color_enabled() is False
 
@@ -4483,7 +4527,8 @@ class TestSemanticHeadlessRenderer:
         })
         assert self.svc.ANSI_RED not in success
         assert self.svc.ANSI_BOLD + self.svc.ANSI_CYAN in success
-        assert self.svc.ANSI_DIM + self.svc.ANSI_MUTED_GREEN in success
+        assert self.svc.ANSI_MUTED_GREEN not in success
+        assert "  error failed blocked\n" in success
 
         self.svc._format_semantic_event({
             "type": "tool_execution_start", "toolCallId": "bad", "toolName": "bash", "args": {"command": "false"}
@@ -4493,7 +4538,7 @@ class TestSemanticHeadlessRenderer:
         })
         plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", failed)
         assert '"status":"error","isError":true' in plain
-        assert self.svc.ANSI_BOLD + self.svc.ANSI_RED in failed
+        assert self.svc.ANSI_BOLD + "\x1b[31m" in failed
 
     def test_no_color_preserves_exact_plain_layout(self, monkeypatch):
         monkeypatch.setenv("NO_COLOR", "1")
