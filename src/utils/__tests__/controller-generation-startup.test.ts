@@ -66,6 +66,14 @@ describe('operation-specific first-use generation dispatch', () => {
     expect(engine.apply).not.toHaveBeenCalled();
   });
 
+  it('treats equal artifact evidence as equal regardless of JSON key insertion order', async () => {
+    await fs.outputJson(path.join(controller, '.juno_task/runtime/generation-migration/current.json'), {
+      candidate: { sha256: 'b'.repeat(64), artifact: path.join(root, 'candidate.tgz'), root: candidate },
+    });
+    expect((await assessControllerGeneration(controller, candidate)).disposition).toBe('ready');
+    expect(engine.apply).not.toHaveBeenCalled();
+  });
+
   it('automatically applies an authenticated engine plan before execution', async () => {
     expect((await ensureControllerGeneration(controller, candidate)).disposition).toBe('ready');
     expect(engine.apply).toHaveBeenCalledWith(controller, expect.objectContaining({ id }));

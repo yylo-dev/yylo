@@ -741,6 +741,61 @@ def recover(root: Path, transaction_id: str, rollback: bool = False, boundary=No
         return transition(root, value, rollback=rollback, boundary=boundary)
 
 
+def runtime_ready(root: Path, repository: Path, running: Path) -> dict[str, Any]:
+    """Read-only package-generation admission, independent of product script copies.
+
+    A projected root is used only for preactivation; the real repository must
+    still have exact controller registration. No write or gate-disable argument.
+    """
+    authority = registration(repository)
+    marker = decode_json(content(snapshot(safe(root, CURRENT))))
+    if marker.get("schema_version") != "yylo_controller_generation.v1":
+        raise Refusal("current_generation_unverified", "unknown generation schema")
+    package = authenticate(marker["candidate"])
+    inventory_image = snapshot(safe(root, INVENTORY))
+    inventory = decode_json(content(inventory_image))
+    identity = decode_json(content(snapshot(safe(root, IDENTITY))))
+    policy = decode_json(content(snapshot(safe(root, POLICY))))
+    if (marker.get("runtime") != runtime_identity(package) or identity != marker["runtime"]
+            or marker.get("inventory_sha256") != inventory_image["sha256"]
+            or policy.get("runtime", {}).get("package") != package["package"]["name"]
+            or policy.get("controller_branch") != authority["branch"]
+            or policy.get("product_ref") != authority["target_ref"]):
+        raise Refusal("current_generation_unverified", "identity, policy or inventory mismatch")
+    if not compatibility._managed_inventory_identity_valid(inventory):
+        raise Refusal("current_generation_unverified", "invalid inventory identity")
+    declared = assets(package)
+    if set(inventory["assets"]) != set(declared):
+        raise Refusal("current_generation_unverified", "incomplete managed asset ownership")
+    for name, item in declared.items():
+        observed = snapshot(safe(root, name))
+        expected = digest(item["data"])
+        record = inventory["assets"][name]
+        if (observed is None or observed["sha256"] != expected
+                or record.get("sourceSha256") != expected or record.get("installedSha256") != expected):
+            raise Refusal("managed_preimage_modified", name)
+    running_sha = snapshot(running)["sha256"]
+    permitted = {digest(package["files"]["dist/templates/scripts/task_workspace.py"])}
+    state_image = snapshot(safe(root, STATE))
+    state = decode_json(content(state_image)) if state_image else {"tasks": {}}
+    if state_image and state.get("schema_version") not in state_schemas(package):
+        raise Refusal("shared_state_incompatible", "preserve active tasks")
+    for task_id, pin in marker.get("active_pins", {}).items():
+        task = state.get("tasks", {}).get(task_id, {})
+        if (task.get("fencing", {}).get("attempt") == pin.get("attempt")
+                and task.get("state") in {"WORKING", "HYDRATING", "HYDRATION_FAILED"}):
+            retained = authenticate(pin["generation"])
+            if (pin.get("executable") != retained["executable"]
+                    or state.get("schema_version") not in state_schemas(retained)):
+                raise Refusal("active_pin_unverified", task_id)
+            permitted.add(digest(retained["files"]["dist/templates/scripts/task_workspace.py"]))
+    if running_sha not in permitted:
+        raise Refusal("running_generation_unverified", "runtime is not current or attempt-pinned")
+    return {"schema_version": "yylo_controller_generation_admission.v1", "controller": str(repository),
+            "projection": str(root), "runtime_sha256": running_sha,
+            "package": {"name": package["package"]["name"], "version": package["package"]["version"]}}
+
+
 def pinned_task_runtime(root: Path, task_id: str) -> dict[str, Any]:
     """Authenticate an attempt-bound retained script closure; never infer from expiry."""
     assert_ready(root)
@@ -766,20 +821,40 @@ def pinned_task_runtime(root: Path, task_id: str) -> dict[str, Any]:
     if (pin.get("executable") != retained["executable"]
             or state.get("schema_version") not in state_schemas(retained)):
         raise Refusal("active_pin_unverified", task_id)
+    target = admitted["authority"]["target_sha"]
+    source_repository = (compatibility.target_blob(root, target, "juno-code/package.json") is not None
+                         or compatibility.target_blob(root, target, "juno-code/src/templates/scripts/task_workspace.py") is not None)
+    if source_repository:
+        target_runtime = compatibility.target_blob(root, target, ".juno_task/scripts/task_workspace.py")
+        if target_runtime != retained["files"]["dist/templates/scripts/task_workspace.py"]:
+            # The original attempt/pin remains immutable. An old reader cannot
+            # admit a moved Juno source runtime. The fully admitted current
+            # reader may continue the SAME attempt only across the shared schema
+            # already checked above and by plan's complete current admission.
+            return {"pinned": False, "retained_pin": True, "attempt": pin["attempt"],
+                    "dispatch": "current-compatible-source-reader", "retained_executable": retained["executable"]}
     return {"pinned": True, "attempt": pin["attempt"], "executable": retained["executable"],
             "script": str(Path(pin["generation"]["root"]) / "dist/templates/scripts/task_workspace.py")}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(allow_abbrev=False)
-    parser.add_argument("operation", choices=["plan", "apply", "resume", "rollback", "ready", "hold-lock", "hold-read", "task-pin"])
+    parser.add_argument("operation", choices=["plan", "apply", "resume", "rollback", "ready", "hold-lock", "hold-read", "task-pin", "runtime-ready"])
     parser.add_argument("--controller", type=Path, required=True)
     parser.add_argument("--request", type=Path)
     parser.add_argument("--transaction-id")
+    parser.add_argument("--projection", type=Path)
+    parser.add_argument("--running-runtime", type=Path)
     args = parser.parse_args()
     try:
         request = decode_json(args.request.read_bytes()) if args.request else {}
-        if args.operation in {"hold-lock", "hold-read"}:
+        if args.operation == "runtime-ready":
+            if args.running_runtime is None:
+                raise Refusal("running_generation_unverified", "runtime path required")
+            result = runtime_ready((args.projection or args.controller).resolve(), args.controller.resolve(), args.running_runtime.resolve())
+            print(json.dumps(result, sort_keys=True))
+            return 0
+        elif args.operation in {"hold-lock", "hold-read"}:
             with locked(args.controller.resolve(), shared=args.operation == "hold-read"):
                 assert_ready(args.controller.resolve())
                 print(json.dumps({"locked": True}), flush=True)

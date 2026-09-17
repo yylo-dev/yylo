@@ -26,6 +26,7 @@ import selectors
 import shlex
 import signal
 import stat
+import tarfile
 import subprocess
 import sys
 import tempfile
@@ -1825,6 +1826,82 @@ def _provenance_repair_error(controller: Path, target_sha: str) -> TaskWorkspace
     )
 
 
+def controller_generation_admission(controller: Path, repository: Path) -> Optional[dict[str, Any]]:
+    """Consumer projects may use an authenticated controller-local generation.
+
+    Bootstrap only the engine bytes authenticated by the retained tarball, then
+    let that one package-owned assessor validate the full generation. Never run
+    a module merely because a mutable receipt names its filesystem location.
+    """
+    marker_path = controller / ".juno_task/runtime/generation-migration/current.json"
+    if not marker_path.exists() and not marker_path.is_symlink():
+        return None
+    try:
+        if marker_path.resolve() != marker_path or not marker_path.is_file():
+            raise ValueError("unsafe generation marker")
+        marker = json.loads(marker_path.read_bytes())
+        if marker.get("schema_version") != "yylo_controller_generation.v1":
+            raise ValueError("unknown generation schema")
+        evidence = marker["candidate"]
+        root, artifact = Path(evidence["root"]), Path(evidence["artifact"])
+        relative = "dist/templates/maintenance/controller_generation_migration.py"
+        engine = root / relative
+        for file in (artifact, engine):
+            info = file.lstat()
+            if (not file.is_absolute() or file.resolve() != file or not stat.S_ISREG(info.st_mode)
+                    or info.st_nlink != 1 or info.st_size > 64 * 1024 * 1024):
+                raise ValueError("unsafe generation evidence")
+        archive_bytes = artifact.read_bytes()
+        if hashlib.sha256(archive_bytes).hexdigest() != evidence["sha256"]:
+            raise ValueError("generation artifact digest mismatch")
+        captured: dict[str, bytes] = {}
+        with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
+            seen, total = set(), 0
+            for index, member in enumerate(archive):
+                if index >= 10000:
+                    raise ValueError("too many generation archive members")
+                if member.isdir():
+                    continue
+                name = member.name
+                total += member.size
+                if (name in seen or not member.isfile() or member.size < 0 or not name.startswith("package/")
+                        or "\\" in name or any(part in {"", ".", ".."} for part in name.split("/"))
+                        or total > 64 * 1024 * 1024 or len(seen) > 10000):
+                    raise ValueError("unsafe generation archive member")
+                seen.add(name)
+                if name.startswith("package/dist/templates/"):
+                    stream = archive.extractfile(member)
+                    if stream is None:
+                        raise ValueError("missing generation archive member")
+                    captured[name.removeprefix("package/")] = stream.read()
+        if captured.get(relative) != engine.read_bytes():
+            raise ValueError("generation engine digest mismatch")
+        # Execute captured imports too: an installed-directory race must never
+        # substitute metadata_controller/task_workspace dependencies after auth.
+        with tempfile.TemporaryDirectory(prefix="yylo-generation-readback-") as temporary:
+            closure = Path(temporary)
+            for name, data in captured.items():
+                destination = closure / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(data)
+            result = subprocess.run([sys.executable, "-I", "-B", str(closure / relative), "runtime-ready",
+                                     "--controller", str(repository), "--projection", str(controller),
+                                     "--running-runtime", str(Path(__file__).resolve())],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    timeout=90, check=False)
+        if result.returncode:
+            raise ValueError((result.stdout + result.stderr).decode(errors="replace")[-4000:])
+        admitted = json.loads(result.stdout)
+        if (admitted.get("schema_version") != "yylo_controller_generation_admission.v1"
+                or admitted.get("controller") != str(repository)
+                or admitted.get("projection") != str(controller)
+                or admitted.get("runtime_sha256") != hashlib.sha256(Path(__file__).read_bytes()).hexdigest()):
+            raise ValueError("generation admission identity mismatch")
+        return admitted
+    except (OSError, ValueError, KeyError, TypeError, tarfile.TarError, subprocess.TimeoutExpired) as exc:
+        raise TaskWorkspaceError(f"controller generation admission refused: {exc}; preserve bytes and inspect `yy scripts generation doctor`") from exc
+
+
 def require_current_runtime(repository: Path, target_sha: str,
                             controller: Path | None = None) -> dict[str, Any]:
     generation = runtime_generation(repository, target_sha)
@@ -1833,6 +1910,11 @@ def require_current_runtime(repository: Path, target_sha: str,
         or target_blob(repository, target_sha,
                        "juno-code/src/templates/scripts/task_workspace.py") is not None
     )
+    if not source_repository and controller is not None:
+        admitted = controller_generation_admission(controller, repository)
+        if admitted is not None:
+            return {**generation, "current": True, "target_copy_current": generation["current"],
+                    "controller_generation_admission": admitted}
     if generation["current"] and not source_repository:
         provenance, legacy = _consumer_runtime_provenance(
             repository, target_sha, generation["target_sha256"])
@@ -8896,6 +8978,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         controller = exact_root(args.controller, "controller", physical_identity=False)
+        generation_fence = controller / ".juno_task/runtime/generation-migration/fence.json"
+        if (generation_fence.exists() or generation_fence.is_symlink()) and args.operation not in {
+                "status", "doctor", "admission", "preflight", "lease-status", "evidence-status",
+                "state-archive-get", "state-archive-verify"}:
+            raise TaskWorkspaceError("generation_transition_incomplete: preserve controller state; inspect `yy scripts generation doctor`")
         archive_operations = {"state-archive-plan", "state-archive-apply", "state-archive-verify",
                               "state-archive-get", "state-archive-rollback"}
         if args.operation in archive_operations:
