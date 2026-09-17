@@ -181,7 +181,14 @@ export async function prepareInstalledControllerRepair(controller: string, packa
     ? path.resolve(path.dirname(identity.executable), '../..') : undefined;
   const previous = previousRoot ? await installedEvidence(previousRoot) : undefined;
   if (!candidate || !previous) throw new Error('generation_provenance_required: authenticated candidate and previous artifacts required');
-  return prepareControllerGeneration(controller, candidate, previous, true);
+  // Validate the mixed predecessor before any external preparation. The
+  // controller stays unchanged; the reviewed plan must name the retained
+  // executable already, never silently substitute it during repair-apply.
+  await prepareControllerGeneration(controller, candidate, previous, true);
+  const retained = await retainInstalledGeneration(controller, candidate,
+    path.resolve(process.env.npm_config_cache || path.join(os.homedir(), '.npm')),
+    path.resolve(process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local/state')));
+  return prepareControllerGeneration(controller, retained.evidence, previous, true);
 }
 
 /** No prompt and no network. Only the engine can authenticate and mutate the write set. */

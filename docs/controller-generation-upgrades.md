@@ -91,7 +91,11 @@ yy integration runtime-doctor
 ```
 
 Planning authenticates both installed artifacts, the registered runtime and valid
-inventory structure. It owns only package-declared CLI destinations. Explicit
+inventory structure, then retains the candidate offline before writing the exact
+reviewable plan. This explicit preparation may create an external immutable
+installation, but never changes controller bytes. The plan already binds that
+retained executable; apply cannot silently substitute another installation.
+It owns only package-declared CLI destinations. Explicit
 apply backs up every replaced preimage in the transaction journal, refuses stale
 inputs, preserves independent skills/unrelated files and task state, and uses the
 same fenced rollback and operational readback as automatic migration. Customized
