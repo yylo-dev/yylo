@@ -88,6 +88,16 @@ describe('workspace-owned agent startup', () => {
     mocks.runtime.mockResolvedValue({ disposition: 'ready' }); mocks.ledger.mockRejectedValue({ message: 'Ledger version incompatible' });
     await expect(checkAgentReadiness(authority)).rejects.toThrow(/Ledger version incompatible/);
   });
+  it('preserves generation refusal details and recovery guidance without checking Ledger', async () => {
+    const authority = resolveAgentWorkspace(controller());
+    mocks.runtime.mockResolvedValue({ disposition: 'refused', controller: authority.path,
+      code: 'generation_provenance_required',
+      detail: 'generation_provenance_required: authenticated evidence missing',
+      safeNextAction: 'Preserve controller bytes and prior runtime.' });
+    await expect(checkAgentReadiness(authority)).rejects.toThrow(
+      'generation_provenance_required: authenticated evidence missing; Preserve controller bytes and prior runtime.');
+    expect(mocks.ledger).not.toHaveBeenCalled();
+  });
   it('normalizes structured errors and preserves custom hooks without mutating configuration', () => {
     expect(errorMessage({ message: 'use the registered controller', type: 'tool_execution' })).toBe('use the registered controller');
     expect(errorMessage({ code: 'BAD_CONTEXT' })).not.toContain('[object Object]');

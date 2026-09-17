@@ -2129,7 +2129,8 @@ export async function mainCommandHandler(
       return;
     } else if (error instanceof AgentStartupError) {
       console.error(error.message);
-      process.exitCode = 2;
+      // Finalize through the invocation boundary even if startup left handles open.
+      process.exit(2);
       return;
     } else if (error instanceof LedgerDelegateError) {
       console.error(error.message);

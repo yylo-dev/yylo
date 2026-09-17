@@ -26,11 +26,20 @@ async function temp(name: string): Promise<string> {
   return root;
 }
 
+function actualProjectEnvironment(root: string, home: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, XDG_STATE_HOME: path.join(root, 'state') };
+  // The suite's registered fixture controller is unrelated to this subprocess.
+  for (const key of Object.keys(env)) if (/^(JUNO_|YYLO_|GIT_)/.test(key)) delete env[key];
+  return env;
+}
+
 async function createActualProject(root: string, piSource: string): Promise<{ project: string; home: string }> {
   const project = path.join(root, 'project');
   const home = path.join(root, 'home');
   const services = path.join(home, '.yylo', 'services');
-  await fs.ensureDir(path.join(project, '.juno_task'));
+  // Provider lifecycle tests need a generic project, not an unauthenticated
+  // managed controller. Generation refusal has its own test below.
+  await fs.ensureDir(project);
   await fs.ensureDir(services);
   const packageJson = await fs.readJson(path.resolve('package.json'));
   await fs.writeFile(path.join(services, '.version'), `${packageJson.version}\n`);
@@ -475,6 +484,33 @@ setInterval(() => {}, 1000);
     ]);
   }, 30_000);
 
+  it('terminates an unauthenticated controller refusal before provider dispatch', async () => {
+    const root = await temp('generation-refusal');
+    const marker = path.join(root, 'provider-started');
+    const { project, home } = await createActualProject(root,
+      `#!/usr/bin/env python3\nopen(${JSON.stringify(marker)}, "w").close()\n`);
+    await fs.ensureDir(path.join(project, '.juno_task'));
+    const result = childProcess.spawnSync(process.execPath, [
+      '--import', tsxLoader, cliSource, 'pi', '--cwd', project, '-p', 'test',
+      '--model', 'openai/gpt-5.2', '--quiet', '--no-hooks',
+    ], {
+      cwd: root,
+      env: actualProjectEnvironment(root, home),
+      encoding: 'utf8', timeout: 20_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(2);
+    expect(result.stderr).toContain('generation_provenance_required');
+    expect(result.stderr).toContain('Preserve controller bytes');
+    expect(await fs.pathExists(marker)).toBe(false);
+    expect(await fs.readdir(path.join(project, '.juno_task'))).toEqual([]);
+    const written = await events(project, root);
+    expect(written.filter(event => event.event_type === 'invocation_started')).toHaveLength(1);
+    expect(written.filter(event => event.event_type === 'invocation_finished')).toEqual([
+      expect.objectContaining({ status: 'failure', exit_code: 2 }),
+    ]);
+  }, 30_000);
+
   it('preserves a real provider main failure exit and records resolved request context', async () => {
     const root = await temp('actual-provider-failure');
     const { project, home } = await createActualProject(root, `#!/usr/bin/env python3
@@ -489,7 +525,7 @@ sys.exit(1)
       '--model', 'openai/gpt-5.2', '--quiet', '--no-hooks',
     ], {
       cwd: root,
-      env: { ...process.env, HOME: home, XDG_STATE_HOME: path.join(root, 'state') },
+      env: actualProjectEnvironment(root, home),
       encoding: 'utf8',
       timeout: 20_000,
     });
@@ -533,7 +569,7 @@ sys.exit(1)
       '--quiet', '--no-hooks',
     ], {
       cwd: root,
-      env: { ...process.env, HOME: home, XDG_STATE_HOME: path.join(root, 'state') },
+      env: actualProjectEnvironment(root, home),
       encoding: 'utf8',
       timeout: 20_000,
     });
