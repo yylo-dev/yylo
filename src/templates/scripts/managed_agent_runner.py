@@ -1014,6 +1014,13 @@ def clean_environment(args: argparse.Namespace, capture: Path, metadata: Path,
                          "JUNO_WORKSPACE_ROLE": workspace_role})
         if args.authority_map:
             explicit["JUNO_LIFECYCLE_AUTHORITY_MAP"] = str(Path(args.authority_map).resolve())
+    else:
+        # Reviewer roots are deliberately neutral and unregistered. The parent
+        # validates controller authority and freezes the candidate; granting that
+        # authority to the child contradicts unregistered-agent admission.
+        for key in ("JUNO_TASK_ROOT", "JUNO_CONTROLLER_BRANCH", "JUNO_WORKSPACE_ROLE",
+                    "JUNO_WORKSPACE_ENFORCEMENT"):
+            explicit.pop(key, None)
     if binding is not None:
         explicit["JUNO_REVIEW_BINDING_JSON"] = canonical(binding).decode().strip()
     env.update(explicit)
@@ -1023,7 +1030,7 @@ def clean_environment(args: argparse.Namespace, capture: Path, metadata: Path,
     )
     contract = {"schema_version": "juno_managed_environment.v1", "removed_key_names": removed,
                 "explicit_key_names": sorted(explicit), "configured_defaults": True,
-                "workspace_role": explicit["JUNO_WORKSPACE_ROLE"],
+                "workspace_role": explicit.get("JUNO_WORKSPACE_ROLE", "unregistered"),
                 "worker_admission_kind": worker_admission_kind,
                 "node_runtime": node_contract}
     contract["sha256"] = sha(canonical(contract))
@@ -1383,6 +1390,10 @@ def run(args: argparse.Namespace) -> int:
     argv = [env_contract["node_runtime"]["yy_executable"], "pi", "--no-hooks", "--config",
             compatible_config["derived"]["path"], "--max-iterations", "1",
             "-w", str(agent_root), "-f", str(prompt)]
+    if args.mode == "reviewer":
+        # The outer owner may finalize a capture consumed by the inner backend;
+        # its fallback accepts only the exact structured terminal response.
+        argv.append("--quiet")
     validate_orchestrator_iterations(argv)
     prompt_evidence = evidence(prompt)
     if binding is None:
