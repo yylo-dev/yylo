@@ -9,6 +9,7 @@ import {
   assertInstructionVersion, instructionDeclarationCompatible, INSTRUCTION_IDENTITY_SCHEMA,
 } from './instruction-bundle-compatibility.js';
 import type { TargetBoundManagedRecovery } from './managed-controller-recovery.js';
+import { assertControllerGenerationReady } from './controller-generation-migration.js';
 import {
   assertPackageSource,
   assertSafeManagedWritePath,
@@ -387,6 +388,7 @@ export class ManagedProjectAssets {
     projectDir: string,
     options: { force?: boolean; recovery?: TargetBoundManagedRecovery | undefined } = {},
   ): Promise<void> {
+    await assertControllerGenerationReady(projectDir);
     const junoTaskDir = path.join(projectDir, '.juno_task');
     const junoTaskEntry = await lstatIfPresent(junoTaskDir);
     if (!junoTaskEntry) return;
