@@ -27,6 +27,13 @@ package receipt with its exact SHA-512 artifact still in the offline cache.
 `runtime-install-rebind` retains its authenticated artifact outside Git. Keep
 prior versioned installations and artifacts available while tasks are pinned;
 cache eviction or deleting the old installation is not authorized by migration.
+Global npm installations that omit the hidden lock use bounded offline cache-index
+discovery. Index framing and SHA-512 content hashes are checked, then the complete
+installed package is compared with the tarball; a cache key or version match alone
+never authenticates a candidate. Missing/evicted evidence still refuses without
+network acquisition. Discovery reads at most 20,000 index files / 32 MiB and 2,048
+unique candidate artifacts; a larger cache requires an explicit artifact-bound
+installation rather than unbounded startup work.
 A semver string, matching one script, or an arbitrary package directory is not
 sufficient evidence. Unknown or customized state is preserved, not overwritten.
 
@@ -54,6 +61,37 @@ yy scripts generation rollback EXACT_TRANSACTION_ID
 Recovery checks journal identity, current endpoints and independent changes.
 Never remove a fence, overwrite scripts, rewrite a lease, retarget a product ref,
 or reuse an unrelated recovery receipt to force admission.
+
+## Explicit mixed-predecessor recovery
+
+Older source adoption/rebind transactions may have moved the runtime while leaving
+a previous instruction inventory. Automatic upgrade deliberately refuses this
+mixed state; repeated global installation or force-copying files is not recovery.
+The installed maintenance engine offers an exact, separately reviewed repair:
+
+```sh
+yy scripts generation repair-plan /external/new-plan.json
+# Review the reported reviewRequired paths and exact before/after bytes privately.
+# The plan is mode 0600 and may contain local Git configuration; do not publish it.
+yy scripts generation repair-apply /external/new-plan.json EXACT_REVIEWED_PLAN_ID
+yy scripts generation doctor
+yy scripts doctor
+yy integration runtime-doctor
+```
+
+Planning authenticates both installed artifacts, the registered runtime and valid
+inventory structure. It owns only package-declared CLI destinations. Explicit
+apply backs up every replaced preimage in the transaction journal, refuses stale
+inputs, preserves independent skills/unrelated files and task state, and uses the
+same fenced rollback and operational readback as automatic migration. Customized
+CLI-owned instructions may be replaced **only after this explicit review**; their
+exact prior bytes remain in `previous/`. Automatic startup never chooses repair.
+Malformed inventory, foreign occupied new destinations, bad package evidence,
+unsafe paths and incompatible shared state still refuse.
+
+Source adoption now reports `controller_generation`, `controller_ready` and a
+safe next action separately from source-script admission. A completed source
+transaction is not a claim that a mixed instruction generation is agent-ready.
 
 ## Source controllers versus consumer projects
 

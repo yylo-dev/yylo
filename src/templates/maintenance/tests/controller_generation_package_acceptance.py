@@ -47,8 +47,12 @@ def scenario(artifact, historical=False):
         (root / 'home').mkdir()
         env['PYTHONDONTWRITEBYTECODE'] = '1'
         subprocess.run(['npm', 'install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund',
-                        '--prefix', str(root / 'installed'), str(artifact)], env=env, check=True, capture_output=True, text=True)
-        candidate_root = root / 'installed/node_modules/@yylo/cli'
+                        *([] if historical else ['--global']), '--prefix', str(root / 'installed'), str(artifact)],
+                       env=env, check=True, capture_output=True, text=True)
+        candidate_root = root / ('installed/node_modules/@yylo/cli' if historical else 'installed/lib/node_modules/@yylo/cli')
+        candidate_bin = root / ('installed/node_modules/.bin' if historical else 'installed/bin')
+        if not historical:
+            assert not (candidate_root.parents[1] / '.package-lock.json').exists(), 'global case must exercise missing npm lock'
         candidate = {'root': str(candidate_root), 'artifact': str(artifact), 'sha256': migration.digest(artifact.read_bytes())}
         # The pristine candidate uses npm receipt/cache discovery, not injected evidence.
         migration.authenticate(candidate)
@@ -254,7 +258,7 @@ print(json.dumps({'type': 'agent_end', 'messages': [message]}))
                 '--out-dir', str(review_root), '--tool-id', 'fixture_review', '--review-binding', str(review_binding),
                 '--external-side-effects', 'forbidden', '--lifecycle-hooks', 'disabled',
                 '--timeout-seconds', '90'], cwd=root, env={**agent_env,
-                    'PATH': str(fake_pi.parent) + os.pathsep + str(candidate_root.parents[1] / '.bin') + os.pathsep + env['PATH']},
+                    'PATH': str(fake_pi.parent) + os.pathsep + str(candidate_bin) + os.pathsep + env['PATH']},
                 capture_output=True, text=True, timeout=120)
             review_fixture.tearDown()
             assert review.returncode == 0, review.stdout[-4000:] + review.stderr[-4000:]

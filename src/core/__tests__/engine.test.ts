@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   resolvePromptMacros: vi.fn(),
   executeHook: vi.fn().mockResolvedValue(undefined),
   checkLedgerReadiness: vi.fn().mockResolvedValue('/fixture/yylo-ledger'),
+  assessControllerGeneration: vi.fn(),
 }));
 
 vi.mock('../backends/shell-backend.js', () => ({
@@ -52,6 +53,9 @@ vi.mock('../../cli/utils/advanced-logger.js', () => ({
 }));
 
 vi.mock('../../cli/commands/ledger.js', () => ({ checkLedgerReadiness: mocks.checkLedgerReadiness }));
+// Engine unit tests own execution orchestration, not real package migration.
+// Generation admission (including refusal) is covered by the startup/packed suites.
+vi.mock('../../utils/controller-generation-startup.js', () => ({ assessControllerGeneration: mocks.assessControllerGeneration }));
 
 vi.mock('../../utils/hooks.js', () => ({
   executeHook: mocks.executeHook,
@@ -160,6 +164,7 @@ describe('ExecutionEngine', () => {
     }));
     mocks.executeHook.mockResolvedValue(undefined);
     mocks.checkLedgerReadiness.mockResolvedValue('/fixture/yylo-ledger');
+    mocks.assessControllerGeneration.mockResolvedValue({ disposition: 'ready' });
 
     // Re-set ShellBackend constructor (mockReset clears its mockImplementation)
     const { ShellBackend } = await import('../backends/shell-backend.js');

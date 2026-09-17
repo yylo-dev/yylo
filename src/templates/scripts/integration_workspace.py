@@ -2927,6 +2927,24 @@ def adoption_replay(receipt_path: Path, controller: Path, repository: Path, targ
     return {**receipt, "replay": "idempotent", "verified": True}
 
 
+def adoption_generation_assessment(controller: Path, executable: Path) -> dict[str, Any]:
+    """Report public generation readiness separately from source-script equality."""
+    try:
+        assessed = subprocess.run(["node", str(executable), "-q", "scripts", "generation", "doctor"],
+                                  cwd=controller, stdin=subprocess.DEVNULL, capture_output=True,
+                                  text=True, timeout=120)
+        rows = [json.loads(line) for line in assessed.stdout.splitlines() if line.startswith('{')]
+        if rows and isinstance(rows[-1], dict):
+            disposition = rows[-1].get('disposition')
+            expected = 2 if disposition in {'refused', 'transition_incomplete'} else 0
+            if (disposition in {'ready', 'refused', 'retained', 'migration_required', 'transition_incomplete'}
+                    and assessed.returncode == expected):
+                return rows[-1]
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    return {"disposition": "unavailable"}
+
+
 def _source_runtime_adopt_locked(args: argparse.Namespace, controller: Path,
                                  policy: dict[str, Any], repository: Path,
                                  target_ref: str) -> dict[str, Any]:
@@ -3043,8 +3061,17 @@ def _source_runtime_adopt_locked(args: argparse.Namespace, controller: Path,
         admission = adoption_task_start_admission(controller, repository, target_sha)
         if not doctor["healthy"] or not admission["current"]:
             raise AdoptionError("source runtime adoption did not reach task-start admission")
+        # Script equality is source admission, not complete controller readiness.
+        # In particular older rebinds may retain another instruction inventory.
+        # Diagnose through the installed public boundary, never silently repair
+        # customized preimages or claim that an unactivated generation is ready.
+        generation_assessment = adoption_generation_assessment(controller, new_executable)
         payload = {"schema_version": SOURCE_ADOPTION_SCHEMA, "operation": "runtime-adopt-source",
-                   "outcome": "completed", "controller": str(controller),
+                   "outcome": "completed",
+                   "controller_generation": generation_assessment,
+                   "controller_ready": generation_assessment.get('disposition') == 'ready',
+                   "safe_next_action": ("yy task start TASK_ID" if generation_assessment.get('disposition') in {'ready', 'migration_required'}
+                                        else "yy scripts generation doctor; review an explicit scripts generation repair-plan if the predecessor is mixed"), "controller": str(controller),
                    "repository": str(repository), "target_ref": target_ref,
                    "previous_sha": previous_sha, "target_sha": target_sha,
                    "package_version": version,
