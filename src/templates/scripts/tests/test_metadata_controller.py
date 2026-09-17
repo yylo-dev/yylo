@@ -977,6 +977,11 @@ class MetadataControllerTest(unittest.TestCase):
         expected_package = (prefix / "node_modules/@yylo/cli").resolve()
         expected_runtime = (expected_package / "dist/bin/cli.mjs").resolve()
         self.assertIn("@yylo/cli@2.0.33-rc.0.10", pack_argv)
+        evidence = json.loads((expected_package / ".yylo-generation-evidence.json").read_text())
+        self.assertEqual(evidence["root"], str(expected_package))
+        retained = Path(evidence["artifact"])
+        self.assertEqual(retained.read_bytes(), b"exact fixture artifact")
+        self.assertEqual(evidence["sha256"], mc.file_digest(retained))
         self.assertEqual(json.loads((expected_package / "package.json").read_text()),
                          {"name": "@yylo/cli", "version": "2.0.33-rc.0.10"})
         self.assertEqual(receipt["runtime"]["executable"], str(expected_runtime))
