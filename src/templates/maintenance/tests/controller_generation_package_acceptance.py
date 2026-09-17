@@ -200,8 +200,15 @@ if os.environ.get('FIXTURE_AGENT_FAILURE'):
 if os.environ.get('FIXTURE_AGENT_WAIT'):
     ready = pathlib.Path(os.environ['FIXTURE_AGENT_WAIT']); ready.write_text('ready')
     while not ready.with_suffix('.release').exists(): time.sleep(0.05)
-message = {'role': 'assistant', 'content': [{'type': 'text', 'text': 'FIXTURE_PRIMARY_SUCCESS'}],
+text = 'FIXTURE_PRIMARY_SUCCESS'
+if os.environ.get('JUNO_REVIEW_BINDING_JSON'):
+    binding = json.loads(os.environ['JUNO_REVIEW_BINDING_JSON'])
+    text = json.dumps({**{key: binding[key] for key in ('candidate_sha', 'policy_identity', 'reviewer_role', 'sequence')},
+        'schema_version': 'juno_managed_review_result.v3', 'verdict': 'pass', 'truncated': False,
+        'omitted_finding_count': 0, 'rejection_counters': {}, 'findings': []})
+message = {'role': 'assistant', 'content': [{'type': 'text', 'text': text}],
            'stopReason': 'stop', 'usage': {'input': 1, 'output': 1, 'totalTokens': 2, 'cost': {'total': 0}}}
+print(json.dumps({'type': 'session', 'id': 'fixture-session'}))
 print(json.dumps({'type': 'agent_end', 'messages': [message]}))
 ''')
             fake_pi.chmod(0o755)
@@ -228,6 +235,29 @@ print(json.dumps({'type': 'agent_end', 'messages': [message]}))
                 if child.poll() is None:
                     os.killpg(child.pid, signal.SIGKILL)
                     child.communicate(timeout=10)
+            # Review launch requires a clean controller; exercise it separately
+            # without hiding or removing the other fixture's unrelated output.
+            review_fixture = TaskWorkspaceFixture()
+            review_fixture._build_hermetic_fixture()
+            review_root = root / 'managed-review'
+            review_binding = root / 'review-binding.json'
+            binding = {'schema_version': 'juno_managed_review_binding.v1',
+                'candidate_sha': git(review_fixture.repository, 'rev-parse', 'HEAD'), 'policy_identity': 'a' * 64,
+                'reviewer_role': 'reviewer_a', 'sequence': 1, 'predecessor': None}
+            write(review_binding, (json.dumps(binding, sort_keys=True, separators=(',', ':')) + '\n').encode())
+            review_prompt = root / 'review.md'; write(review_prompt, b'Deterministic offline review fixture.\n')
+            review = subprocess.run([sys.executable, str(candidate_root / 'dist/templates/scripts/managed_agent_runner.py'),
+                'run', '--mode', 'reviewer', '--controller-root', str(review_fixture.controller),
+                '--controller-branch', git(review_fixture.controller, 'symbolic-ref', 'HEAD'),
+                '--agent-root', str(review_root / 'agent-root'), '--candidate-root', str(review_fixture.repository),
+                '--candidate-sha', binding['candidate_sha'], '--prompt-file', str(review_prompt),
+                '--out-dir', str(review_root), '--tool-id', 'fixture_review', '--review-binding', str(review_binding),
+                '--external-side-effects', 'forbidden', '--lifecycle-hooks', 'disabled',
+                '--timeout-seconds', '90'], cwd=root, env={**agent_env,
+                    'PATH': str(fake_pi.parent) + os.pathsep + str(candidate_root.parents[1] / '.bin') + os.pathsep + env['PATH']},
+                capture_output=True, text=True, timeout=120)
+            review_fixture.tearDown()
+            assert review.returncode == 0, review.stdout[-4000:] + review.stderr[-4000:]
             failed = subprocess.run(agent_argv, cwd=controller, env={**agent_env, 'FIXTURE_AGENT_FAILURE': '1'},
                                     capture_output=True, text=True, timeout=180)
             assert failed.returncode != 0 and 'FIXTURE_PRIMARY_ERROR' in failed.stdout + failed.stderr, failed.stdout[-3000:] + failed.stderr[-3000:]
@@ -239,7 +269,7 @@ print(json.dumps({'type': 'agent_end', 'messages': [message]}))
             assert 'preserve deterministic agent dirt' in (controller / '.gitignore').read_text()
             agent_checks = {'success_exit': child.returncode, 'failure_exit': failed.returncode,
                             'primary_error': 'preserved', 'secondary_checkpoint': 'warning', 'dirty_bytes': 'preserved',
-                            'concurrent_writer': 'fenced'}
+                            'concurrent_writer': 'fenced', 'neutral_reviewer': 'passed'}
         migration.authenticate(candidate)  # no package-runtime/template edits
         return {'profile': 'historical-consumer-shape' if historical else 'source-controller',
                 'predecessor_kind': 'representative-fixture', 'previous_sha256': previous['sha256'],
