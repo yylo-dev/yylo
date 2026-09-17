@@ -631,10 +631,16 @@ def prepare(root: Path, candidate_evidence: dict[str, str], previous_evidence: d
     prior_pins = current.get("active_pins", {})
     if not isinstance(prior_pins, dict):
         raise Refusal("active_pin_unverified", "invalid retained pin map")
+    # Many live attempts can share one immutable predecessor. Authenticate each
+    # exact evidence tuple once in this plan, never cache trust across calls.
+    authenticated = {encoded(candidate_evidence): candidate, encoded(previous_evidence): previous}
     for name, pin in pins.items():
         prior = prior_pins.get(name)
         if prior is not None and prior.get("attempt") == pin["attempt"]:
-            retained = authenticate(prior["generation"])
+            key = encoded(prior["generation"])
+            if key not in authenticated:
+                authenticated[key] = authenticate(prior["generation"])
+            retained = authenticated[key]
             if (prior.get("executable") != retained["executable"]
                     or state.get("schema_version") not in state_schemas(retained)):
                 raise Refusal("active_pin_unverified", name)
