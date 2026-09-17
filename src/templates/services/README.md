@@ -290,7 +290,18 @@ npm install -g @mariozechner/pi-coding-agent
 - `--no-extensions`: Disable Pi extensions (incompatible with `--live`)
 - `--verbose`: Enable verbose output
 
-Headless output uses bold cyan tool input, muted green responses, italic subdued thinking, and bold terminal-default answers. Labels and spacing distinguish these roles without relying on color. Structured `oldText` / `newText` replacements (including `edits` arrays) display red `-` and green `+` lines. The CLI forwards the outer terminal capability through its internal pipe; redirected output and `NO_COLOR` remain uncolored. Thinking blocks display only thinking events supplied by the provider; live TUI and raw NDJSON modes are unchanged.
+Headless output keeps bold cyan tool input, normal-weight terminal-default responses/answers, and readable italic thinking. Labels, metadata and spacing stay unchanged. Structured `oldText` / `newText` replacements (including `edits` arrays) display red `-` and green `+` lines. Thinking blocks display only thinking events supplied by the provider.
+
+On terminals (including tmux), presentation adds:
+- Safe existing shell SGR colors/styles; cursor movement, erase, OSC/DCS and other controls are removed. Every styled line resets before the next label. Colors already removed by the tool/provider cannot be recovered; no PTY or forced child colors are introduced.
+- Explicit-language highlighting for `read` paths (`.py`, `.pyi`, `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.json`, `.sh`, `.css`, `.html`) and labeled Markdown fences. Unknown languages stay plain. Valid JSON gets token colors without reformatting its bytes.
+- Minimal Markdown for answers/thinking only: headings, bold, italic, inline code, and fenced code. Fence labels, list/table/link text and line breaks are retained; no wrapping, panels or general Markdown layout engine.
+
+Lexers are bundled as the pinned pure-Python Pygments wheel with its license and provenance in `vendor/`; users install nothing separately. No runtime network, model calls or per-block subprocesses. Highlighting over 64 KiB per region and unavailable lexers fall back to plain. The syntax palette uses basic terminal colors (no truecolor setup needed in tmux). Truncation still counts ANSI-free omitted text and occurs before lexing; omission notices are styled separately.
+
+The CLI forwards outer terminal capability through its internal pipe. Redirected output, `NO_COLOR`, and `TERM=dumb` remain uncolored and retain literal Markdown. Live TUI and raw `PI_PRETTY=false` NDJSON are unchanged; NDJSON remains the lossless machine interface. Pretty output is a potentially truncated human view, not a lossless export. A tmux pane running the CLI gets styles; `tail` of an already-uncolored redirected log cannot recover them.
+
+Validation: `uv run --with pytest==8.4.2 python -m pytest test_pi_service/ -q`, then `npm run build && npm run test:headless-presentation-package`. The latter checks built asset parity/digests and runs Python/TypeScript highlighting with site-packages disabled.
 
 Headless turn cost display is provider-neutral. Set `headlessUi.turnCostDisplayThresholdUsd` in `.juno_task/config.json` (default `0.5`), or override it with `HEADLESS_UI_TURN_COST_DISPLAY_THRESHOLD_USD`. Authoritative per-turn cost is shown as a `[STATUS]` block only when it is strictly above the threshold; unavailable cost and ordinary `turn_end` events are omitted. Tool failures are colored red only when Pi supplies structured `isError:true`; words such as `error`, `failed`, or `blocked` in successful output do not alter styling.
 

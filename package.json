@@ -84,6 +84,7 @@
     "test:coverage:python": "python -m pytest test_pi_service/ test_codex_streaming/ test_claude_service/ test_slack_integration/ test_github_integration/ test_attachments/ --cov=src/templates/services --cov=src/templates/scripts --cov-report=lcov:coverage/python-lcov.info --cov-report=term-missing -q",
     "test:watch": "vitest -c ./vitest.fast.config.ts",
     "test:python": "python -m pytest test_pi_service/ test_codex_streaming/ test_claude_service/ test_slack_integration/ test_github_integration/ test_attachments/ -q",
+    "test:headless-presentation-package": "node scripts/verify-headless-presentation.mjs",
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
     "format": "prettier --write \"src/**/*.{ts,md}\"",

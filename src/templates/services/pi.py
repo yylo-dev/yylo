@@ -19,6 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, TextIO, Tuple
 
+import headless_presentation as presentation
+
 from environment_boundary import (
     ModelShortcutError,
     resolve_model_shortcut,
@@ -269,7 +271,7 @@ class PiService:
 
     def _color_enabled(self) -> bool:
         """Honor the outer CLI terminal when our own stdout is a transport pipe."""
-        if os.environ.get("NO_COLOR") is not None:
+        if os.environ.get("NO_COLOR") is not None or os.environ.get("TERM") == "dumb":
             return False
         terminal = os.environ.get("JUNO_PI_OUTPUT_TTY")
         if terminal is not None:
@@ -307,17 +309,7 @@ class PiService:
         return self._style_text(text, self.ANSI_BOLD, self.ANSI_CYAN)
 
     def _style_semantic_response(self, text: str, *, is_error: bool = False) -> str:
-        if is_error:
-            return self._style_text(text, self.ANSI_BOLD, self.ANSI_RED)
-        if not self._color_enabled():
-            return text
-        lines = []
-        for line in text.split("\n"):
-            codes = (self.ANSI_DIM, self.ANSI_YELLOW) if re.fullmatch(
-                r"\[\d+ lines, \d+ characters truncated\]", line
-            ) else (self.ANSI_DIM, self.ANSI_MUTED_GREEN)
-            lines.append("".join(codes) + line + self.ANSI_RESET)
-        return "\n".join(lines)
+        return presentation.response(text, enabled=self._color_enabled(), is_error=is_error)
 
     def _style_semantic_label(self, text: str, *, input_label: bool = False) -> str:
         codes = [self.ANSI_DIM, self.ANSI_ITALIC]
@@ -326,10 +318,10 @@ class PiService:
         return self._style_text(text, *codes)
 
     def _style_thinking(self, text: str) -> str:
-        return self._style_text(text, self.ANSI_DIM, self.ANSI_ITALIC)
+        return presentation.markdown(text, enabled=self._color_enabled(), thinking=True)
 
     def _style_assistant(self, text: str) -> str:
-        return self._style_text(text, self.ANSI_BOLD)
+        return presentation.markdown(text, enabled=self._color_enabled())
 
     def _format_json_header(self, header: Dict) -> str:
         """Render compact valid JSON, adding jq-inspired token colors on TTYs."""
@@ -439,9 +431,7 @@ class PiService:
 
     def _strip_ansi_sequences(self, text: str) -> str:
         """Remove ANSI escape sequences to prevent color bleed in prettified output."""
-        if not isinstance(text, str) or "\x1b" not in text:
-            return text
-        return self._ANSI_ESCAPE_RE.sub("", text)
+        return presentation.sanitize(text) if isinstance(text, str) else text
 
     def _sanitize_tool_argument_value(self, value):
         """Recursively sanitize tool args while preserving JSON structure."""
@@ -586,16 +576,16 @@ class PiService:
     def _semantic_result_text(self, payload: dict) -> str:
         value = payload.get("result")
         if isinstance(value, str):
-            return self._truncate_tool_result_text(value)
+            return self._truncate_tool_result_text(value, preserve_sgr=self._color_enabled(), normalize_escaped=False)
         if isinstance(value, dict):
             content = value.get("content")
             if isinstance(content, list):
                 parts = [item.get("text", "") for item in content
                          if isinstance(item, dict) and item.get("type") == "text"]
                 if parts:
-                    return self._truncate_tool_result_text("\n".join(parts))
+                    return self._truncate_tool_result_text("\n".join(parts), preserve_sgr=self._color_enabled(), normalize_escaped=False)
         if value not in (None, "", [], {}):
-            return self._truncate_tool_result_text(json.dumps(value, ensure_ascii=False))
+            return self._truncate_tool_result_text(json.dumps(value, ensure_ascii=False), normalize_escaped=False)
         return ""
 
     def _semantic_tool_block(self, state: dict, *, status: str, result: str = "",
@@ -617,10 +607,13 @@ class PiService:
                 self._semantic_tag("[/INPUT]", input_label=True),
             ])
         if result:
-            response_style = lambda text: self._style_semantic_response(text, is_error=is_error)
+            rendered = presentation.response(
+                result, enabled=self._color_enabled(), tool=state.get("tool", ""),
+                args=state.get("args"), is_error=is_error,
+            )
             lines.extend([
                 self._semantic_tag("[TOOL_RESPONSE]"),
-                self._semantic_indent(result, response_style),
+                "\n".join("  " + line for line in rendered.split("\n")),
                 self._semantic_tag("[/TOOL_RESPONSE]"),
             ])
         lines.append(self._semantic_tag(f"[/{tool_name}]"))
@@ -1324,12 +1317,15 @@ Model shorthands:
 
         return obj
 
-    def _truncate_tool_result_text(self, text: str) -> str:
+    def _truncate_tool_result_text(self, text: str, *, preserve_sgr: bool = False,
+                                   normalize_escaped: bool = True) -> str:
         """Show a bounded head and tail with exact omitted-middle counts."""
         if not isinstance(text, str):
             return text
-        display_text = self._strip_ansi_sequences(text.replace("\\n", "\n").replace("\\t", "\t"))
+        normalized = text.replace("\\n", "\n").replace("\\t", "\t") if normalize_escaped else text
+        display_text = presentation.sanitize(normalized)
         lines = display_text.splitlines()
+        colored_lines = presentation.isolated_lines(normalized) if preserve_sgr else lines
         if display_text.endswith(("\n", "\r")):
             # splitlines intentionally avoids inventing an empty final display line.
             pass
@@ -1338,14 +1334,17 @@ Model shorthands:
         head_lines = max(0, self._codex_tool_result_max_lines)
         tail_lines = max(0, self._tool_result_tail_lines)
         if len(lines) <= head_lines + tail_lines:
-            return display_text
+            return "\n".join(colored_lines) if preserve_sgr else display_text
 
         omitted = lines[head_lines:len(lines) - tail_lines if tail_lines else len(lines)]
         omitted_text = "\n".join(omitted)
         marker = f"[{len(omitted)} lines, {len(omitted_text)} characters truncated]"
-        visible = [*lines[:head_lines], marker]
+        # Match splitlines' treatment of a final newline; color bytes never
+        # affect counts, and omitted styles cannot bleed into the marker/tail.
+        visible_lines = colored_lines[:len(lines)] if preserve_sgr else lines
+        visible = [*visible_lines[:head_lines], marker]
         if tail_lines:
-            visible.extend(lines[-tail_lines:])
+            visible.extend(visible_lines[-tail_lines:])
         return "\n".join(visible)
 
     def _configure_headless_ui(self) -> Optional[str]:
@@ -4247,7 +4246,7 @@ export default function (pi: ExtensionAPI) {
                     if result_val in (None, "", [], {}):
                         event_payload["result"] = buffered_text
                     elif isinstance(result_val, str):
-                        existing = self._strip_ansi_sequences(result_val)
+                        existing = presentation.sanitize(result_val, semantic_mode and self._color_enabled())
                         if existing:
                             if not existing.endswith("\n"):
                                 existing += "\n"
@@ -4300,10 +4299,11 @@ export default function (pi: ExtensionAPI) {
                                 or pending_tool_execution_end is not None
                                 or pending_turn_end_after_tool is not None
                             ):
-                                self._buffered_tool_stdout_lines.append(self._strip_ansi_sequences(line))
+                                self._buffered_tool_stdout_lines.append(presentation.response(
+                                    line, enabled=semantic_mode and self._color_enabled()))
                                 continue
                             if semantic_mode and self._ordered_output is not None:
-                                self._ordered_output.emit(self._strip_ansi_sequences(line))
+                                self._ordered_output.emit(presentation.response(line, enabled=self._color_enabled()))
                             else:
                                 print(line, flush=True)
                             continue
