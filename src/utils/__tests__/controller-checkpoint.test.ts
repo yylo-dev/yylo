@@ -502,7 +502,35 @@ describe('controller_checkpoint.py template script', () => {
     expect(git(repo, 'diff', '--cached', '--name-only')).toBe('');
   });
 
-  it('blocks dirty product paths and leaves both worktree and index untouched', async () => {
+  it('preserves unrelated untracked output while committing only eligible metadata', async () => {
+    await configureMetadataController();
+    const bytes = 'bash: s1034-battery.sh: No such file or directory\n';
+    await fs.writeFile(path.join(repo, 's1034-out.txt'), bytes);
+    await fs.writeFile(path.join(repo, '.juno_task', 'tasks', 'one.md'), 'controller\n');
+    const result = run(repo, 'commit', '--message', 'checkpoint selected metadata', '--json');
+    expect(result.status, result.stderr).toBe(0);
+    const payload = JSON.parse(result.stdout);
+    expect(payload.excluded).toEqual([expect.objectContaining({
+      path: 's1034-out.txt', reason: 'untracked_outside_checkpoint_selection',
+    })]);
+    expect(git(repo, 'show', '--name-only', '--format=', 'HEAD')).toBe('.juno_task/tasks/one.md');
+    expect(await fs.readFile(path.join(repo, 's1034-out.txt'), 'utf8')).toBe(bytes);
+    expect(git(repo, 'status', '--porcelain')).toBe('?? s1034-out.txt');
+    expect(git(repo, 'diff', '--cached', '--name-only')).toBe('');
+    expect(run(repo, 'require-clean').status).toBe(2);
+    expect(JSON.parse(run(repo, 'commit', '--json').stdout).outcome).toBe('noop');
+  });
+
+  it('never stages unselected untracked symlinks or follows their targets', async () => {
+    await fs.symlink('/absent/external', path.join(repo, 'unrelated-link'));
+    await fs.writeFile(path.join(repo, '.juno_task/tasks/one.md'), 'changed\n');
+    const result = run(repo, 'commit', '--json');
+    expect(result.status, result.stderr).toBe(0);
+    expect(await fs.readlink(path.join(repo, 'unrelated-link'))).toBe('/absent/external');
+    expect(git(repo, 'ls-files', 'unrelated-link')).toBe('');
+  });
+
+  it('blocks dirty tracked product paths and leaves both worktree and index untouched', async () => {
     await fs.writeFile(path.join(repo, '.juno_task', 'tasks', 'one.md'), 'controller\n');
     await fs.writeFile(path.join(repo, 'product.txt'), 'product\n');
     const before = git(repo, 'rev-parse', 'HEAD');
@@ -661,7 +689,7 @@ describe('controller_checkpoint.py template script', () => {
     const checkpoint = await fs.readFile(helper, 'utf8');
     expect(checkpoint).toContain('allow_pending_changes: bool = False');
     expect(checkpoint).toContain('allow_pending_changes and key == "clean"');
-    expect(checkpoint).toContain('payload["sparse_controller_readback"] = require_sparse_controller(root)');
+    expect(checkpoint).toContain('payload["sparse_controller_readback"] = require_sparse_controller(root, allow_pending_changes=True)');
     expect(checkpoint).toContain('role_source": "registered-sparse-checkpoint"');
     expect(checkpoint).toContain('sparse checkpoint root is not the exact registered controller');
     expect(checkpoint).not.toContain('if not evidence["passed"]:\n        failed = sorted');
