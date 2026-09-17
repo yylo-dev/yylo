@@ -693,6 +693,11 @@ def fingerprint(root: Path, path: str) -> str:
     return digest.hexdigest()
 
 
+def excluded_untracked(item: Dirty, includes: tuple[str, ...]) -> bool:
+    """Residue outside selection is not write authority and is never staged."""
+    return item.kind == "?" and not any(selected(name, includes) for name in status_names(item))
+
+
 def inspect(
     root: Path, includes: tuple[str, ...], *, recover_stale_lock: bool = True,
     task_id: str | None = None,
@@ -721,10 +726,12 @@ def inspect(
     staged = sorted({name for item in dirt if item.staged for name in status_names(item)})
     if staged:
         raise CheckpointError(f"pre-existing staged index blocks checkpoint: {staged}")
-    for item in dirt:
+    excluded = sorted(item.path for item in dirt if excluded_untracked(item, includes))
+    eligible = [item for item in dirt if not excluded_untracked(item, includes)]
+    for item in eligible:
         for name in status_names(item):
             inspect_boundary(root, name)
-    all_names = sorted({name for item in dirt for name in status_names(item)})
+    all_names = sorted({name for item in eligible for name in status_names(item)})
     policy_refused = controller_path_refusals(root, all_names)
     if policy_refused:
         raise CheckpointError("blocked non-controller paths under metadata-controller policy: "
@@ -740,6 +747,9 @@ def inspect(
         "head": head,
         "index_lock": index_lock,
         "selected": chosen,
+        "excluded": [{"path": name, "reason": "untracked_outside_checkpoint_selection",
+                      "safe_next_action": "leave untouched; if relocation is desired, obtain owner approval and preserve bytes outside the controller"}
+                     for name in excluded],
         "fingerprints": {path: fingerprint(root, path) for path in chosen},
     }
 
@@ -889,7 +899,8 @@ def assert_staged_boundary(
         raise CheckpointError("conflict appeared during checkpoint staging")
     if any(item.dirty_submodule for item in dirt):
         raise CheckpointError("dirty submodule state appeared during checkpoint staging")
-    blocked = sorted({name for item in dirt for name in status_names(item)
+    blocked = sorted({name for item in dirt if not excluded_untracked(item, includes)
+                      for name in status_names(item)
                       if not selected(name, includes) and not unrelated_task_residue(name, includes)})
     if blocked:
         raise CheckpointError(f"blocked non-controller paths appeared during checkpoint: {blocked}")
@@ -898,7 +909,8 @@ def assert_staged_boundary(
         raise CheckpointError(
             f"staged path set escaped frozen group: expected={sorted(staged_paths)} actual={actual_staged}"
         )
-    dirty_paths = sorted({name for item in dirt for name in status_names(item)
+    dirty_paths = sorted({name for item in dirt if not excluded_untracked(item, includes)
+                          for name in status_names(item)
                           if not unrelated_task_residue(name, includes)})
     if dirty_paths != sorted(remaining):
         raise CheckpointError("dirty path set changed after staging")
@@ -1416,8 +1428,12 @@ def main(argv: list[str] | None = None) -> int:
             "head": frozen["head"],
             "index_lock": frozen["index_lock"],
             "selected": frozen["selected"],
+            "excluded": frozen["excluded"],
             "commits": [],
         }
+        if args.command == "require-clean" and frozen["excluded"]:
+            raise CheckpointError("controller is not clean; preserved excluded paths: "
+                                  + ", ".join(item["path"] for item in frozen["excluded"]))
         if not frozen["selected"]:
             payload["outcome"] = "noop"
         elif should_commit:
@@ -1428,7 +1444,7 @@ def main(argv: list[str] | None = None) -> int:
             payload["outcome"] = "committed"
             payload["head"] = payload["commits"][-1]
             if persisted_role == "controller":
-                payload["sparse_controller_readback"] = require_sparse_controller(root)
+                payload["sparse_controller_readback"] = require_sparse_controller(root, allow_pending_changes=True)
         elif args.command == "require-clean":
             raise CheckpointError(f"controller is dirty; run checkpoint first: {frozen['selected']}")
         else:

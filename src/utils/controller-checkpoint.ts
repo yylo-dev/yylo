@@ -22,7 +22,9 @@ export interface ControllerCheckpointResult {
 function checkpointRecovery(error: unknown): {
   blocker: ControllerCheckpointBlocker; safeNextAction: string; detail: string;
 } {
-  const detail = String(error)
+  let message: string;
+  try { message = String(error); } catch { message = 'Unprintable checkpoint error'; }
+  const detail = message
     .replace(/(^|\n)(\s*(?:authorization|token|password|secret)\s*[:=]\s*).*$/gim, '$1$2[REDACTED]')
     .slice(-2000);
   if (/lease busy|lock timeout|branch changed|changed during checkpoint|HEAD\/ref changed/i.test(detail)) {
@@ -35,7 +37,7 @@ function checkpointRecovery(error: unknown): {
   if (/blocked non-controller|policy refused|include drift|queue attribution refused/i.test(detail)) {
     return {
       blocker: 'deterministic_policy_exclusion',
-      safeNextAction: 'preserve the bytes and run `yy doctor workspace`; use the reported exact owner/recovery command',
+      safeNextAction: 'preserve every reported path; inspect `python3 .juno_task/scripts/controller_checkpoint.py plan --json` from the controller; relocate files only with owner approval, never delete or broaden policy',
       detail,
     };
   }
@@ -59,24 +61,26 @@ export async function checkpointControllerAfterFinalization(
   runExitCode: number,
   taskId?: string,
 ): Promise<ControllerCheckpointResult> {
-  if (hasSimpleWorkspaceHint(workingDirectory)) {
-    resolveController(workingDirectory, 'diagnostic');
-    return { attempted: false, ok: true };
-  }
-  if (process.env.JUNO_CONTROLLER_CHECKPOINT_ACTIVE === '1') {
-    return { attempted: false, ok: true };
-  }
-  const configured = process.env.JUNO_TASK_ROOT?.trim();
-  let root = path.resolve(configured || workingDirectory);
-  if (path.basename(root) === '.juno_task') root = path.dirname(root);
-  const script = path.join(root, '.juno_task', 'scripts', 'controller_checkpoint.py');
-  if (!(await fs.pathExists(script))) return { attempted: false, ok: true };
-  const message = runExitCode === 0
-    ? 'chore(controller): checkpoint finalized run state'
-    : `chore(controller): checkpoint failed run state (exit ${runExitCode})`;
+  let attempted = false;
   try {
+    if (hasSimpleWorkspaceHint(workingDirectory)) {
+      resolveController(workingDirectory, 'diagnostic');
+      return { attempted: false, ok: true };
+    }
+    if (process.env.JUNO_CONTROLLER_CHECKPOINT_ACTIVE === '1') {
+      return { attempted: false, ok: true };
+    }
+    const configured = process.env.JUNO_TASK_ROOT?.trim();
+    let root = path.resolve(configured || workingDirectory);
+    if (path.basename(root) === '.juno_task') root = path.dirname(root);
+    const script = path.join(root, '.juno_task', 'scripts', 'controller_checkpoint.py');
+    if (!(await fs.pathExists(script))) return { attempted: false, ok: true };
+    const message = runExitCode === 0
+      ? 'chore(controller): checkpoint finalized run state'
+      : `chore(controller): checkpoint failed run state (exit ${runExitCode})`;
     const execFile = promisify(childProcess.execFile);
     const scopeArgs = taskId ? ['--task-id', taskId] : [];
+    attempted = true;
     await execFile('python3', [script, '--root', root, ...scopeArgs, 'commit', '--message', message], {
       cwd: root,
       env: buildChildProcessEnvironment(process.env, {
@@ -90,9 +94,10 @@ export async function checkpointControllerAfterFinalization(
     const recovery = checkpointRecovery(error);
     const warning = `Controller checkpoint failed after finalization; blocker=${recovery.blocker}; `
       + `safe_next_action=${recovery.safeNextAction}; detail=${recovery.detail}`;
-    console.error(`WARNING: ${warning}`);
+    // A failed warning sink (e.g. a closed stderr pipe) is secondary too.
+    try { console.error(`WARNING: ${warning}`); } catch { /* preserve the owning result */ }
     return {
-      attempted: true, ok: false, blocker: recovery.blocker,
+      attempted, ok: false, blocker: recovery.blocker,
       safeNextAction: recovery.safeNextAction, warning,
     };
   }
