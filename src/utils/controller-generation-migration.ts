@@ -45,8 +45,8 @@ export async function assertControllerGenerationReady(projectDir: string): Promi
 function packagedEngine(): string {
   const directory = path.dirname(fileURLToPath(import.meta.url));
   const engine = [
-    path.resolve(directory, 'templates/scripts/controller_generation_migration.py'),
-    path.resolve(directory, '../templates/scripts/controller_generation_migration.py'),
+    path.resolve(directory, 'templates/maintenance/controller_generation_migration.py'),
+    path.resolve(directory, '../templates/maintenance/controller_generation_migration.py'),
   ].find(candidate => fs.existsSync(candidate));
   if (!engine) throw new Error('generation_engine_missing: installed maintenance engine is unavailable');
   return engine;

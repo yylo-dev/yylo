@@ -12,8 +12,10 @@ import tempfile
 import unittest
 from unittest import mock
 
-SCRIPTS = Path(__file__).resolve().parents[1]
+SCRIPTS = Path(__file__).resolve().parents[2] / 'scripts'
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(0, str(SCRIPTS / 'tests'))
 import controller_generation_migration as migration
 from real_git_fixture import install_juno_admission_fixture
 

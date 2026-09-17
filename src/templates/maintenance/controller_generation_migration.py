@@ -29,6 +29,8 @@ import tempfile
 from contextlib import contextmanager
 from typing import Any
 
+# Maintenance is package-owned, not a controller-local managed script.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import task_workspace as compatibility
 import metadata_controller as endpoints
 
