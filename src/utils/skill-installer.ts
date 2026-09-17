@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import semver from 'semver';
+import packageMetadata from '../../package.json';
 import { assertSafeManagedWritePath, lstatIfPresent } from './managed-update-transaction.js';
 
 interface SkillGroup {
@@ -39,13 +40,29 @@ export interface SkillGuidanceReport {
   version: string | null;
   findings: Array<{
     destination: string;
-    reason: 'legacy-skill' | 'retired-lifecycle' | 'receipt-drift' | 'unverified' | 'unsafe-or-unreadable';
+    reason: 'legacy-skill' | 'retired-lifecycle' | 'receipt-drift' | 'unverified' | 'unsafe-or-unreadable' | 'incompatible-version';
   }>;
 }
 
 const execFileAsync = promisify(execFile);
 
 export class SkillInstaller {
+  static readonly VERSION_RANGE = packageMetadata.yyloSkills.version;
+
+  private static compatibleVersion(version: unknown): version is string {
+    return typeof version === 'string' && Boolean(semver.valid(version))
+      && semver.satisfies(version, this.VERSION_RANGE);
+  }
+
+  private static recordedDigest(record: InstallRecord | undefined, group: string, skill: string): string | undefined {
+    // Old releases may prove ownership for upgrades/retirement, not compatibility.
+    if (record?.schemaVersion !== 1 || record.repository !== this.REPOSITORY
+        || typeof record.version !== 'string' || !semver.valid(record.version)
+        || !Array.isArray(record.skills) || !record.skills.includes(skill)) return undefined;
+    const digest = record.digests?.[group]?.[skill];
+    return typeof digest === 'string' && /^[a-f0-9]{64}$/.test(digest) ? digest : undefined;
+  }
+
   static readonly REPOSITORY = 'https://github.com/yylo-dev/yylo-skills.git';
   static readonly SKILLS = [
     'artifact-yylo',
@@ -147,6 +164,9 @@ export class SkillInstaller {
       if (!semver.valid(withoutPrefix) || semver.prerelease(withoutPrefix)) {
         throw new Error(`Invalid stable skill version: ${requested}`);
       }
+      if (!this.compatibleVersion(withoutPrefix)) {
+        throw new Error(`Skill release ${requested} is incompatible; this CLI requires yylo-skills ${this.VERSION_RANGE}. Run yy skills install for the latest compatible stable release.`);
+      }
       const tag = `v${withoutPrefix}`;
       const { stdout } = await this.runCommand(
         'git',
@@ -163,9 +183,9 @@ export class SkillInstaller {
     const versions = stdout
       .split(/\r?\n/)
       .map((line) => line.match(/refs\/tags\/v([^\s]+)$/)?.[1])
-      .filter((value): value is string => Boolean(value && semver.valid(value) && !semver.prerelease(value)));
+      .filter((value): value is string => this.compatibleVersion(value));
     const latest = semver.rsort(versions)[0];
-    if (!latest) throw new Error('No stable yylo-skills release is available');
+    if (!latest) throw new Error(`No compatible stable yylo-skills release is available; this CLI requires ${this.VERSION_RANGE}. A maintainer must publish the required skill release before this CLI is released.`);
     return `v${latest}`;
   }
 
@@ -282,8 +302,8 @@ export class SkillInstaller {
     record: InstallRecord,
     force: boolean,
   ): Promise<{ changed: boolean; warnings: string[] }> {
-    const replacements: { source: string; destination: string; backup: string; prepared: string }[] = [];
-    const retirements: { destination: string; backup: string }[] = [];
+    const replacements: { source: string; destination: string; backup: string; prepared: string; preimage: string | undefined }[] = [];
+    const retirements: { destination: string; backup: string; preimage: string }[] = [];
     const warnings: string[] = [];
     const transaction = randomUUID();
     const recordPath = this.recordPath(projectDir);
@@ -304,9 +324,11 @@ export class SkillInstaller {
         const destination = path.join(projectDir, group.destDir, skill);
         await assertSafeManagedWritePath(projectDir, destination);
         const exists = await fs.pathExists(destination);
-        const same = exists
-          && (await this.directoryDigest(source)) === (await this.directoryDigest(destination));
-        if (exists && !same && !force) {
+        const current = exists ? await this.directoryDigest(destination) : undefined;
+        const same = exists && (await this.directoryDigest(source)) === current;
+        const owned = current !== undefined
+          && current === this.recordedDigest(previousRecord, group.name, skill);
+        if (exists && !same && !owned && !force) {
           throw new Error(`Skill conflict at ${path.relative(projectDir, destination)}; rerun with --force to replace YYLO skill files`);
         }
         if (!exists || !same || force) {
@@ -315,6 +337,7 @@ export class SkillInstaller {
             destination,
             backup: `${destination}.yylo-backup-${transaction}`,
             prepared: `${destination}.yylo-stage-${transaction}`,
+            preimage: current,
           });
         }
       }
@@ -323,11 +346,7 @@ export class SkillInstaller {
         const destination = path.join(projectDir, group.destDir, legacy);
         if (!(await fs.pathExists(destination))) continue;
         await assertSafeManagedWritePath(projectDir, destination);
-        const expected = previousRecord?.schemaVersion === 1
-          && previousRecord.repository === this.REPOSITORY
-          && previousRecord.skills.includes(legacy)
-          ? previousRecord.digests?.[group.name]?.[legacy]
-          : undefined;
+        const expected = this.recordedDigest(previousRecord, group.name, legacy);
         let current: string | undefined;
         try {
           current = await this.directoryDigest(destination);
@@ -335,7 +354,7 @@ export class SkillInstaller {
           // Unsafe or unreadable legacy content is preserved.
         }
         if (expected && current === expected) {
-          retirements.push({ destination, backup: `${destination}.yylo-retired-${transaction}` });
+          retirements.push({ destination, backup: `${destination}.yylo-retired-${transaction}`, preimage: expected });
         } else {
           warnings.push(`Preserved customized or unrecorded legacy skill at ${path.relative(projectDir, destination)}`);
         }
@@ -344,14 +363,37 @@ export class SkillInstaller {
 
     const applied: typeof replacements = [];
     const retired: typeof retirements = [];
+    let recordWriteAttempted = false;
     try {
       for (const item of replacements) {
         await fs.ensureDir(path.dirname(item.destination));
         await fs.copy(item.source, item.prepared, { overwrite: false, dereference: false });
       }
+      // Staging may take time. Refuse stale ownership evidence before replacing
+      // any destination, even when force was explicitly requested.
+      await assertSafeManagedWritePath(projectDir, recordPath);
+      const currentRecordBytes = await fs.readFile(recordPath).catch(() => undefined);
+      if (previousRecordBytes
+        ? !currentRecordBytes || !previousRecordBytes.equals(currentRecordBytes)
+        : currentRecordBytes !== undefined) {
+        throw new Error('Skill installation receipt changed during staging; inspect and retry');
+      }
+      for (const item of [...replacements, ...retirements]) {
+        await assertSafeManagedWritePath(projectDir, item.destination);
+        const current = await fs.pathExists(item.destination)
+          ? await this.directoryDigest(item.destination) : undefined;
+        if (current !== item.preimage) {
+          throw new Error(`Skill destination changed during staging: ${path.relative(projectDir, item.destination)}; inspect and retry`);
+        }
+      }
       for (const item of replacements) {
         if (await fs.pathExists(item.destination)) await fs.rename(item.destination, item.backup);
-        await fs.rename(item.prepared, item.destination);
+        try {
+          await fs.rename(item.prepared, item.destination);
+        } catch (error) {
+          if (await fs.pathExists(item.backup)) await fs.rename(item.backup, item.destination);
+          throw error;
+        }
         applied.push(item);
       }
       for (const item of retirements) {
@@ -359,9 +401,8 @@ export class SkillInstaller {
         retired.push(item);
       }
       await fs.ensureDir(path.dirname(recordPath));
+      recordWriteAttempted = true;
       await fs.writeJson(recordPath, record, { spaces: 2 });
-      for (const item of replacements) await fs.remove(item.backup);
-      for (const item of retirements) await fs.remove(item.backup);
     } catch (error) {
       for (const item of [...retired].reverse()) {
         if (await fs.pathExists(item.backup)) await fs.rename(item.backup, item.destination);
@@ -370,15 +411,21 @@ export class SkillInstaller {
         await fs.remove(item.destination).catch(() => undefined);
         if (await fs.pathExists(item.backup)) await fs.rename(item.backup, item.destination);
       }
-      if (previousRecordBytes) await fs.outputFile(recordPath, previousRecordBytes);
-      else await fs.remove(recordPath).catch(() => undefined);
+      if (recordWriteAttempted) {
+        if (previousRecordBytes) await fs.outputFile(recordPath, previousRecordBytes);
+        else await fs.remove(recordPath).catch(() => undefined);
+      }
       throw error;
     } finally {
       for (const item of replacements) {
         await fs.remove(item.prepared).catch(() => undefined);
-        await fs.remove(item.backup).catch(() => undefined);
       }
-      for (const item of retirements) await fs.remove(item.backup).catch(() => undefined);
+      // Backups survive any failed rollback; never destroy the only old bytes.
+    }
+    for (const item of [...replacements, ...retirements]) {
+      await fs.remove(item.backup).catch(() => {
+        warnings.push(`Preserved transaction backup at ${path.relative(projectDir, item.backup)}`);
+      });
     }
     return { changed: replacements.length > 0 || retirements.length > 0, warnings };
   }
@@ -479,6 +526,9 @@ export class SkillInstaller {
     } catch {
       findings.push({ destination: path.relative(projectDir, receipt), reason: 'unsafe-or-unreadable' });
     }
+    if (record && !this.compatibleVersion(record.version)) {
+      findings.push({ destination: path.relative(projectDir, receipt), reason: 'incompatible-version' });
+    }
     for (const group of this.SKILL_GROUPS) {
       for (const skill of [...this.SKILLS, ...this.LEGACY_SKILLS]) {
         const destination = `${group.destDir}/${skill}`;
@@ -548,7 +598,10 @@ export class SkillInstaller {
   /** Local-only status check. This method never resolves tags or invokes a command. */
   static async needsUpdate(projectDir: string): Promise<boolean> {
     const record = await fs.readJson(this.recordPath(projectDir)).catch(() => undefined) as InstallRecord | undefined;
-    if (!record || record.schemaVersion !== 1 || record.repository !== this.REPOSITORY) return true;
+    if (!record || record.schemaVersion !== 1 || record.repository !== this.REPOSITORY
+        || !this.compatibleVersion(record.version) || !Array.isArray(record.skills)
+        || record.skills.length !== this.SKILLS.length
+        || !this.SKILLS.every((skill) => record.skills.includes(skill))) return true;
     for (const group of this.SKILL_GROUPS) {
       for (const skill of this.SKILLS) {
         const root = path.join(projectDir, group.destDir, skill);
