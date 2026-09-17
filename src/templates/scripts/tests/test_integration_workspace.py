@@ -36,6 +36,21 @@ def git(root: Path, *args: str) -> str:
     return run(["git", "-C", str(root), *args], root).stdout.strip()
 
 
+class GenerationAssessmentTests(unittest.TestCase):
+    def test_source_adoption_does_not_confuse_script_equality_with_generation_readiness(self):
+        for status, payload, expected in [
+            (2, {'disposition': 'refused', 'code': 'previous_inventory_unverified'}, 'refused'),
+            (0, {'disposition': 'migration_required'}, 'migration_required'),
+            (0, {'disposition': 'ready'}, 'ready'),
+            (1, {'disposition': 'ready'}, 'unavailable'),
+            (0, {'healthy': True}, 'unavailable'),
+        ]:
+            with self.subTest(status=status, payload=payload), mock.patch.object(runtime.subprocess, 'run',
+                    return_value=subprocess.CompletedProcess([], status, json.dumps(payload), '')):
+                result = runtime.adoption_generation_assessment(Path('/controller'), Path('/package/dist/bin/cli.mjs'))
+                self.assertEqual(result['disposition'], expected)
+
+
 class IntegrationWorkspaceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runtime_refresh_patcher = mock.patch.object(

@@ -1,12 +1,12 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'fs-extra';
 import path from 'node:path';
 import { constants } from 'node:os';
 import { Command } from 'commander';
 import { resolveController } from './controller-resolver.js';
 import { ScriptInstaller } from './script-installer.js';
-import { packagedGenerationRoot, recoverControllerGeneration, acquireControllerGenerationReadLease, GENERATION_MIGRATION_ROOT } from './controller-generation-migration.js';
-import { assessControllerGeneration, ensureControllerGeneration } from './controller-generation-startup.js';
+import { applyControllerGeneration, packagedGenerationRoot, recoverControllerGeneration, acquireControllerGenerationReadLease, GENERATION_MIGRATION_ROOT } from './controller-generation-migration.js';
+import { assessControllerGeneration, ensureControllerGeneration, prepareInstalledControllerRepair } from './controller-generation-startup.js';
 
 export const YYLO_CONTROLLER_GENERATION_DISPATCH_V1 = true;
 let releaseDispatch: (() => Promise<void>) | undefined;
@@ -100,11 +100,34 @@ export async function prepareControllerCommand(cwd: string, commandArgs: string[
         activeTasks: Object.keys(assessment.plan.active_pins),
       } : assessment));
       if (assessment.disposition === 'refused' || assessment.disposition === 'transition_incomplete') process.exitCode = 2;
+    } else if (operation === 'repair-plan' || operation === 'repair-apply') {
+      const file = commandArgs[3];
+      if (!file || !path.isAbsolute(file) || path.resolve(file) !== file
+          || await fs.realpath(path.dirname(file)) !== path.dirname(file)) {
+        throw new Error('Repair plan must be an absolute non-symlink path outside Git');
+      }
+      const probe = spawnSync('git', ['-C', path.dirname(file), 'rev-parse', '--git-dir'], { timeout: 5000, stdio: 'ignore' });
+      if (probe.status !== 128) throw new Error('Repair plan must be outside Git; directory inspection failed or is a worktree');
+      if (operation === 'repair-plan') {
+        const plan = await prepareInstalledControllerRepair(controller, packageRoot);
+        await fs.writeFile(file, JSON.stringify(plan), { flag: 'wx', mode: 0o600 });
+        console.log(JSON.stringify({ operation, path: file, id: plan.id,
+          reviewRequired: plan.review_required, paths: Object.keys(plan.after as object),
+          next: `yy scripts generation repair-apply ${file} ${plan.id}` }));
+      } else {
+        const stat = await fs.lstat(file);
+        if (!stat.isFile() || stat.size > 64 * 1024 * 1024) throw new Error('Unsafe or oversized repair plan');
+        const plan = await fs.readJson(file);
+        if (plan.repair !== true || !/^[a-f0-9]{64}$/.test(commandArgs[4] ?? '') || plan.id !== commandArgs[4]) {
+          throw new Error('Explicit reviewed repair plan ID required');
+        }
+        console.log(JSON.stringify(await applyControllerGeneration(controller, plan)));
+      }
     } else if (operation === 'resume' || operation === 'rollback') {
       const id = commandArgs[3] ?? '';
       if (!/^[a-f0-9]{64}$/.test(id ?? '')) throw new Error('Exact generation transaction ID required');
       console.log(JSON.stringify(await recoverControllerGeneration(controller, id, operation === 'rollback')));
-    } else throw new Error('Use yy scripts generation doctor|resume|rollback');
+    } else throw new Error('Use yy scripts generation doctor|repair-plan|repair-apply|resume|rollback');
     return true;
   }
   if (kind === 'read') {

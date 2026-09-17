@@ -1407,9 +1407,11 @@ ${chalk.gray('This updates scripts from the currently installed yylo package/tem
 
   const generationCommand = scriptsCommand.command('generation')
     .description('Inspect or recover an authenticated controller generation transaction');
-  for (const operation of ['doctor', 'resume', 'rollback']) {
+  for (const operation of ['doctor', 'resume', 'rollback', 'repair-plan', 'repair-apply']) {
     const command = generationCommand.command(operation);
-    if (operation !== 'doctor') command.argument('<transaction-id>');
+    if (operation.startsWith('repair-')) command.argument('<plan-file>');
+    else if (operation !== 'doctor') command.argument('<transaction-id>');
+    if (operation === 'repair-apply') command.argument('<reviewed-plan-id>');
     command.action(() => { throw new Error('Generation maintenance requires an exact registered metadata controller'); });
   }
 
