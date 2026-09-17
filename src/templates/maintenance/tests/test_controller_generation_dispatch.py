@@ -6,6 +6,7 @@ representative generations, not claims about a historical published tarball.
 """
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -58,6 +59,9 @@ class PublicGenerationDispatchTests(unittest.TestCase):
                             ignore=shutil.ignore_patterns('__pycache__', 'tests'))
             shutil.copytree(PACKAGE / 'dist/templates/maintenance', package / 'dist/templates/maintenance',
                             ignore=shutil.ignore_patterns('__pycache__', 'tests'))
+            if label == 'previous':
+                runtime = package / 'dist/templates/scripts/task_workspace.py'
+                runtime.write_bytes(runtime.read_bytes() + b'\n# representative previous runtime generation\n')
             write(package / 'dist/templates/scripts/kanban.sh', board)
             write(package / 'dist/templates/controller-agent/AGENTS.md', f'{label} guidance\n'.encode())
             assets = [{'source': 'scripts/' + file.name, 'destination': '.juno_task/scripts/' + file.name,
@@ -100,9 +104,28 @@ class PublicGenerationDispatchTests(unittest.TestCase):
             rows = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
             return rows[-1] if rows else None
 
+        subprocess.run([sys.executable, '-m', 'venv', '--without-pip', str(controller / '.venv_juno')], check=True, env=env)
+        with (controller / '.gitignore').open('a') as out: out.write('/.venv_juno/\n')
+        git(controller, 'add', '.gitignore'); git(controller, 'commit', '-m', 'isolated fixture interpreter')
+        workflow_path = '.juno_task/config/worktree-hydration.yaml'
+        write(fixture.repository / workflow_path, {'schema_version': 'v1', 'workflow_id': 'active-pin-hydration',
+            'workflow_class': 'task_hydration', 'steps': [{'id': 'ready', 'name': 'Offline hydration',
+                'probe': ['true'], 'command': ['true'], 'timeout_seconds': 30, 'fail_workflow': True,
+                'non_interactive': True, 'network': False, 'sensitive': False, 'outputs': []}]})
+        git(fixture.repository, 'add', workflow_path)
+        runtime_paths = ['.juno_task/scripts/task_workspace.py', 'juno-code/src/templates/scripts/task_workspace.py']
+        old_bytes = (Path(previous['root']) / 'dist/templates/scripts/task_workspace.py').read_bytes()
+        for relative in runtime_paths: write(fixture.repository / relative, old_bytes)
+        git(fixture.repository, 'add', *runtime_paths)
+        git(fixture.repository, 'commit', '-m', 'previous source runtime fixture')
         active = invoke('task', 'start', 'Y', cli=str(Path(previous['root']) / 'dist/bin/cli.mjs'))
         self.assertEqual(active['state'], 'WORKING')
+        self.assertEqual(active['hydration']['status'], 'passed')
         active_record = json.loads((controller / migration.STATE).read_text())['tasks']['Y']
+        for relative in runtime_paths: write(fixture.repository / relative, (SCRIPTS / 'task_workspace.py').read_bytes())
+        git(fixture.repository, 'add', *runtime_paths)
+        git(fixture.repository, 'commit', '-m', 'candidate source runtime fixture')
+        target = git(controller, 'rev-parse', 'product')
         before = (controller / migration.INVENTORY).read_bytes()
         doctor = invoke('scripts', 'generation', 'doctor')
         self.assertEqual(doctor['disposition'], 'migration_required')
@@ -114,9 +137,11 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         self.assertEqual((controller / 'AGENTS.md').read_bytes(), b'candidate guidance\n')
         self.assertEqual(json.loads((controller / migration.STATE).read_text())['tasks']['Y'], active_record)
         pin = migration.pinned_task_runtime(controller, 'Y')
-        self.assertTrue(pin['pinned'])
-        self.assertEqual(pin['script'], str(Path(previous['root']) / 'dist/templates/scripts/task_workspace.py'))
+        self.assertTrue(pin.get('pinned') or pin.get('retained_pin'))
+        self.assertEqual(json.loads((controller / migration.CURRENT).read_text())['active_pins']['Y']['generation'], previous)
         invoke('task', 'lease-heartbeat', 'Y', '--lease-token', active['lease_token'])
+        fixture.commit_task('Y', 'src/pinned.txt')
+        self.assertEqual(invoke('task', 'finish', 'Y', '--lease-token', active['lease_token'])['state'], 'QUEUED')
         marker = (controller / migration.CURRENT).read_bytes()
         self.assertEqual(invoke('scripts', 'generation', 'doctor')['disposition'], 'ready')
         invoke('task', 'status', 'X')
@@ -140,6 +165,20 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         self.assertEqual(invoke('task', 'start', 'Z', cli=str(unsupported / 'dist/bin/cli.mjs'))['state'], 'WORKING')
         self.assertEqual((controller / migration.CURRENT).read_bytes(), marker)
         self.assertEqual((controller / 'AGENTS.md').read_bytes(), b'candidate guidance\n')
+        relative = subprocess.run(['node', str(unsupported / 'dist/bin/cli.mjs'), 'pi',
+            '-w', os.path.relpath(controller, root), '-f', 'missing-relative-prompt.txt'],
+            cwd=root, env=env, capture_output=True, text=True, timeout=120)
+        self.assertNotEqual(relative.returncode, 0)  # Missing input must never launch a model.
+        self.assertIn('Using retained controller runtime:', relative.stderr)
+        clean_stderr = re.sub(r'\x1b\[[0-9;]*m', '', relative.stderr)
+        self.assertIn('Working directory: ' + str(root), [line.strip() for line in clean_stderr.splitlines()])
+        self.assertNotIn(str(controller / controller.name), relative.stderr)
+        for prefix in (['-s', 'pi', '-p', 'hello'], ['--execution-envelope', 'pi']):
+            variant = subprocess.run(['node', str(unsupported / 'dist/bin/cli.mjs'), *prefix,
+                '-w', os.path.relpath(controller, root), '-f', 'missing-relative-prompt.txt'],
+                cwd=root, env=env, capture_output=True, text=True, timeout=120)
+            self.assertNotEqual(variant.returncode, 0)
+            self.assertIn('Using retained controller runtime:', variant.stderr)
         failed = []
         for cli in (executable, str(unsupported / 'dist/bin/cli.mjs')):
             failed.append(subprocess.run(['node', cli, 'task', 'start', 'MISSING'], cwd=controller, env=env,

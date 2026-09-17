@@ -4,7 +4,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { assessControllerGeneration, ensureControllerGeneration } from '../controller-generation-startup.js';
-import { generationCommandKind } from '../controller-generation-command.js';
+import { generationCommandKind, generationInvocationContext } from '../controller-generation-command.js';
+import { Command } from 'commander';
 
 const engine = vi.hoisted(() => ({ plan: vi.fn(), apply: vi.fn(), recover: vi.fn(), ready: vi.fn() }));
 vi.mock('../controller-generation-migration.js', () => ({
@@ -63,6 +64,14 @@ describe('operation-specific first-use generation dispatch', () => {
       sha256: createHash('sha256').update(bytes).digest('hex') }, expect.any(Object));
     await fs.writeFile(artifact, 'corrupt cache');
     expect(await assessControllerGeneration(controller, candidate)).toMatchObject({ disposition: 'refused', code: 'package_provenance_invalid' });
+    expect(engine.apply).not.toHaveBeenCalled();
+  });
+
+  it('treats equal artifact evidence as equal regardless of JSON key insertion order', async () => {
+    await fs.outputJson(path.join(controller, '.juno_task/runtime/generation-migration/current.json'), {
+      candidate: { sha256: 'b'.repeat(64), artifact: path.join(root, 'candidate.tgz'), root: candidate },
+    });
+    expect((await assessControllerGeneration(controller, candidate)).disposition).toBe('ready');
     expect(engine.apply).not.toHaveBeenCalled();
   });
 
@@ -134,8 +143,36 @@ describe('operation-specific first-use generation dispatch', () => {
       expect(generationCommandKind(args)).toBe('read');
     }
     expect(generationCommandKind(['task', 'start'])).toBe('execute');
-    expect(generationCommandKind(['pi'])).toBe('execute');
+    for (const args of [[], ['pi'], ['claude'], ['cursor'], ['codex'], ['gemini'], ['cn']]) {
+      expect(generationCommandKind(args)).toBe('execute');
+    }
     expect(generationCommandKind(['scripts', 'generation', 'rollback'])).toBe('maintenance');
     expect(generationCommandKind(['migrate', 'runtime-install-rebind'])).toBe('skip');
+  });
+
+  it('routes the actual agent cwd using option arity without mutating the execution parser', () => {
+    const program = new Command().version('1.0.0').option('--config <path>').option('-w, --cwd <path>');
+    const pi = program.command('pi').option('-w, --cwd <path>').option('-f, --prompt-file <path>');
+    const parse = (args: string[]) => {
+      const { cwd, version } = generationInvocationContext(program, args, '/launcher');
+      return { cwd, version };
+    };
+    expect(parse(['pi', '-f', '--cwd=/not-a-directory-option'])).toEqual({ cwd: '/launcher', version: false });
+    expect(parse(['pi', '--', '--cwd=/payload'])).toEqual({ cwd: '/launcher', version: false });
+    expect(parse(['pi', '-w', '/first', '--cwd=/actual'])).toEqual({ cwd: '/actual', version: false });
+    expect(parse(['pi', '--config', '--cwd=/config-value', '-w', '../neutral'])).toEqual({ cwd: '/neutral', version: false });
+    expect(parse(['pi', '-f', '--version']).version).toBe(false);
+    expect(parse(['pi', '--version']).version).toBe(true);
+    expect(pi.opts()).toEqual({});
+    expect(program.opts()).toEqual({});
+    program.option('-s, --subagent <name>').option('-p, --prompt [text]').option('--execution-envelope');
+    for (const args of [
+      ['-s', 'pi', '-p', 'hello', '-w', '/controller'],
+      ['--execution-envelope', 'pi', '-w', '/controller'],
+    ]) {
+      const selected = generationInvocationContext(program, args, '/launcher');
+      expect(selected.cwd).toBe('/controller');
+      expect(generationCommandKind(selected.commandArgs)).toBe('execute');
+    }
   });
 });

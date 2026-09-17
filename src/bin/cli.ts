@@ -11,7 +11,7 @@ import { inspect } from 'node:util';
 inspect.defaultOptions.maxStringLength = Infinity;
 inspect.defaultOptions.breakLength = Infinity;
 
-import { Command, Option } from 'commander';
+import { Command, Option, CommanderError } from 'commander';
 import chalk from 'chalk';
 import { EXIT_CODES, isCLIError } from '../cli/types.js';
 import type { SubagentType } from '../types/index.js';
@@ -2252,10 +2252,17 @@ async function main(): Promise<void> {
     await StartupScriptInstaller.isMetadataOnlyController(process.cwd());
   // YYLO_CONTROLLER_GENERATION_DISPATCH_V1: launcher delegates first-use decisions
   // to this package-owned boundary before any local script/installer selection.
-  const { prepareControllerCommand, releaseControllerCommand } = await import('../utils/controller-generation-command.js');
-  const generationCwd = commandArgs[0] === 'scripts'
-    ? extractOptionValueFromArgv(cliArgs, '--cwd', '-w') || process.cwd() : process.cwd();
-  if (await prepareControllerCommand(generationCwd, commandArgs, cliArgs)) return;
+  const { prepareControllerCommand, releaseControllerCommand, generationInvocationContext } = await import('../utils/controller-generation-command.js');
+  let generationContext;
+  try {
+    generationContext = generationInvocationContext(program, cliArgs, process.cwd());
+  } catch (error) {
+    if (!(error instanceof CommanderError)) throw error;
+    console.error(error.message);
+    process.exitCode = error.exitCode;
+    return;
+  }
+  if (!generationContext.version && await prepareControllerCommand(generationContext.cwd, generationContext.commandArgs, cliArgs, process.cwd())) return;
   // Implicit startup writes require resolver-confirmed controller identity. Do
   // this once, before any project installer, and let invalid registration fail
   // closed before command parsing or agent dispatch. Explicit update commands

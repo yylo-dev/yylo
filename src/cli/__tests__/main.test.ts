@@ -4363,6 +4363,19 @@ describe('Verbose/Quiet Output Modes', () => {
     expect(lastCall.cliConfig.verbose).toBe(0);
   });
 
+  it('prints the quiet final result after suppressed raw streaming events', async () => {
+    const { createExecutionEngine } = await import('../../core/engine.js');
+    const engine = createExecutionEngine({} as any);
+    vi.mocked(engine.onProgress).mockImplementation((handler: any) => {
+      handler({ timestamp: new Date(), content: '{"result":"streamed"}', metadata: { rawJsonOutput: true } });
+    });
+    await mainCommandHandler([], {
+      subagent: 'pi', prompt: 'structured review', verbose: 1, quiet: true, logLevel: 'info',
+    }, mockCommand);
+    expect(consoleLogSpy.mock.calls.filter(call => call[0] === 'Test result')).toHaveLength(1);
+    expect(consoleLogSpy.mock.calls.some(call => String(call[0]).includes('streamed'))).toBe(false);
+  });
+
   it('should only print final result to stdout in quiet mode', async () => {
     const options: MainCommandOptions = {
       subagent: 'claude',
