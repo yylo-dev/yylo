@@ -227,6 +227,24 @@ class GenerationTests(unittest.TestCase):
         self.assertFalse((self.controller / migration.ROOT / plan['id'] / 'completed.json').exists())
         self.assertEqual(migration.recover(self.controller, plan['id'], rollback=True)['outcome'], 'rolled_back')
 
+    def test_extra_installed_import_refuses_before_execution(self):
+        marker = self.root / 'untrusted-executed'
+        module = Path(self.candidate['root']) / 'dist/templates/scripts/subprocess.py'
+        module.write_text(f'from pathlib import Path\nPath({str(marker)!r}).write_text("unsafe")\n')
+        with self.assertRaisesRegex(migration.Refusal, 'unverified installed execution entry'):
+            self.plan()
+        self.assertFalse(marker.exists())
+
+    def test_admission_uses_captured_authenticated_closure_after_installed_directory_changes(self):
+        value = self.plan()
+        package = migration.authenticate(self.candidate)
+        marker = self.root / 'untrusted-executed'
+        module = Path(self.candidate['root']) / 'dist/templates/scripts/subprocess.py'
+        module.write_text(f'from pathlib import Path\nPath({str(marker)!r}).write_text("unsafe")\n')
+        migration.admission(self.controller, package,
+                            {**{k: v for k, v in value['guards'].items() if v}, **value['after']}, value['authority'])
+        self.assertFalse(marker.exists())
+
     def test_real_runtime_admission_refuses_candidate_target_mismatch_before_activation(self):
         runtime = Path(self.candidate['root']) / 'dist/templates/scripts/task_workspace.py'
         runtime.write_bytes(runtime.read_bytes() + b'\n# changed candidate lifecycle bytes\n')

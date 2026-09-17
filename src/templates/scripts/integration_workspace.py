@@ -18,6 +18,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -974,7 +975,50 @@ def managed_runtime_repair_load(controller: Path, repository: Path, receipt_path
     return {**receipt, "receipt_sha256": receipt_hash, "receipt_path": str(path)}, approvals
 
 
+_generation_mutations: ContextVar[frozenset[str]] = ContextVar("generation_mutations", default=frozenset())
+
+
+@contextmanager
+def managed_generation_mutation(controller: Path):
+    """Maintenance lock order: integration-target (if needed), then generation.
+
+    The package engine uses this same lock inode. Nested refresh and rollback
+    remain inside the source-adoption window; no expiry grants ownership.
+    """
+    controller = controller.resolve()
+    key = str(controller)
+    inherited = _generation_mutations.get()
+    if key in inherited:
+        yield
+        return
+    lock = managed_safe_path(controller, ".juno_task/runtime/generation-migration/lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    token = None
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ManagedRuntimeError("generation_migration_busy: another generation writer owns the lock") from exc
+        fence = managed_safe_path(controller, ".juno_task/runtime/generation-migration/fence.json")
+        if fence.exists():
+            raise ManagedRuntimeError("generation_transition_incomplete: resume or roll back the exact journal")
+        token = _generation_mutations.set(inherited | {key})
+        yield
+    finally:
+        if token is not None:
+            _generation_mutations.reset(token)
+        os.close(descriptor)
+
+
 def managed_runtime_refresh(controller: Path, repository: Path, previous_sha: str, target_sha: str,
+            *, task_id: str = "target", repair_receipt: Path | None = None) -> dict[str, Any]:
+    with managed_generation_mutation(controller):
+        return _managed_runtime_refresh_locked(controller, repository, previous_sha, target_sha,
+                                              task_id=task_id, repair_receipt=repair_receipt)
+
+
+def _managed_runtime_refresh_locked(controller: Path, repository: Path, previous_sha: str, target_sha: str,
             *, task_id: str = "target", repair_receipt: Path | None = None) -> dict[str, Any]:
     started = time.time(); started_mono = time.monotonic()
     log_path, log = managed_allocate_log("managed-runtime-refresh", task_id)
@@ -3080,7 +3124,7 @@ def source_runtime_adopt(args: argparse.Namespace) -> dict[str, Any]:
     target_ref = policy["target_ref"]
     # One target lock serializes output/prefix preflight with every source
     # adoption and target mutation, closing receipt and ownership TOCTOU races.
-    with integration_target_lock(repository, target_ref):
+    with integration_target_lock(repository, target_ref), managed_generation_mutation(controller):
         return _source_runtime_adopt_locked(
             args, controller, policy, repository, target_ref)
 

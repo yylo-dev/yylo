@@ -199,6 +199,12 @@ def authenticate(evidence: dict[str, str]) -> dict[str, Any]:
             if installed is None or content(installed) != data:
                 raise Refusal("package_provenance_invalid", f"installed package differs: {name}")
             files[name] = data
+    for directory, directories, filenames in os.walk(root / "dist", followlinks=False):
+        for entry in directories + filenames:
+            path = Path(directory) / entry
+            name = path.relative_to(root).as_posix()
+            if path.is_symlink() or (not path.is_dir() and name not in files):
+                raise Refusal("package_provenance_invalid", f"unverified installed execution entry: {name}")
     for name in ("package.json", "dist/bin/cli.mjs", "dist/templates/managed-assets.json"):
         if name not in files:
             raise Refusal("package_provenance_invalid", f"missing {name}")
@@ -281,7 +287,13 @@ def admission(root: Path, package: dict[str, Any], proposal: dict[str, Any], aut
               operational: bool = False) -> None:
     """Use the candidate's full policy/declaration readers, never the old local runtime."""
     with tempfile.TemporaryDirectory(prefix="yylo-generation-admission-") as temporary:
-        projected = root if operational else Path(temporary)
+        projected = root if operational else Path(temporary) / "projected"
+        closure = Path(temporary) / "authenticated"
+        for name, data in package["files"].items():
+            if name.startswith("dist/templates/"):
+                destination = closure / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(data)
         if not operational:
             for name, data in proposal.items():
                 if name == CONFIG:
@@ -301,8 +313,8 @@ t.derived_output_admission(repository,target,c['allowed_paths'])
 t.require_current_runtime(repository,target,root)
 assert t._managed_inventory_identity_valid(json.loads((root/'.juno_task/managed-assets.json').read_text()))
 '''
-        result = subprocess.run([sys.executable, "-E", "-B", "-X", f"pycache_prefix={temporary}/bytecode", "-c", code,
-                                 str(Path(package["evidence"]["root"]) / "dist/templates/scripts"),
+        result = subprocess.run([sys.executable, "-I", "-B", "-X", f"pycache_prefix={temporary}/bytecode", "-c", code,
+                                 str(closure / "dist/templates/scripts"),
                                  str(projected), str(root), authority["target_sha"]],
                                 stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
         if result.returncode:
