@@ -167,6 +167,10 @@ def scenario(artifact, historical=False):
         assert git(Path(task['worktree']), 'status', '--porcelain') == ''
         assert invoke('scripts', 'generation', 'doctor')['disposition'] == 'ready'
         assert invoke('scripts', 'doctor')['disposition'] == 'ready'
+        assert invoke('task', 'hydrate', 'X', '--lease-token', task['lease_token'])['hydration']['status'] == 'passed'
+        # Explicit hydrate selects packaged modules. A subsequent admission must
+        # still authenticate the untouched installation (no generated pyc).
+        assert invoke('scripts', 'generation', 'doctor')['disposition'] == 'ready'
         assert invoke('integration', 'runtime-doctor')['disposition'] == 'ready'
         assert git(controller, 'rev-parse', 'product') == target
         fixture.commit_task('X')

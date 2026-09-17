@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import fs from 'fs-extra';
 import { Command } from 'commander';
@@ -100,6 +101,18 @@ export async function selectTaskWorkspaceRuntime(
   return packaged;
 }
 
+export async function withTaskPythonBytecodeBoundary<T>(env: NodeJS.ProcessEnv,
+  run: (flags: string[], env: NodeJS.ProcessEnv) => Promise<T>): Promise<T> {
+  // Packaged hydrate/bootstrap execute alongside immutable installed modules.
+  // Never write there or consume an existing, unauthenticated sibling cache.
+  const cache = await fs.mkdtemp(path.join(os.tmpdir(), 'yy-task-bytecode-'));
+  try {
+    return await run(['-B', '-X', `pycache_prefix=${cache}`], {
+      ...env, PYTHONDONTWRITEBYTECODE: '1', PYTHONPYCACHEPREFIX: cache,
+    });
+  } finally { await fs.remove(cache); }
+}
+
 export async function invokeTaskRuntimeBootstrap(
   options: TaskRuntimeBootstrapOptions,
   packagedCandidates = packagedTaskRuntimeCandidates(),
@@ -129,16 +142,16 @@ export async function invokeTaskRuntimeBootstrap(
     '--package-version', packageJson.version, '--package-runtime-sha256', hash];
   if (options.dryRun) argv.push('--dry-run');
   else argv.push('--apply', path.resolve(options.apply!));
-  const exitCode = await new Promise<number>((resolve, reject) => {
-    const child = spawn('python3', argv, {
-      cwd: route.controllerRoot, env: route.env, stdio: 'inherit',
+  const exitCode = await withTaskPythonBytecodeBoundary(route.env, (flags, env) => new Promise<number>((resolve, reject) => {
+    const child = spawn('python3', [...flags, ...argv], {
+      cwd: route.controllerRoot, env, stdio: 'inherit',
     });
     child.once('error', reject);
     child.once('exit', (code, signal) => {
       if (signal) reject(new Error(`Task runtime bootstrap terminated by signal ${signal}`));
       else resolve(code ?? 1);
     });
-  });
+  }));
   if (exitCode !== 0) process.exitCode = exitCode;
 }
 
@@ -171,14 +184,14 @@ export async function invokeTaskWorkspace(
   const taskEnv = route.env;
   const pathArgs = requiredPaths.flatMap((requiredPath) => ['--path', requiredPath]);
   const machine = resolveMachineOutput(process.argv.slice(2), { jsonFlag: true });
-  const { exitCode } = await invokeMachineAwareChild({
+  const { exitCode } = await withTaskPythonBytecodeBoundary(taskEnv, (flags, env) => invokeMachineAwareChild({
     executable: 'python3',
-    args: [script, operation, ...(taskId ? ['--task', taskId] : []), ...pathArgs, ...admissionArgs],
+    args: [...flags, script, operation, ...(taskId ? ['--task', taskId] : []), ...pathArgs, ...admissionArgs],
     cwd: controllerRoot,
-    env: taskEnv,
+    env,
     command: `task.${operation}`,
     ...(machine ? { machine } : {}),
-  });
+  }));
   await checkpointTaskWorkspaceAfterFinalization(operation, controllerRoot, exitCode,
     checkpointControllerAfterFinalization, taskId);
   if (exitCode !== 0) process.exitCode = exitCode;
