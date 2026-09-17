@@ -20,6 +20,14 @@ import {
 import type { ToolCallResult, ProgressEvent } from '../../types/execution.js';
 import type { JunoTaskConfig } from '../../types/index.js';
 
+// This unit suite exercises iteration outcomes, not installed-controller
+// authentication. Real readiness/refusal is covered by agent-startup and
+// invocation-lifecycle tests; the global fixture has no artifact evidence.
+vi.mock('../../utils/agent-startup.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../utils/agent-startup.js')>(),
+  checkAgentReadiness: vi.fn().mockResolvedValue(undefined),
+}));
+
 // Mock the shell-backend module so the engine can create backends
 vi.mock('../backends/shell-backend.js', () => {
   // The mock will be configured per-test via mockShellBackendExecute
