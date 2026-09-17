@@ -19,8 +19,28 @@ export async function releaseControllerCommand(): Promise<void> {
 const AGENT_COMMANDS = ['pi', 'claude', 'cursor', 'codex', 'gemini', 'start', 'continue', 'contiue', 'cn', 'cc', 'clone', 'loop'];
 
 /** Use the registered CLI option grammar, not a scan through prompt/file values. */
-export function generationInvocationContext(program: Command, argv: string[], commandArgs: string[], cwd: string): { cwd: string; version: boolean } {
-  if (commandArgs.length && commandArgs[0] !== 'scripts' && !AGENT_COMMANDS.includes(commandArgs[0]!)) return { cwd, version: false };
+export function generationInvocationContext(program: Command, argv: string[], cwd: string): { cwd: string; version: boolean; commandArgs: string[] } {
+  const parserFor = (commands: Command[]) => {
+    const parser = new Command().allowUnknownOption().exitOverride().configureOutput({ writeErr: () => {} });
+    const flags = new Set<string>();
+    for (const command of commands) for (const option of command.options) {
+      const names = [option.short, option.long].filter((name): name is string => !!name);
+      if (names.some(name => flags.has(name))) continue;
+      parser.addOption(option);
+      names.forEach(name => flags.add(name));
+    }
+    return parser;
+  };
+  // Stop at a real registered command, consuming root option values first.
+  // In particular, `-s pi -p hello` is the default agent, not command `pi`.
+  const root = parserFor([program]).enablePositionalOptions();
+  for (const command of program.commands) root.command(command.name()).aliases(command.aliases());
+  const parsed = root.parseOptions(argv);
+  const selected = program.commands.find(command => command.name() === parsed.operands[0] || command.aliases().includes(parsed.operands[0] ?? ''));
+  const commandArgs = selected ? [...parsed.operands, ...parsed.unknown] : [];
+  if (selected && selected.name() !== 'scripts' && !AGENT_COMMANDS.includes(commandArgs[0]!)) {
+    return { cwd, version: root.opts().version === true, commandArgs };
+  }
   const chain = [program];
   for (const token of commandArgs) {
     const child = chain[0]!.commands.find(command => command.name() === token || command.aliases().includes(token));
@@ -28,17 +48,11 @@ export function generationInvocationContext(program: Command, argv: string[], co
     chain.unshift(child);
   }
   // A separate parser avoids modifying the command later used for execution.
-  const parser = new Command().allowUnknownOption().exitOverride().configureOutput({ writeErr: () => {} });
-  const flags = new Set<string>();
-  for (const command of chain) for (const option of command.options) {
-    const names = [option.short, option.long].filter((name): name is string => !!name);
-    if (names.some(name => flags.has(name))) continue;
-    parser.addOption(option);
-    names.forEach(name => flags.add(name));
-  }
+  const parser = parserFor(chain);
   parser.parseOptions(argv);
   const options = parser.opts();
-  return { cwd: typeof options.cwd === 'string' ? path.resolve(cwd, options.cwd) : cwd, version: options.version === true };
+  return { cwd: typeof options.cwd === 'string' ? path.resolve(cwd, options.cwd) : cwd,
+    version: options.version === true, commandArgs };
 }
 
 export function generationCommandKind(args: string[]): 'read' | 'execute' | 'maintenance' | 'skip' {

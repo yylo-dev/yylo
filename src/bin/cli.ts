@@ -2253,17 +2253,16 @@ async function main(): Promise<void> {
   // YYLO_CONTROLLER_GENERATION_DISPATCH_V1: launcher delegates first-use decisions
   // to this package-owned boundary before any local script/installer selection.
   const { prepareControllerCommand, releaseControllerCommand, generationInvocationContext } = await import('../utils/controller-generation-command.js');
-  const generationArgs = leading.command ? commandArgs : [];
   let generationContext;
   try {
-    generationContext = generationInvocationContext(program, cliArgs, generationArgs, process.cwd());
+    generationContext = generationInvocationContext(program, cliArgs, process.cwd());
   } catch (error) {
     if (!(error instanceof CommanderError)) throw error;
     console.error(error.message);
     process.exitCode = error.exitCode;
     return;
   }
-  if (!generationContext.version && await prepareControllerCommand(generationContext.cwd, generationArgs, cliArgs, process.cwd())) return;
+  if (!generationContext.version && await prepareControllerCommand(generationContext.cwd, generationContext.commandArgs, cliArgs, process.cwd())) return;
   // Implicit startup writes require resolver-confirmed controller identity. Do
   // this once, before any project installer, and let invalid registration fail
   // closed before command parsing or agent dispatch. Explicit update commands

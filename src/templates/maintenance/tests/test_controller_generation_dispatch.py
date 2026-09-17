@@ -173,6 +173,12 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         clean_stderr = re.sub(r'\x1b\[[0-9;]*m', '', relative.stderr)
         self.assertIn('Working directory: ' + str(root), [line.strip() for line in clean_stderr.splitlines()])
         self.assertNotIn(str(controller / controller.name), relative.stderr)
+        for prefix in (['-s', 'pi', '-p', 'hello'], ['--execution-envelope', 'pi']):
+            variant = subprocess.run(['node', str(unsupported / 'dist/bin/cli.mjs'), *prefix,
+                '-w', os.path.relpath(controller, root), '-f', 'missing-relative-prompt.txt'],
+                cwd=root, env=env, capture_output=True, text=True, timeout=120)
+            self.assertNotEqual(variant.returncode, 0)
+            self.assertIn('Using retained controller runtime:', variant.stderr)
         failed = []
         for cli in (executable, str(unsupported / 'dist/bin/cli.mjs')):
             failed.append(subprocess.run(['node', cli, 'task', 'start', 'MISSING'], cwd=controller, env=env,

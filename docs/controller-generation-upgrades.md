@@ -112,7 +112,10 @@ node juno-code/scripts/verify-controller-upgrade.mjs \
 ```
 
 The immutable report binds the artifact SHA-256, source SHA/cleanliness and gate
-implementation hash. Release manifest v2 binds that report; publish/verify reject
+implementation hash. Maintainer preparation defaults to
+`${XDG_STATE_HOME:-$HOME/.local/state}/yylo/release-artifacts/TAG-SHA`;
+`YYLO_RELEASE_ARTIFACT_DIR` overrides must also remain outside Git worktrees.
+Release manifest v2 binds that report; publish/verify reject
 missing, dirty-source, stale or hash-mismatched evidence. Native merge neither
 launches reviewers nor runs this gate. Package publication, push and deployment
 still require separate authority. Store run outcomes in Ledger, not this guide.

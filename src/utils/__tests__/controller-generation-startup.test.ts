@@ -153,7 +153,10 @@ describe('operation-specific first-use generation dispatch', () => {
   it('routes the actual agent cwd using option arity without mutating the execution parser', () => {
     const program = new Command().version('1.0.0').option('--config <path>').option('-w, --cwd <path>');
     const pi = program.command('pi').option('-w, --cwd <path>').option('-f, --prompt-file <path>');
-    const parse = (args: string[]) => generationInvocationContext(program, args, args, '/launcher');
+    const parse = (args: string[]) => {
+      const { cwd, version } = generationInvocationContext(program, args, '/launcher');
+      return { cwd, version };
+    };
     expect(parse(['pi', '-f', '--cwd=/not-a-directory-option'])).toEqual({ cwd: '/launcher', version: false });
     expect(parse(['pi', '--', '--cwd=/payload'])).toEqual({ cwd: '/launcher', version: false });
     expect(parse(['pi', '-w', '/first', '--cwd=/actual'])).toEqual({ cwd: '/actual', version: false });
@@ -162,5 +165,14 @@ describe('operation-specific first-use generation dispatch', () => {
     expect(parse(['pi', '--version']).version).toBe(true);
     expect(pi.opts()).toEqual({});
     expect(program.opts()).toEqual({});
+    program.option('-s, --subagent <name>').option('-p, --prompt [text]').option('--execution-envelope');
+    for (const args of [
+      ['-s', 'pi', '-p', 'hello', '-w', '/controller'],
+      ['--execution-envelope', 'pi', '-w', '/controller'],
+    ]) {
+      const selected = generationInvocationContext(program, args, '/launcher');
+      expect(selected.cwd).toBe('/controller');
+      expect(generationCommandKind(selected.commandArgs)).toBe('execute');
+    }
   });
 });
