@@ -41,6 +41,7 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         controller, root = fixture.controller, fixture.root
         env = {k: v for k, v in os.environ.items() if not k.startswith(('JUNO_', 'YYLO_', 'GIT_'))}
         env['PYTHONDONTWRITEBYTECODE'] = '1'
+        env['XDG_STATE_HOME'] = str(root / 'state')
         # Install dependencies from the actual packed package, offline and with
         # scripts disabled. Never borrow node_modules from another checkout.
         packed = subprocess.run(['npm', 'pack', '--ignore-scripts', '--json', '--pack-destination', str(root)],
@@ -53,7 +54,8 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         packages = []
         for label in ('previous', 'candidate'):
             package = root / label
-            write(package / 'package.json', {'name': '@yylo/cli', 'version': version, 'type': 'module'})
+            write(package / 'package.json', {'name': '@yylo/cli', 'version': version, 'type': 'module',
+                'dependencies': json.loads((PACKAGE / 'package.json').read_text())['dependencies']})
             write(package / 'dist/bin/cli.mjs', (PACKAGE / 'dist/bin/cli.mjs').read_bytes())
             shutil.copytree(PACKAGE / 'dist/templates/scripts', package / 'dist/templates/scripts',
                             ignore=shutil.ignore_patterns('__pycache__', 'tests'))
@@ -122,6 +124,11 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         self.assertEqual(active['state'], 'WORKING')
         self.assertEqual(active['hydration']['status'], 'passed')
         active_record = json.loads((controller / migration.STATE).read_text())['tasks']['Y']
+        # First use retains the authenticated package outside its mutable install.
+        # Pin identity must survive upgrade exactly, including retained paths.
+        retained_previous = json.loads((controller / migration.CURRENT).read_text())['candidate']
+        self.assertEqual(retained_previous['sha256'], previous['sha256'])
+        migration.authenticate(retained_previous)
         for relative in runtime_paths: write(fixture.repository / relative, (SCRIPTS / 'task_workspace.py').read_bytes())
         git(fixture.repository, 'add', *runtime_paths)
         git(fixture.repository, 'commit', '-m', 'candidate source runtime fixture')
@@ -138,7 +145,7 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         self.assertEqual(json.loads((controller / migration.STATE).read_text())['tasks']['Y'], active_record)
         pin = migration.pinned_task_runtime(controller, 'Y')
         self.assertTrue(pin.get('pinned') or pin.get('retained_pin'))
-        self.assertEqual(json.loads((controller / migration.CURRENT).read_text())['active_pins']['Y']['generation'], previous)
+        self.assertEqual(json.loads((controller / migration.CURRENT).read_text())['active_pins']['Y']['generation'], retained_previous)
         invoke('task', 'lease-heartbeat', 'Y', '--lease-token', active['lease_token'])
         fixture.commit_task('Y', 'src/pinned.txt')
         self.assertEqual(invoke('task', 'finish', 'Y', '--lease-token', active['lease_token'])['state'], 'QUEUED')
@@ -159,7 +166,8 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         bad_tar = root / 'unsupported.tgz'
         with tarfile.open(bad_tar, 'w:gz') as archive:
             for file in sorted(unsupported.rglob('*')):
-                if file.is_file(): archive.add(file, arcname='package/' + file.relative_to(unsupported).as_posix(), recursive=False)
+                if file.is_file() and file.name != '.yylo-generation-evidence.json':
+                    archive.add(file, arcname='package/' + file.relative_to(unsupported).as_posix(), recursive=False)
         write(unsupported / '.yylo-generation-evidence.json', {'root': str(unsupported), 'artifact': str(bad_tar),
                                                               'sha256': migration.digest(bad_tar.read_bytes())})
         self.assertEqual(invoke('task', 'start', 'Z', cli=str(unsupported / 'dist/bin/cli.mjs'))['state'], 'WORKING')
