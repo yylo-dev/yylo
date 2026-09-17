@@ -142,6 +142,21 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(git(self.controller, 'config', '--worktree', '--get', 'juno.controller.runtimeVersion'), '0.2.4')
         self.assertTrue((self.controller / migration.ROOT / plan['id'] / 'previous/AGENTS.md').is_file())
 
+    def test_retained_task_pin_is_authenticated_and_attempt_bound(self):
+        migration.apply(self.controller, self.plan())
+        pin = migration.pinned_task_runtime(self.controller, 'ABC123')
+        self.assertTrue(pin['pinned'])
+        self.assertEqual(pin['script'], str(Path(self.previous['root']) / 'dist/templates/scripts/task_workspace.py'))
+        state = json.loads((self.controller / migration.STATE).read_text())
+        state['tasks']['ABC123']['fencing']['attempt'] = 4
+        write(self.controller / migration.STATE, state)
+        self.assertFalse(migration.pinned_task_runtime(self.controller, 'ABC123')['pinned'])
+        state['tasks']['ABC123']['fencing']['attempt'] = 3
+        write(self.controller / migration.STATE, state)
+        write(Path(self.previous['root']) / 'dist/bin/cli.mjs', b'foreign executable')
+        with self.assertRaisesRegex(migration.Refusal, 'package_provenance_invalid'):
+            migration.pinned_task_runtime(self.controller, 'ABC123')
+
     def test_historical_adapter_requires_exact_verified_package(self):
         self.previous = self.package('historical', historical=True)
         self.install(self.previous)

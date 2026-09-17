@@ -6,6 +6,7 @@ import fs from 'fs-extra';
 import { Command } from 'commander';
 import { routeControlPlane } from '../../utils/control-plane-router.js';
 import { checkpointControllerAfterFinalization } from '../../utils/controller-checkpoint.js';
+import { assertControllerGenerationReady, retainedTaskRuntime, GENERATION_MIGRATION_ROOT } from '../../utils/controller-generation-migration.js';
 import { addMachineOutputOptions, invokeMachineAwareChild, resolveMachineOutput } from '../machine-output.js';
 
 export type TaskWorkspaceOperation =
@@ -161,7 +162,12 @@ export async function invokeTaskWorkspace(
 ): Promise<void> {
   const route = routeControlPlane(process.cwd(), taskWorkspaceControlOperation(operation));
   const controllerRoot = route.controllerRoot;
-  const script = await selectTaskWorkspaceRuntime(controllerRoot, operation);
+  await assertControllerGenerationReady(controllerRoot);
+  let script = await selectTaskWorkspaceRuntime(controllerRoot, operation);
+  if (taskId && operation !== 'start' && await fs.pathExists(path.join(controllerRoot, GENERATION_MIGRATION_ROOT, 'current.json'))) {
+    const pin = await retainedTaskRuntime(controllerRoot, taskId);
+    if (pin.pinned && pin.script) script = pin.script;
+  }
   const taskEnv = route.env;
   const pathArgs = requiredPaths.flatMap((requiredPath) => ['--path', requiredPath]);
   const machine = resolveMachineOutput(process.argv.slice(2), { jsonFlag: true });

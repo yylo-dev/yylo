@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   assertControllerGenerationReady, GENERATION_MIGRATION_ROOT,
   prepareControllerGeneration, recoverControllerGeneration, applyControllerGeneration,
-  withControllerGenerationMutation, type ControllerGenerationPlan,
+  withControllerGenerationMutation, acquireControllerGenerationReadLease, type ControllerGenerationPlan,
 } from '../controller-generation-migration.js';
 import { ScriptInstaller } from '../script-installer.js';
 import { ManagedProjectAssets } from '../managed-project-assets.js';
@@ -70,6 +70,16 @@ describe('controller generation maintenance', () => {
     }));
     expect(await fs.readFile(path.join(root, 'lock-released'), 'utf8')).toBe('yes');
   }, 60_000);
+
+  it('allows nested readers but excludes all generation writers until execution ends', async () => {
+    const first = await acquireControllerGenerationReadLease(root);
+    const nested = await acquireControllerGenerationReadLease(root);
+    try {
+      await expect(applyControllerGeneration(root, {} as ControllerGenerationPlan)).rejects.toThrow('generation_migration_busy');
+      await expect(withControllerGenerationMutation(root, async () => undefined)).rejects.toThrow('generation_migration_busy');
+    } finally { await nested(); await first(); }
+    await withControllerGenerationMutation(root, async () => undefined);
+  });
 
   it('passes registered real-Git historical/provenance/crash/rollback fixtures', () => {
     const script = path.resolve('src/templates/maintenance/tests/test_controller_generation_migration.py');

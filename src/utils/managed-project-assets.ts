@@ -300,7 +300,7 @@ function instructionBundleIdentity(
   return { ...core, bundleSha256: sha256(JSON.stringify(core)) };
 }
 
-function validateManifest(manifest: unknown, manifestPath: string): ManagedAssetManifest {
+export function validateManifest(manifest: unknown, manifestPath: string): ManagedAssetManifest {
   const parsed = manifest as Partial<ManagedAssetManifest> | null;
   const packageNameValid = parsed?.packageName === '@yylo/cli' ||
     (parsed?.schemaVersion === 1 && parsed.packageName === 'juno-code');

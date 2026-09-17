@@ -110,12 +110,12 @@ python3 .juno_task/scripts/metadata_controller.py prepare \
 
 `migration-plan` freezes the exact old controller, product target, installed runtime, selected metadata, excluded product/history inventory, rollback identity, and canonical reviewed metadata/task/risk policies. A single reviewed policy bundle is preferred; alternatively pass both `--task-workspace-policy` and `--risk-policy` with the global `--policy` metadata policy. `prepare` re-reads those exact sources and refuses source or content drift before mutation. It requires a fresh output receipt path, then creates a fresh unrelated root and linked worktree; it neither moves the product target nor changes live controller registration. The root boundary receipt binds every preserved source path, mode, blob identity, and generated policy digest. The old sparse/full controller remains intact.
 
-A receipt-bound target generation normally refuses package-template mismatch.
-One explicit `yy scripts update --force` recovery is admitted only when the routed
-installed release, immutable target package/declaration, complete exact generation
-receipt, and unchanged controller/checkpoint policies all prove the same target-bound
-identity. It transactionally installs and reads back the complete schema-2 bundle;
-absent any proof it remains mutation-free. This exception never edits tracked policy.
+Task/merge execution and agent startup assess controller generation before selecting local scripts. Recognized exact managed preimages migrate automatically as one package-owned transaction; scripts remain controller-local. Help, version, discovery, and doctor do not migrate. `yy scripts generation doctor` reports the same decision without exposing private preimage bytes.
+
+Evidence must bind both installed packages to retained authenticated tarballs: installation-owned `.yylo-generation-evidence.json`, or npm's exact installed-package SHA-512 receipt plus its existing offline content-addressed cache. No network fetch, semver-only provenance, or guessed predecessor is permitted. Missing evidence, customized overlap, unsupported shared state, or occupied destinations preserve all bytes; only a separately verified old executable **and** script generation may serve as retained fallback.
+
+Use `yy scripts generation resume TRANSACTION_ID` or `rollback TRANSACTION_ID` for an interrupted owned journal; normal first use resumes it automatically. Shared execution leases exclude generation writers, and active task runtime selection remains bound to the frozen attempt and authenticated retained package. No lifecycle lease, hydration record, service, independent skill, unrelated file, or product ref is rewritten to make an upgrade pass.
+Explicit target-bound `yy scripts update --force` remains separately admitted only when installed release, target package/declaration, exact generation receipt, and unchanged policies prove one identity. It is not generic generation recovery and never edits tracked policy.
 
 A registered legacy controller whose metadata policy omits only the `integration-workspace.json` classifications must use the dedicated transaction; `scripts update`, including `--force`, intentionally refuses to mutate tracked policy:
 

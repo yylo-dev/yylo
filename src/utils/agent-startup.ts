@@ -2,7 +2,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { hasSimpleWorkspaceHint, resolveController, type ControllerResolution } from './controller-resolver.js';
-import { ScriptInstaller } from './script-installer.js';
+import { assessControllerGeneration } from './controller-generation-startup.js';
+import { packagedGenerationRoot } from './controller-generation-migration.js';
 import { checkLedgerReadiness } from '../cli/commands/ledger.js';
 import { getDefaultHooks } from '../templates/default-hooks.js';
 import type { Hooks, HookType } from '../types/index.js';
@@ -83,8 +84,10 @@ export async function checkAgentReadiness(authority: ControllerResolution): Prom
   if (authority.role === 'unregistered') return;
   try {
     if (authority.role !== 'simple') {
-      const recovery = await ScriptInstaller.assertManagedControllerPackageUpdateAllowed(authority.path);
-      if (recovery) throw new Error('Controller runtime needs explicit reviewed recovery; inspect yy scripts doctor before retrying.');
+      const assessment = await assessControllerGeneration(authority.path, packagedGenerationRoot());
+      if (assessment.disposition !== 'ready') {
+        throw new Error(`Controller generation ${assessment.disposition}; run through the public CLI first-use boundary or inspect yy scripts generation doctor.`);
+      }
     }
     await checkLedgerReadiness({ cwd: authority.path });
   } catch (error) {

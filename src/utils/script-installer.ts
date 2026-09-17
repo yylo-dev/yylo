@@ -174,8 +174,8 @@ export class ScriptInstaller {
         `(package ${generation.package_version}), but the invoked package source is not that exact generation` +
         `${sample ? `; non-package bindings: ${sample}` : ''}. ` +
         `No exact target-bound recovery provenance was admitted: ${String(recoveryError)}. ` +
-        `Preserved the exact target generation. Rebind the executable with \`yy migrate runtime-rebind\`; ` +
-        `recover scripts with \`yy integration runtime-refresh --previous-sha ${generation.target_sha} --target-sha ${generation.target_sha}\`.`,
+        'Preserved the exact target generation. Inspect `yy scripts generation doctor` for the shared ' +
+        'read-only assessment; only authenticated generation migration or a separately admitted maintenance plan may change it.',
         { cause: recoveryError },
       );
     }
