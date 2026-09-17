@@ -208,6 +208,22 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(git(self.controller, 'config', '--worktree', '--get', 'juno.controller.runtimeVersion'), '0.2.4')
         self.assertTrue((self.controller / migration.ROOT / plan['id'] / 'previous/AGENTS.md').is_file())
 
+    def test_many_pins_authenticate_each_retained_generation_once_per_plan(self):
+        state = json.loads((self.controller / migration.STATE).read_text())
+        for number in range(77):
+            state['tasks'][f'PIN{number:03}'] = {'state': 'WORKING', 'fencing': {'attempt': 3}}
+        write(self.controller / migration.STATE, state)
+        first = self.plan()
+        migration.apply(self.controller, first)
+        with mock.patch.object(migration, 'authenticate', wraps=migration.authenticate) as authenticate:
+            second = migration.plan(self.controller, self.candidate, self.candidate)
+        self.assertEqual(second['active_pins'], first['active_pins'])
+        self.assertEqual(sum(call.args[0] == self.previous for call in authenticate.call_args_list), 1)
+        # The optimization is invocation-local, never a stale trust cache.
+        write(Path(self.previous['root']) / 'dist/bin/cli.mjs', b'changed after earlier assessment')
+        with self.assertRaisesRegex(migration.Refusal, 'package_provenance_invalid'):
+            migration.plan(self.controller, self.candidate, self.candidate)
+
     def test_retained_task_pin_is_authenticated_and_attempt_bound(self):
         migration.apply(self.controller, self.plan())
         pin = migration.pinned_task_runtime(self.controller, 'ABC123')
