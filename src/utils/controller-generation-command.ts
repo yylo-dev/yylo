@@ -4,7 +4,7 @@ import path from 'node:path';
 import { constants } from 'node:os';
 import { resolveController } from './controller-resolver.js';
 import { ScriptInstaller } from './script-installer.js';
-import { packagedGenerationRoot, recoverControllerGeneration, acquireControllerGenerationReadLease } from './controller-generation-migration.js';
+import { packagedGenerationRoot, recoverControllerGeneration, acquireControllerGenerationReadLease, GENERATION_MIGRATION_ROOT } from './controller-generation-migration.js';
 import { assessControllerGeneration, ensureControllerGeneration } from './controller-generation-startup.js';
 
 export const YYLO_CONTROLLER_GENERATION_DISPATCH_V1 = true;
@@ -69,6 +69,17 @@ export async function prepareControllerCommand(cwd: string, commandArgs: string[
   }
   if (kind === 'read') {
     const assessment = await assessControllerGeneration(controller, packageRoot);
+    const generationDoctor = (commandArgs[0] === 'integration' && commandArgs[1] === 'runtime-doctor')
+      || (commandArgs[0] === 'scripts' && commandArgs[1] === 'doctor');
+    if (generationDoctor && await fs.pathExists(path.join(controller, GENERATION_MIGRATION_ROOT, 'current.json'))) {
+      // Activated package generations no longer inherit the legacy target-bound
+      // receipt format. Do not let that older doctor disagree with admission.
+      console.log(JSON.stringify(assessment.disposition === 'migration_required'
+        ? { disposition: assessment.disposition, controller, transactionId: assessment.plan.id }
+        : assessment));
+      if (assessment.disposition !== 'ready') process.exitCode = 2;
+      return true;
+    }
     if (assessment.disposition !== 'ready') {
       console.error(`Controller generation: ${assessment.disposition}; inspect yy scripts generation doctor`);
       if (assessment.disposition === 'refused' || assessment.disposition === 'transition_incomplete') process.exitCode = 2;

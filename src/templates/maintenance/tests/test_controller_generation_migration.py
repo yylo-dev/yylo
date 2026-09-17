@@ -157,6 +157,24 @@ class GenerationTests(unittest.TestCase):
         with self.assertRaisesRegex(migration.Refusal, 'package_provenance_invalid'):
             migration.pinned_task_runtime(self.controller, 'ABC123')
 
+    def test_runtime_readback_checks_full_identity_and_unpinned_runtime_bytes(self):
+        migration.apply(self.controller, self.plan())
+        running = Path(self.candidate['root']) / 'dist/templates/scripts/task_workspace.py'
+        self.assertEqual(migration.runtime_ready(self.controller, self.controller, running)['schema_version'],
+                         'yylo_controller_generation_admission.v1')
+        identity = self.controller / migration.IDENTITY
+        original = identity.read_bytes()
+        value = json.loads(original)
+        value['executable_sha256'] = '0' * 64
+        write(identity, value)
+        with self.assertRaisesRegex(migration.Refusal, 'current_generation_unverified'):
+            migration.runtime_ready(self.controller, self.controller, running)
+        identity.write_bytes(original)
+        foreign = self.root / 'foreign-runtime.py'
+        foreign.write_text('# not admitted\n')
+        with self.assertRaisesRegex(migration.Refusal, 'running_generation_unverified'):
+            migration.runtime_ready(self.controller, self.controller, foreign)
+
     def test_historical_adapter_requires_exact_verified_package(self):
         self.previous = self.package('historical', historical=True)
         self.install(self.previous)
