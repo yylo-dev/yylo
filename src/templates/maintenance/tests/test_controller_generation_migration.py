@@ -143,6 +143,29 @@ class GenerationTests(unittest.TestCase):
         write(target, b'corrupt cache')
         self.assertIsNone(migration.discover_installed(Path(self.candidate['root']), cache))
 
+    def test_retention_survives_replacement_of_the_mutable_global_package(self):
+        retained = migration.retain_installed(self.candidate, self.root / 'npm-cache', self.root / 'state')
+        self.assertNotEqual(retained['root'], self.candidate['root'])
+        self.assertEqual(retained, migration.retain_installed(self.candidate, self.root / 'npm-cache', self.root / 'state'))
+        write(Path(self.candidate['root']) / 'dist/bin/cli.mjs', b'replaced by next global install')
+        self.assertEqual(migration.authenticate(retained)['package']['version'], '0.2.4')
+        self.assertEqual(json.loads((Path(retained['root']) / '.yylo-generation-evidence.json').read_text()), retained)
+
+    def test_global_cache_discovery_refuses_fifo_and_deadline_without_blocking(self):
+        cache = self.root / 'cache'
+        index = cache / '_cacache/index-v5/aa/bb'
+        index.mkdir(parents=True)
+        fifo = index / 'fifo'
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(migration.Refusal, 'nonregular npm cache index'):
+            migration.discover_installed(Path(self.candidate['root']), cache)
+        fifo.unlink()
+        write(index / 'entry', b'broken framing\n')
+        with mock.patch.object(migration.time, 'monotonic', side_effect=[0, 31]):
+            with self.assertRaisesRegex(migration.Refusal, 'deadline exceeded'):
+                migration.discover_installed(Path(self.candidate['root']), cache)
+        self.assertIsNone(migration.discover_installed(Path(self.candidate['root']), cache))
+
     def test_mixed_inventory_requires_explicit_reviewed_repair_and_preserves_preimages(self):
         p = self.controller / migration.INVENTORY
         value = json.loads(p.read_text())

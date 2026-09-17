@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fs from 'fs-extra';
 import path from 'node:path';
 import { constants } from 'node:os';
@@ -14,6 +14,30 @@ export async function releaseControllerCommand(): Promise<void> {
   const release = releaseDispatch;
   releaseDispatch = undefined;
   if (release) await release();
+}
+
+/** Filesystem ownership proof, not interpretation of ambiguous Git exit codes. */
+export async function assertExternalGenerationPlan(file: string): Promise<void> {
+  if (!file || !path.isAbsolute(file) || path.resolve(file) !== file
+      || await fs.realpath(path.dirname(file)) !== path.dirname(file)) {
+    throw new Error('Repair plan must be an absolute non-symlink path outside Git');
+  }
+  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE']) {
+    if (process.env[key]) throw new Error('Repair plan ownership inspection refuses inherited Git routing');
+  }
+  for (let cursor = path.dirname(file);;) {
+    for (const name of ['.git', 'HEAD']) {
+      try {
+        await fs.lstat(path.join(cursor, name));
+        throw new Error('Repair plan must be outside Git; repository marker or ambiguous bare-repository path');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+    const parent = path.dirname(cursor);
+    if (parent === cursor) break;
+    cursor = parent;
+  }
 }
 
 const AGENT_COMMANDS = ['pi', 'claude', 'cursor', 'codex', 'gemini', 'start', 'continue', 'contiue', 'cn', 'cc', 'clone', 'loop'];
@@ -102,12 +126,8 @@ export async function prepareControllerCommand(cwd: string, commandArgs: string[
       if (assessment.disposition === 'refused' || assessment.disposition === 'transition_incomplete') process.exitCode = 2;
     } else if (operation === 'repair-plan' || operation === 'repair-apply') {
       const file = commandArgs[3];
-      if (!file || !path.isAbsolute(file) || path.resolve(file) !== file
-          || await fs.realpath(path.dirname(file)) !== path.dirname(file)) {
-        throw new Error('Repair plan must be an absolute non-symlink path outside Git');
-      }
-      const probe = spawnSync('git', ['-C', path.dirname(file), 'rev-parse', '--git-dir'], { timeout: 5000, stdio: 'ignore' });
-      if (probe.status !== 128) throw new Error('Repair plan must be outside Git; directory inspection failed or is a worktree');
+      if (!file) throw new Error('Absolute external repair plan path required');
+      await assertExternalGenerationPlan(file);
       if (operation === 'repair-plan') {
         const plan = await prepareInstalledControllerRepair(controller, packageRoot);
         await fs.writeFile(file, JSON.stringify(plan), { flag: 'wx', mode: 0o600 });

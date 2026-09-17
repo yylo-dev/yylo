@@ -4,7 +4,7 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import {
   assertControllerGenerationReady, prepareControllerGeneration, applyControllerGeneration,
-  recoverControllerGeneration, GENERATION_MIGRATION_ROOT, discoverInstalledGeneration,
+  recoverControllerGeneration, GENERATION_MIGRATION_ROOT, discoverInstalledGeneration, retainInstalledGeneration,
   type InstalledGenerationEvidence, type ControllerGenerationPlan,
 } from './controller-generation-migration.js';
 import { assertSafeManagedWritePath } from './managed-update-transaction.js';
@@ -127,11 +127,12 @@ export async function assessControllerGeneration(controller: string, packageRoot
     }
     await assertControllerGenerationReady(controller);
     const current = await safeJson(controller, `${GENERATION_MIGRATION_ROOT}/current.json`);
-    const candidate = await installedEvidence(packageRoot);
+    let candidate = await installedEvidence(packageRoot);
     const identity = await safeJson(controller, '.juno_task/runtime/identity.json');
     const previousRoot = typeof identity?.executable === 'string'
       ? path.resolve(path.dirname(identity.executable), '../..') : undefined;
-    const previous = current?.candidate ?? (previousRoot ? await installedEvidence(previousRoot) : undefined);
+    const previous: InstalledGenerationEvidence | undefined = current?.candidate
+      ?? (previousRoot ? await installedEvidence(previousRoot) : undefined);
     if (candidate && previous) {
       let plan: ControllerGenerationPlan;
       try { plan = await prepareControllerGeneration(controller, candidate, previous); }
@@ -141,6 +142,13 @@ export async function assessControllerGeneration(controller: string, packageRoot
             reason: error instanceof Error ? error.message : 'migration unavailable' };
         }
         throw error;
+      }
+      // The public npm -g path may differ from its immutable retained copy.
+      // The first plan above authenticates the invoked package too; only then
+      // canonicalize identical artifact bytes to the retained generation.
+      if (current && candidate.sha256 === previous.sha256 && candidate.root !== previous.root) {
+        candidate = previous;
+        plan = await prepareControllerGeneration(controller, candidate, previous);
       }
       // A completed generation still gets engine-authenticated operational assessment.
       if (current && candidate.root === previous.root && candidate.artifact === previous.artifact
@@ -184,6 +192,12 @@ export async function ensureControllerGeneration(controller: string, packageRoot
     assessment = await assessControllerGeneration(controller, packageRoot);
   }
   if (assessment.disposition === 'migration_required') {
+    const retained = await retainInstalledGeneration(controller, assessment.plan.candidate,
+      path.resolve(process.env.npm_config_cache || path.join(os.homedir(), '.npm')),
+      path.resolve(process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local/state')));
+    // Retention is outside the controller. Reassess all live inputs before the
+    // fenced apply rather than changing the authenticated plan in place.
+    assessment.plan = await prepareControllerGeneration(controller, retained.evidence, assessment.plan.previous);
     try {
       await applyControllerGeneration(controller, assessment.plan);
     } catch (error) {

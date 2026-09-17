@@ -14,6 +14,7 @@ import ast
 import base64
 import copy
 import fcntl
+import errno
 import hashlib
 import io
 import json
@@ -26,6 +27,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from contextlib import contextmanager
 from typing import Any
 
@@ -163,6 +165,18 @@ def publish(path: Path, data: bytes, mode: int = 0o600, immutable: bool = False)
         Path(temporary).unlink(missing_ok=True)
 
 
+def assert_outside_git(directory: Path) -> None:
+    # Git exit 128 is ambiguous (not-a-repository, dubious ownership, corrupt
+    # metadata). Prove absence of repository markers without parsing stderr.
+    for parent in (directory, *directory.parents):
+        for name in ('.git', 'HEAD'):
+            try:
+                (parent / name).lstat()
+            except FileNotFoundError:
+                continue
+            raise Refusal('package_provenance_invalid', 'installation/artifact must be outside Git')
+
+
 def authenticate(evidence: dict[str, str]) -> dict[str, Any]:
     if set(evidence) != {"root", "artifact", "sha256"} or not re.fullmatch(r"[0-9a-f]{64}", evidence["sha256"]):
         raise Refusal("package_provenance_invalid", "exact artifact/root/digest required")
@@ -173,11 +187,7 @@ def authenticate(evidence: dict[str, str]) -> dict[str, Any]:
     if artifact != artifact.resolve():
         raise Refusal("package_provenance_invalid", "artifact path must not contain symlinks")
     for directory in (root, artifact.parent):
-        probe = subprocess.run(["git", "-C", str(directory), "rev-parse", "--absolute-git-dir"],
-                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL, timeout=30)
-        if probe.returncode == 0:
-            raise Refusal("package_provenance_invalid", "installed artifact must be outside mutable Git worktrees")
+        assert_outside_git(directory)
     packed = snapshot(artifact)
     if packed is None or packed["sha256"] != evidence["sha256"]:
         raise Refusal("package_provenance_invalid", "artifact hash mismatch")
@@ -236,20 +246,35 @@ def discover_installed(root: Path, cache: Path) -> dict[str, str] | None:
     if not index.is_dir():
         return None
     candidates = {}
+    deadline = time.monotonic() + 30
+    def check_deadline():
+        if time.monotonic() > deadline:
+            raise Refusal('package_provenance_bounds', 'offline discovery deadline exceeded')
     count = size = 0
     for directory, directories, filenames in os.walk(index, followlinks=False):
         for name in directories + filenames:
             if (Path(directory) / name).is_symlink():
                 raise Refusal('package_provenance_invalid', 'symlinked npm cache index')
         for name in filenames:
+            check_deadline()
             p = Path(directory) / name
-            count += 1
-            size += p.stat().st_size
-            if count > 20000 or size > 32 * 1024 * 1024:
-                raise Refusal('package_provenance_bounds', 'npm cache index exceeds offline discovery bound')
+            # Never open a FIFO/device in blocking mode, including a raced
+            # replacement between directory enumeration and descriptor open.
+            descriptor = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, 'rb') as stream:
+                metadata = os.fstat(stream.fileno())
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise Refusal('package_provenance_invalid', 'nonregular npm cache index entry')
+                count += 1
+                size += metadata.st_size
+                if count > 20000 or size > 32 * 1024 * 1024:
+                    raise Refusal('package_provenance_bounds', 'npm cache index exceeds offline discovery bound')
+                bucket = stream.read(32 * 1024 * 1024 + 1)
+                if len(bucket) != metadata.st_size:
+                    raise Refusal('package_provenance_invalid', 'npm cache index changed during read')
             # cacache buckets are append-only: the last valid entry for a key
             # wins, including tombstones. Bucket SHA-1 protects framing only.
-            for line in p.read_bytes().splitlines():
+            for line in bucket.splitlines():
                 try:
                     checksum, payload = line.split(b'\t', 1)
                     if hashlib.sha1(payload).hexdigest().encode() != checksum:
@@ -265,6 +290,7 @@ def discover_installed(root: Path, cache: Path) -> dict[str, str] | None:
     # Stable newest-first order avoids unpacking older versions in the common case.
     rows = sorted(candidates.values(), key=lambda row: str(row.get('time', '')), reverse=True)
     for row in rows:
+        check_deadline()
         integrity = row.get('integrity', '')
         if not isinstance(integrity, str) or not re.fullmatch(r'sha512-[A-Za-z0-9+/]+={0,2}', integrity):
             continue
@@ -280,7 +306,14 @@ def discover_installed(root: Path, cache: Path) -> dict[str, str] | None:
         artifact = safe(cache, f'_cacache/content-v2/sha512/{checksum[:2]}/{checksum[2:4]}/{checksum[4:]}')
         if not artifact.is_file() or artifact.stat().st_size > LIMIT:
             continue
-        packed = artifact.read_bytes()
+        descriptor = os.open(artifact, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, 'rb') as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > LIMIT:
+                raise Refusal('package_provenance_invalid', 'nonregular or oversized npm artifact')
+            packed = stream.read(LIMIT + 1)
+            if len(packed) != metadata.st_size:
+                raise Refusal('package_provenance_invalid', 'npm artifact changed during read')
         if hashlib.sha512(packed).hexdigest() != checksum:
             continue
         try:
@@ -288,6 +321,7 @@ def discover_installed(root: Path, cache: Path) -> dict[str, str] | None:
                 found = None
                 unpacked = 0
                 for number, member in enumerate(archive):
+                    check_deadline()
                     unpacked += member.size
                     if unpacked > LIMIT or number >= 10000:
                         raise Refusal('package_provenance_bounds', 'candidate archive exceeds bounds')
@@ -303,6 +337,49 @@ def discover_installed(root: Path, cache: Path) -> dict[str, str] | None:
         except (Refusal, tarfile.TarError, KeyError, ValueError, EOFError):
             continue
     return None
+
+
+def retain_installed(evidence: dict[str, str], cache: Path, state: Path) -> dict[str, str]:
+    """Keep the activated executable independent of a later npm -g replacement.
+
+    Install the authenticated artifact offline, with lifecycle scripts disabled,
+    into an owned immutable content-addressed prefix. Never patch package bytes.
+    """
+    authenticate(evidence)
+    if state.absolute() != state.resolve() or cache.absolute() != cache.resolve():
+        raise Refusal('package_provenance_invalid', 'unsafe retained installation/cache path')
+    store = safe(state, 'yylo/installed-generations')
+    durable_directory(store)
+    assert_outside_git(store)
+    destination = safe(store, evidence['sha256'])
+    result = {'root': str(destination / 'node_modules/@yylo/cli'),
+              'artifact': str(destination / 'package.tgz'), 'sha256': evidence['sha256']}
+    if destination.exists():
+        authenticate(result)
+        return result
+    with tempfile.TemporaryDirectory(prefix='.install-', dir=store) as temporary:
+        staging = Path(temporary)
+        artifact = staging / 'package.tgz'
+        artifact.write_bytes(Path(evidence['artifact']).read_bytes())
+        if digest(artifact.read_bytes()) != evidence['sha256']:
+            raise Refusal('package_provenance_invalid', 'artifact changed before retention')
+        env = {key: value for key, value in os.environ.items() if not key.startswith(('npm_config_', 'NPM_CONFIG_'))}
+        installed = subprocess.run(['npm', 'install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund',
+                                    '--cache', str(cache), '--prefix', str(staging), str(artifact)],
+                                   stdin=subprocess.DEVNULL, capture_output=True, env=env, timeout=120)
+        if installed.returncode:
+            raise Refusal('retained_installation_unavailable', 'offline npm retention failed; preserve cache and previous runtime')
+        authenticate({'root': str(staging / 'node_modules/@yylo/cli'), 'artifact': str(artifact), 'sha256': evidence['sha256']})
+        publish(staging / 'node_modules/@yylo/cli/.yylo-generation-evidence.json', encoded(result), immutable=True)
+        try:
+            os.rename(staging, destination)
+        except OSError as error:
+            if error.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                raise
+            authenticate(result)  # another writer installed the exact same artifact
+        fsync_dir(store)
+    authenticate(result)
+    return result
 
 
 def assets(package: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -938,7 +1015,7 @@ def pinned_task_runtime(root: Path, task_id: str) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(allow_abbrev=False)
-    parser.add_argument("operation", choices=["plan", "repair-plan", "discover", "apply", "resume", "rollback", "ready", "hold-lock", "hold-read", "task-pin", "runtime-ready"])
+    parser.add_argument("operation", choices=["plan", "repair-plan", "discover", "retain", "apply", "resume", "rollback", "ready", "hold-lock", "hold-read", "task-pin", "runtime-ready"])
     parser.add_argument("--controller", type=Path, required=True)
     parser.add_argument("--request", type=Path)
     parser.add_argument("--transaction-id")
@@ -963,6 +1040,8 @@ def main() -> int:
             answer = pinned_task_runtime(args.controller, request["task_id"])
         elif args.operation == "discover":
             answer = {'evidence': discover_installed(Path(request['root']), Path(request['cache']))}
+        elif args.operation == "retain":
+            answer = {'evidence': retain_installed(request['evidence'], Path(request['cache']), Path(request['state']))}
         elif args.operation in {"plan", "repair-plan"}:
             answer = plan(args.controller, request["candidate"], request["previous"], repair=args.operation == 'repair-plan')
         elif args.operation == "apply":
