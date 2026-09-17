@@ -142,7 +142,8 @@ export async function assessControllerGeneration(controller: string, packageRoot
         throw error;
       }
       // A completed generation still gets engine-authenticated operational assessment.
-      if (current && JSON.stringify(candidate) === JSON.stringify(previous)
+      if (current && candidate.root === previous.root && candidate.artifact === previous.artifact
+          && candidate.sha256 === previous.sha256
           && Object.entries(plan.before as Record<string, unknown>)
             .every(([name, value]) => name === `${GENERATION_MIGRATION_ROOT}/current.json`
               || JSON.stringify(value) === JSON.stringify((plan.after as Record<string, unknown>)[name]))) {

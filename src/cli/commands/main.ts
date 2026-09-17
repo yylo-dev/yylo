@@ -1451,7 +1451,9 @@ class MainProgressDisplay {
     if (this.verboseLevel === 0) {
       if (this.suppressResult) return;
       const lastIteration = result.iterations[result.iterations.length - 1];
-      if (lastIteration?.toolResult.content && !this.hasStreamedJsonOutput) {
+      // Quiet mode suppresses every progress event, so no streamed result has
+      // actually reached stdout even when the backend emitted raw JSON events.
+      if (lastIteration?.toolResult.content) {
         const displayContent = this.getDisplayResultContent(lastIteration.toolResult.content);
         if (displayContent.trim().length > 0) {
           console.log(displayContent);

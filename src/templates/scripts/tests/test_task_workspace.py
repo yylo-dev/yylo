@@ -2435,6 +2435,17 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
         with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "instruction_bundle_incompatible"):
             task_runtime._bind_instruction_bundle_identity({"schemaVersion": 2, "assets": {}})
 
+    def test_direct_task_entry_refuses_generation_fence_without_mutating_task_state(self) -> None:
+        fence = self.controller / '.juno_task/runtime/generation-migration/fence.json'
+        fence.parent.mkdir(parents=True, exist_ok=True)
+        fence.write_text('{"id":"preserve-even-unknown-journal"}\n')
+        before = fence.read_bytes()
+        result = self.command('start', 'X', check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('generation_transition_incomplete', result.stderr)
+        self.assertEqual(fence.read_bytes(), before)
+        self.assertFalse((self.workspaces / 'X').exists())
+
     def test_future_minor_instruction_declaration_admits_real_start(self) -> None:
         self.install_declared_output_fixtures()
         manifest = self.repository / task_runtime.MANAGED_OUTPUT_DECLARATION
@@ -3141,7 +3152,9 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
         git(self.repository, "commit", "-m", "coherent newer source generation")
 
         refused = self.command("start", "X", check=False)
-        self.assertIn("controller package/runtime matching that target", refused.stderr)
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("yy integration runtime-adopt-source --previous-sha", refused.stderr)
+        self.assertIn("--target-sha " + git(self.repository, "rev-parse", "HEAD"), refused.stderr)
         with self.assertRaisesRegex(task_runtime.TaskWorkspaceError,
                                     "upgrade or rebind the controller package/runtime"):
             task_runtime.runtime_bootstrap(
