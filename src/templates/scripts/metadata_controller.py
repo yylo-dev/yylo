@@ -2833,6 +2833,15 @@ def runtime_install_rebind(args: argparse.Namespace, policy: dict[str, Any]) -> 
                             "package": "@yylo/cli", "version": args.runtime_version,
                             "package_manifest_sha256": file_digest(manifest_path)}
             installed_runtime = runtime_identity(executable, args.runtime_version, root)
+            # Retain the authenticated artifact independently of npm's mutable cache.
+            # First-use migration can then authenticate this whole installed closure
+            # without network access or reconstructing provenance from a version.
+            retained_artifact = prefix / "yylo-generation-package.tgz"
+            retained_artifact.write_bytes(tarball.read_bytes())
+            generation_evidence = {"root": str(package_root.resolve()),
+                                   "artifact": str(retained_artifact),
+                                   "sha256": file_digest(retained_artifact)}
+            atomic_receipt(package_root / ".yylo-generation-evidence.json", generation_evidence)
             return runtime_rebind(argparse.Namespace(
                 root=root, branch=expected_branch, runtime=executable,
                 runtime_version=args.runtime_version, output=output,

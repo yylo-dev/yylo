@@ -1405,6 +1405,14 @@ ${chalk.gray('This updates scripts from the currently installed yylo package/tem
 `,
     );
 
+  const generationCommand = scriptsCommand.command('generation')
+    .description('Inspect or recover an authenticated controller generation transaction');
+  for (const operation of ['doctor', 'resume', 'rollback']) {
+    const command = generationCommand.command(operation);
+    if (operation !== 'doctor') command.argument('<transaction-id>');
+    command.action(() => { throw new Error('Generation maintenance requires an exact registered metadata controller'); });
+  }
+
   scriptsCommand
     .command('update')
     .description('Refresh scripts plus managed prompts/wiki/macros from the current package')
@@ -2242,6 +2250,12 @@ async function main(): Promise<void> {
   const { ScriptInstaller: StartupScriptInstaller } = await import('../utils/script-installer.js');
   const isMetadataOnlyController =
     await StartupScriptInstaller.isMetadataOnlyController(process.cwd());
+  // YYLO_CONTROLLER_GENERATION_DISPATCH_V1: launcher delegates first-use decisions
+  // to this package-owned boundary before any local script/installer selection.
+  const { prepareControllerCommand, releaseControllerCommand } = await import('../utils/controller-generation-command.js');
+  const generationCwd = commandArgs[0] === 'scripts'
+    ? extractOptionValueFromArgv(cliArgs, '--cwd', '-w') || process.cwd() : process.cwd();
+  if (await prepareControllerCommand(generationCwd, commandArgs, cliArgs)) return;
   // Implicit startup writes require resolver-confirmed controller identity. Do
   // this once, before any project installer, and let invalid registration fail
   // closed before command parsing or agent dispatch. Explicit update commands
@@ -2249,7 +2263,7 @@ async function main(): Promise<void> {
   const mayAutoUpdateProjectAssets =
     !isReadOnlyIdentityRequest && !isLifecycleCommand && !isTaskWorkspaceCommand && !isIntegrationCommand &&
     (isForceUpdate || (
-      !isExplicitProjectAssetUpdate && resolveAutomaticProjectBootstrap(process.cwd()).allowed
+      !isMetadataOnlyController && !isExplicitProjectAssetUpdate && resolveAutomaticProjectBootstrap(process.cwd()).allowed
     ));
   // Config/env bootstrap consumes the same decision; do not let a later config
   // load reintroduce project writes after installers were correctly skipped.
@@ -2497,6 +2511,8 @@ ${chalk.blue.bold('Support:')}
     await program.parseAsync(commandArgv);
   } catch (error) {
     handleCLIError(error, isVerbose);
+  } finally {
+    await releaseControllerCommand();
   }
 }
 

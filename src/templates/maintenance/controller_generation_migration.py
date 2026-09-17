@@ -482,13 +482,13 @@ def assert_ready(root: Path) -> None:
 
 
 @contextmanager
-def locked(root: Path):
+def locked(root: Path, shared: bool = False):
     path = safe(root, ROOT + "/lock")
     durable_directory(path.parent)
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise Refusal("generation_migration_busy", "another migration owns the lock") from exc
         yield
@@ -741,22 +741,53 @@ def recover(root: Path, transaction_id: str, rollback: bool = False, boundary=No
         return transition(root, value, rollback=rollback, boundary=boundary)
 
 
+def pinned_task_runtime(root: Path, task_id: str) -> dict[str, Any]:
+    """Authenticate an attempt-bound retained script closure; never infer from expiry."""
+    assert_ready(root)
+    registration(root)
+    current_path = safe(root, CURRENT)
+    if not current_path.exists():
+        return {"pinned": False}
+    current = decode_json(content(snapshot(current_path)))
+    if not isinstance(current, dict) or current.get("schema_version") != "yylo_controller_generation.v1":
+        raise Refusal("current_generation_unverified", "preserve unknown generation marker")
+    admitted = plan(root, current["candidate"], current["candidate"])
+    if any(admitted["before"].get(name) != value for name, value in admitted["after"].items() if name != CURRENT):
+        raise Refusal("current_generation_unverified", "retained dispatch requires exact current generation")
+    pin = current.get("active_pins", {}).get(task_id)
+    if pin is None:
+        return {"pinned": False}
+    state = decode_json(content(snapshot(safe(root, STATE))))
+    task = state.get("tasks", {}).get(task_id, {})
+    if (task.get("fencing", {}).get("attempt") != pin.get("attempt")
+            or task.get("state") not in {"WORKING", "HYDRATING", "HYDRATION_FAILED"}):
+        return {"pinned": False}
+    retained = authenticate(pin["generation"])
+    if (pin.get("executable") != retained["executable"]
+            or state.get("schema_version") not in state_schemas(retained)):
+        raise Refusal("active_pin_unverified", task_id)
+    return {"pinned": True, "attempt": pin["attempt"], "executable": retained["executable"],
+            "script": str(Path(pin["generation"]["root"]) / "dist/templates/scripts/task_workspace.py")}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(allow_abbrev=False)
-    parser.add_argument("operation", choices=["plan", "apply", "resume", "rollback", "ready", "hold-lock"])
+    parser.add_argument("operation", choices=["plan", "apply", "resume", "rollback", "ready", "hold-lock", "hold-read", "task-pin"])
     parser.add_argument("--controller", type=Path, required=True)
     parser.add_argument("--request", type=Path)
     parser.add_argument("--transaction-id")
     args = parser.parse_args()
     try:
         request = decode_json(args.request.read_bytes()) if args.request else {}
-        if args.operation == "hold-lock":
-            with locked(args.controller.resolve()):
+        if args.operation in {"hold-lock", "hold-read"}:
+            with locked(args.controller.resolve(), shared=args.operation == "hold-read"):
                 assert_ready(args.controller.resolve())
                 print(json.dumps({"locked": True}), flush=True)
                 sys.stdin.readline()  # release on explicit close or parent process death
             return 0
-        if args.operation == "plan":
+        if args.operation == "task-pin":
+            answer = pinned_task_runtime(args.controller, request["task_id"])
+        elif args.operation == "plan":
             answer = plan(args.controller, request["candidate"], request["previous"])
         elif args.operation == "apply":
             answer = apply(args.controller, request)

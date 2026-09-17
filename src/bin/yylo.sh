@@ -331,6 +331,13 @@ route_registered_product_control() {
             return 2 ;;
         esac
     fi
+    # New packages own first-use assessment before selecting a retained runtime.
+    # Do not reject an upgrade on version inequality before that boundary runs.
+    case "$operation" in task|merge|integration)
+        if grep -q 'YYLO_CONTROLLER_GENERATION_DISPATCH_V1' "$CLI_ENTRYPOINT" 2>/dev/null; then
+            return 1
+        fi ;;
+    esac
     runtime="$(git -C "$controller" config --worktree --get juno.controller.runtimeExecutable 2>/dev/null || true)"
     if [ -z "$runtime" ] || [ ! -f "$runtime" ]; then
         echo "yylo: registered controller runtime is missing or stale; run yy doctor workspace from '$invocation'" >&2

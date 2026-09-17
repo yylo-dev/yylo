@@ -8,7 +8,8 @@ import { getDefaultHooks } from '../../templates/default-hooks.js';
 
 const mocks = vi.hoisted(() => ({ ledger: vi.fn(), runtime: vi.fn() }));
 vi.mock('../../cli/commands/ledger.js', () => ({ checkLedgerReadiness: mocks.ledger }));
-vi.mock('../script-installer.js', () => ({ ScriptInstaller: { assertManagedControllerPackageUpdateAllowed: mocks.runtime } }));
+vi.mock('../controller-generation-startup.js', () => ({ assessControllerGeneration: mocks.runtime }));
+vi.mock('../controller-generation-migration.js', () => ({ packagedGenerationRoot: () => '/installed/package' }));
 let temp: string;
 let saved: NodeJS.ProcessEnv;
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: 'pipe' }).trim();
@@ -30,7 +31,7 @@ describe('workspace-owned agent startup', () => {
     saved = { ...process.env };
     for (const key of Object.keys(process.env)) if (/^(JUNO_|YYLO_|GIT_)/.test(key)) delete process.env[key];
     temp = fs.mkdtempSync(path.join(os.tmpdir(), 'yy-agent-startup-'));
-    mocks.ledger.mockResolvedValue('/fixture/yylo-ledger'); mocks.runtime.mockResolvedValue(null);
+    mocks.ledger.mockResolvedValue('/fixture/yylo-ledger'); mocks.runtime.mockResolvedValue({ disposition: 'ready' });
   });
   afterEach(() => { process.env = saved; fs.rmSync(temp, { recursive: true, force: true }); });
   it('allows a generic folder without hooks, installs, or child-controller discovery', async () => {
@@ -67,7 +68,7 @@ describe('workspace-owned agent startup', () => {
     expect(authority.role).toBe('task'); expect(authority.path).toBe(root); expect(authority.current_root).toBe(task);
     await checkAgentReadiness(authority);
     expect(mocks.ledger).toHaveBeenCalledWith({ cwd: root });
-    expect(mocks.runtime).toHaveBeenCalledWith(root);
+    expect(mocks.runtime).toHaveBeenCalledWith(root, '/installed/package');
     expect(git(task, 'status', '--porcelain')).toBe(''); expect(git(root, 'status', '--porcelain')).toBe('');
     expect(() => resolveAgentWorkspace(task, temp)).toThrow(AgentStartupError);
     expect(resolveAgentWorkspace(task, root).path).toBe(root);
@@ -84,7 +85,7 @@ describe('workspace-owned agent startup', () => {
     mocks.runtime.mockRejectedValue(new Error('receipt-bound runtime mismatch'));
     await expect(checkAgentReadiness(authority)).rejects.toThrow(/receipt-bound runtime mismatch/);
     expect(mocks.ledger).not.toHaveBeenCalled();
-    mocks.runtime.mockResolvedValue(null); mocks.ledger.mockRejectedValue({ message: 'Ledger version incompatible' });
+    mocks.runtime.mockResolvedValue({ disposition: 'ready' }); mocks.ledger.mockRejectedValue({ message: 'Ledger version incompatible' });
     await expect(checkAgentReadiness(authority)).rejects.toThrow(/Ledger version incompatible/);
   });
   it('normalizes structured errors and preserves custom hooks without mutating configuration', () => {

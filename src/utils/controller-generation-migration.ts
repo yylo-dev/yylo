@@ -42,6 +42,16 @@ export async function assertControllerGenerationReady(projectDir: string): Promi
   }
 }
 
+export function packagedGenerationRoot(): string {
+  return path.resolve(path.dirname(packagedEngine()), '../../..');
+}
+
+export function retainedTaskRuntime(projectDir: string, taskId: string): Promise<{
+  pinned: boolean; script?: string; executable?: string; attempt?: number;
+}> {
+  return maintenance(projectDir, 'task-pin', { task_id: taskId });
+}
+
 function packagedEngine(): string {
   const directory = path.dirname(fileURLToPath(import.meta.url));
   const engine = [
@@ -100,6 +110,39 @@ export async function withControllerGenerationMutation<T>(projectDir: string, op
       }
     }
   } finally { await fs.remove(temporary); }
+}
+
+/** Shared lease spans execution, so no updater can replace scripts mid-command.
+ * Nested commands take shared leases too; an updater must obtain the exclusive lock.
+ */
+export async function acquireControllerGenerationReadLease(projectDir: string): Promise<() => Promise<void>> {
+  const child = spawn('python3', ['-E', '-B', packagedEngine(), 'hold-read', '--controller', path.resolve(projectDir)],
+    { cwd: projectDir, stdio: ['pipe', 'pipe', 'pipe'] });
+  let output = ''; let errors = '';
+  child.stdin.on('error', () => undefined);
+  child.stderr.on('data', chunk => { errors = (errors + String(chunk)).slice(-4000); });
+  const closed = new Promise<void>(resolve => { child.once('close', () => resolve()); });
+  const exitRelease = () => child.stdin.end();
+  process.once('exit', exitRelease);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => { child.kill(); reject(new Error('generation_read_lock_timeout')); }, 15000);
+      child.once('error', error => { clearTimeout(timeout); reject(error); });
+      child.once('close', () => { clearTimeout(timeout); reject(new Error(output || errors || 'generation reader exited')); });
+      child.stdout.on('data', chunk => {
+        output = (output + String(chunk)).slice(-4000);
+        if (!output.includes('\n')) return;
+        clearTimeout(timeout);
+        try {
+          if (JSON.parse(output.split('\n')[0]!).locked === true) resolve();
+          else reject(new Error(output));
+        } catch (error) { reject(error); }
+      });
+    });
+  } catch (error) {
+    process.removeListener('exit', exitRelease); child.stdin.end(); await closed; throw error;
+  }
+  return async () => { process.removeListener('exit', exitRelease); child.stdin.end(); await closed; };
 }
 
 async function maintenance<T>(projectDir: string, operation: string, request?: unknown, transactionId?: string): Promise<T> {
