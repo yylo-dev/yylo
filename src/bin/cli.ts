@@ -276,7 +276,9 @@ function handleCLIError(error: unknown, verbose: number = 0): void {
   if (error instanceof AgentStartupError) {
     console.error(error.message);
     writeSelectedMachineError(error, 2);
-    process.exitCode = 2;
+    // Startup may already own handles. Use the lifecycle-captured exit so a
+    // refusal finalizes telemetry and terminates without waiting for SIGTERM.
+    process.exit(2);
     return;
   }
 

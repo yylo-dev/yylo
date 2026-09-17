@@ -86,7 +86,10 @@ export async function checkAgentReadiness(authority: ControllerResolution): Prom
     if (authority.role !== 'simple') {
       const assessment = await assessControllerGeneration(authority.path, packagedGenerationRoot());
       if (assessment.disposition !== 'ready') {
-        throw new Error(`Controller generation ${assessment.disposition}; run through the public CLI first-use boundary or inspect yy scripts generation doctor.`);
+        const detail = assessment.disposition === 'refused'
+          ? `${assessment.detail}; ${assessment.safeNextAction}`
+          : 'run through the public CLI first-use boundary or inspect yy scripts generation doctor.';
+        throw new Error(`Controller generation ${assessment.disposition}; ${detail}`);
       }
     }
     await checkLedgerReadiness({ cwd: authority.path });
