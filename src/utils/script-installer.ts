@@ -12,7 +12,7 @@ import fs from 'fs-extra';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import managedAssetManifest from '../templates/managed-assets.json';
-import { assertControllerGenerationReady } from './controller-generation-migration.js';
+import { assertControllerGenerationReady, withControllerGenerationMutation } from './controller-generation-migration.js';
 import {
   resolveTargetBoundManagedRecovery,
   type ManagedControllerGenerationReceipt,
@@ -187,7 +187,12 @@ export class ScriptInstaller {
    * defaults. The one structural migration needed by pre-2.1.2 controllers is
    * explicit-force only and archives the original bytes in ignored runtime state.
    */
-  static async updateMetadataControllerPolicies(
+  static async updateMetadataControllerPolicies(projectDir: string, force = false, apply = false):
+    Promise<{ installed: string[]; updated: string[]; backups: string[] }> {
+    return withControllerGenerationMutation(projectDir, () => this.updateMetadataControllerPoliciesUnlocked(projectDir, force, apply));
+  }
+
+  private static async updateMetadataControllerPoliciesUnlocked(
     projectDir: string,
     force = false,
     apply = false,
@@ -571,7 +576,11 @@ exec "$ROOT/.juno_task/scripts/git-flow.sh" "$@"
    * @param silent - If true, suppresses console output
    * @returns true if script was installed, false if installation was skipped or failed
    */
-  static async installScript(
+  static async installScript(projectDir: string, scriptName: string, silent = false): Promise<boolean> {
+    return withControllerGenerationMutation(projectDir, () => this.installScriptUnlocked(projectDir, scriptName, silent));
+  }
+
+  private static async installScriptUnlocked(
     projectDir: string,
     scriptName: string,
     silent = false,
@@ -638,7 +647,11 @@ exec "$ROOT/.juno_task/scripts/git-flow.sh" "$@"
   }
 
   /** Install the root convenience delegate without overwriting unrelated project scripts. */
-  static async installRootGitFlowDelegate(
+  static async installRootGitFlowDelegate(projectDir: string, silent = true): Promise<boolean> {
+    return withControllerGenerationMutation(projectDir, () => this.installRootGitFlowDelegateUnlocked(projectDir, silent));
+  }
+
+  private static async installRootGitFlowDelegateUnlocked(
     projectDir: string,
     silent = true,
   ): Promise<boolean> {
@@ -695,6 +708,10 @@ exec "$ROOT/.juno_task/scripts/git-flow.sh" "$@"
    * @returns true if any scripts were installed
    */
   static async autoInstallMissing(projectDir: string, silent = true): Promise<boolean> {
+    return withControllerGenerationMutation(projectDir, () => this.autoInstallMissingUnlocked(projectDir, silent));
+  }
+
+  private static async autoInstallMissingUnlocked(projectDir: string, silent = true): Promise<boolean> {
     try {
       const metadataOnlyController = await this.isMetadataOnlyController(projectDir);
       // First check if .juno_task exists (project is initialized)
@@ -758,7 +775,11 @@ exec "$ROOT/.juno_task/scripts/git-flow.sh" "$@"
    * @param silent - If true, suppresses console output
    * @returns true if script was updated
    */
-  static async updateScriptIfNewer(
+  static async updateScriptIfNewer(projectDir: string, scriptName: string, silent = true): Promise<boolean> {
+    return withControllerGenerationMutation(projectDir, () => this.updateScriptIfNewerUnlocked(projectDir, scriptName, silent));
+  }
+
+  private static async updateScriptIfNewerUnlocked(
     projectDir: string,
     scriptName: string,
     silent = true,
@@ -970,6 +991,10 @@ exec "$ROOT/.juno_task/scripts/git-flow.sh" "$@"
    * @returns true if any scripts were installed or updated
    */
   static async autoUpdate(projectDir: string, silent = true, force = false): Promise<boolean> {
+    return withControllerGenerationMutation(projectDir, () => this.autoUpdateUnlocked(projectDir, silent, force));
+  }
+
+  private static async autoUpdateUnlocked(projectDir: string, silent = true, force = false): Promise<boolean> {
     // Keep this outside the compatibility catch: generation regression is a
     // control-plane refusal, not a best-effort installer miss.
     const recovery = await this.assertManagedControllerPackageUpdateAllowed(projectDir);
@@ -1107,6 +1132,10 @@ exec "$ROOT/.juno_task/scripts/git-flow.sh" "$@"
    * @returns true if update was successful
    */
   static async forceUpdateAll(projectDir: string, silent = false): Promise<boolean> {
+    return withControllerGenerationMutation(projectDir, () => this.forceUpdateAllUnlocked(projectDir, silent));
+  }
+
+  private static async forceUpdateAllUnlocked(projectDir: string, silent = false): Promise<boolean> {
     const debug = process.env.YYLO_DEBUG === '1';
 
     try {

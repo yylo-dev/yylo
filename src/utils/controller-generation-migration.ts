@@ -1,4 +1,5 @@
-import { execFile as execFileCallback } from 'node:child_process';
+import { execFile as execFileCallback, spawn } from 'node:child_process';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import * as os from 'node:os';
@@ -21,7 +22,7 @@ export interface ControllerGenerationPlan {
   controller: string;
   candidate: InstalledGenerationEvidence;
   previous: InstalledGenerationEvidence;
-  active_pins: Record<string, { state: string; attempt: number; executable: string }>;
+  active_pins: Record<string, { state: string; attempt: number; executable: string; generation: InstalledGenerationEvidence }>;
   [key: string]: unknown;
 }
 export interface ControllerGenerationResult {
@@ -40,13 +41,68 @@ export async function assertControllerGenerationReady(projectDir: string): Promi
   }
 }
 
-async function maintenance<T>(projectDir: string, operation: string, request?: unknown, transactionId?: string): Promise<T> {
+function packagedEngine(): string {
   const directory = path.dirname(fileURLToPath(import.meta.url));
   const engine = [
     path.resolve(directory, 'templates/scripts/controller_generation_migration.py'),
     path.resolve(directory, '../templates/scripts/controller_generation_migration.py'),
   ].find(candidate => fs.existsSync(candidate));
   if (!engine) throw new Error('generation_engine_missing: installed maintenance engine is unavailable');
+  return engine;
+}
+
+const heldLocks = new AsyncLocalStorage<ReadonlySet<string>>();
+
+/** Hold the same OS lock across the complete installer mutation/rollback window. */
+export async function withControllerGenerationMutation<T>(projectDir: string, operation: () => Promise<T>): Promise<T> {
+  const root = path.resolve(projectDir);
+  const inherited = heldLocks.getStore();
+  if (inherited?.has(root) || !(await lstatIfPresent(path.join(root, '.juno_task')))) return operation();
+  await assertControllerGenerationReady(root);
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'yylo-generation-lock-'));
+  try {
+    const child = spawn('python3', ['-E', '-B', '-X', `pycache_prefix=${path.join(temporary, 'bytecode')}`,
+      packagedEngine(), 'hold-lock', '--controller', root], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] });
+    let output = '';
+    let errors = '';
+    const closed = new Promise<number | null>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', resolve);
+    });
+    void closed.catch(() => undefined);
+    child.stdin.on('error', () => undefined); // acquisition refusal may close the pipe before release
+    child.stderr.on('data', chunk => { errors = (errors + String(chunk)).slice(-4000); });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let ready = false;
+        child.once('error', reject);
+        child.stdout.on('data', chunk => {
+          if (ready) return;
+          output += String(chunk);
+          if (!output.includes('\n')) return;
+          try {
+            const response = JSON.parse(output.slice(0, output.indexOf('\n'))) as { locked?: boolean; code?: string; detail?: string };
+            if (!response.locked) { reject(new Error(`${response.code}: ${response.detail}`)); return; }
+            ready = true;
+            resolve();
+          } catch (error) { reject(error); }
+        });
+        child.once('close', () => { if (!ready) reject(new Error(output || errors || 'generation lock process exited')); });
+      });
+      await assertControllerGenerationReady(root);
+      return await heldLocks.run(new Set([...(inherited ?? []), root]), operation);
+    } finally {
+      child.stdin.end();
+      const code = await closed;
+      if (code !== 0 && !output.includes('"outcome": "refused"')) {
+        throw new Error(`generation_lock_lost: ${errors || output}`);
+      }
+    }
+  } finally { await fs.remove(temporary); }
+}
+
+async function maintenance<T>(projectDir: string, operation: string, request?: unknown, transactionId?: string): Promise<T> {
+  const engine = packagedEngine();
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'yylo-generation-request-'));
   try {
     const args = ['-E', '-B', '-X', `pycache_prefix=${path.join(temporary, 'bytecode')}`,

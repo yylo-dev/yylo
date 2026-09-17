@@ -140,6 +140,14 @@ export async function withManagedUpdateRollback<T>(
   projectDir: string,
   operation: () => Promise<T>,
 ): Promise<T> {
+  const { withControllerGenerationMutation } = await import('./controller-generation-migration.js');
+  return withControllerGenerationMutation(projectDir, () => managedUpdateRollbackUnlocked(projectDir, operation));
+}
+
+async function managedUpdateRollbackUnlocked<T>(
+  projectDir: string,
+  operation: () => Promise<T>,
+): Promise<T> {
   const projectRoot = path.resolve(projectDir);
   const transactionId = randomUUID();
   const startedAt = new Date().toISOString();

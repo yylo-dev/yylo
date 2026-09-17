@@ -9,7 +9,7 @@ import {
   assertInstructionVersion, instructionDeclarationCompatible, INSTRUCTION_IDENTITY_SCHEMA,
 } from './instruction-bundle-compatibility.js';
 import type { TargetBoundManagedRecovery } from './managed-controller-recovery.js';
-import { assertControllerGenerationReady } from './controller-generation-migration.js';
+import { assertControllerGenerationReady, withControllerGenerationMutation } from './controller-generation-migration.js';
 import {
   assertPackageSource,
   assertSafeManagedWritePath,
@@ -486,7 +486,13 @@ export class ManagedProjectAssets {
     await this.assertRetiredGenerationSafe(projectDir, manifest, Boolean(options.force));
   }
 
-  static async update(
+  static async update(projectDir: string,
+    options: Parameters<typeof ManagedProjectAssets.updateUnlocked>[1] = {},
+  ): Promise<ManagedAssetUpdateResult> {
+    return withControllerGenerationMutation(projectDir, () => this.updateUnlocked(projectDir, options));
+  }
+
+  private static async updateUnlocked(
     projectDir: string,
     options: {
       force?: boolean;
@@ -807,7 +813,11 @@ export class ManagedProjectAssets {
    * and the manifest is not rewritten: installed bytes equal the package
    * source and therefore read as `current` to inspectGeneration.
    */
-  static async installControllerSeeds(
+  static async installControllerSeeds(projectDir: string, options: { silent?: boolean } = {}): Promise<string[]> {
+    return withControllerGenerationMutation(projectDir, () => this.installControllerSeedsUnlocked(projectDir, options));
+  }
+
+  private static async installControllerSeedsUnlocked(
     projectDir: string,
     options: { silent?: boolean } = {},
   ): Promise<string[]> {

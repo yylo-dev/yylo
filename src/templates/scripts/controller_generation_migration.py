@@ -126,8 +126,20 @@ def fsync_dir(path: Path) -> None:
         os.close(descriptor)
 
 
+def durable_directory(path: Path) -> None:
+    missing = []
+    cursor = path
+    while not cursor.exists():
+        missing.append(cursor)
+        cursor = cursor.parent
+    for directory in reversed(missing):
+        directory.mkdir(exist_ok=True)
+        fsync_dir(directory.parent)
+        fsync_dir(directory)
+
+
 def publish(path: Path, data: bytes, mode: int = 0o600, immutable: bool = False) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    durable_directory(path.parent)
     fd, temporary = tempfile.mkstemp(prefix=".generation-", dir=path.parent)
     try:
         with os.fdopen(fd, "wb") as stream:
@@ -285,6 +297,7 @@ root,repository,target=Path(sys.argv[2]),Path(sys.argv[3]),sys.argv[4]
 m.load_policy(root/'.juno_task/config/metadata-controller.json')
 c=t.load_config(root)
 t.derived_output_admission(repository,target,c['allowed_paths'])
+t.require_current_runtime(repository,target,root)
 assert t._managed_inventory_identity_valid(json.loads((root/'.juno_task/managed-assets.json').read_text()))
 '''
         result = subprocess.run([sys.executable, "-E", "-B", "-X", f"pycache_prefix={temporary}/bytecode", "-c", code,
@@ -298,16 +311,33 @@ assert t._managed_inventory_identity_valid(json.loads((root/'.juno_task/managed-
 def plan(root: Path, candidate_evidence: dict[str, str], previous_evidence: dict[str, str]) -> dict[str, Any]:
     root = root.resolve()
     assert_ready(root)
+    return prepare(root, candidate_evidence, previous_evidence)
+
+
+def prepare(root: Path, candidate_evidence: dict[str, str], previous_evidence: dict[str, str],
+            frozen: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Pure preparation, also used to authenticate recovery against frozen preimages."""
     authority = registration(root)
+    def observe(name):
+        if frozen is not None and name in frozen:
+            value = frozen[name]
+            if value is not None:
+                content(value)
+            return value
+        return snapshot(path_for(root, name, authority))
     candidate, previous = authenticate(candidate_evidence), authenticate(previous_evidence)
-    identity = decode_json(content(snapshot(safe(root, IDENTITY))))
+    identity = decode_json(content(observe(IDENTITY)))
     if identity != runtime_identity(previous):
         raise Refusal("previous_identity_unverified", "registered identity does not authenticate previous package")
     if candidate["package"]["name"] != "@yylo/cli":
         raise Refusal("candidate_identity_unsupported", "candidate must be @yylo/cli")
     old_name, old_version = previous["package"]["name"], previous["package"]["version"]
-    selected = git(root, "config", "--worktree", "--get", "juno.controller.runtimeExecutable")
-    selected_version = git(root, "config", "--worktree", "--get", "juno.controller.runtimeVersion")
+    config_before = observe(CONFIG)
+    with tempfile.TemporaryDirectory(prefix="yylo-generation-selector-") as temporary:
+        selector = Path(temporary) / "config"
+        selector.write_bytes(content(config_before))
+        selected = git(root, "config", "--file", str(selector), "--get", "juno.controller.runtimeExecutable")
+        selected_version = git(root, "config", "--file", str(selector), "--get", "juno.controller.runtimeVersion")
     if selected != previous["executable"] or selected_version != old_version:
         raise Refusal("previous_identity_unverified", "registered selector differs from previous package")
     if old_name == "juno-code" and old_version == "2.1.3-rc.0.32":
@@ -320,7 +350,7 @@ def plan(root: Path, candidate_evidence: dict[str, str], previous_evidence: dict
     else:
         raise Refusal("historical_identity_unsupported", f"{old_name}@{old_version}")
     old_assets, new_assets = assets(previous), assets(candidate)
-    inventory_image = snapshot(safe(root, INVENTORY))
+    inventory_image = observe(INVENTORY)
     inventory = decode_json(content(inventory_image))
     if inventory.get("packageName") != old_name or inventory.get("packageVersion") != old_version:
         raise Refusal("previous_inventory_unverified", "package mismatch")
@@ -334,14 +364,14 @@ def plan(root: Path, candidate_evidence: dict[str, str], previous_evidence: dict
         relative(name)
         if name not in old_assets and name != POLICY:
             continue  # no write ownership over independent skills or localized config
-        observed = snapshot(safe(root, name))
+        observed = observe(name)
         if observed is None or observed["sha256"] != record["installedSha256"]:
             raise Refusal("managed_preimage_modified", name)
         if name in old_assets and (observed["sha256"] != digest(old_assets[name]["data"])
                                   or record["sourceSha256"] != observed["sha256"]):
             raise Refusal("previous_inventory_unverified", name)
     for name in sorted(set(old_assets) | set(new_assets)):
-        observed = snapshot(safe(root, name))
+        observed = observe(name)
         if name in old_assets and observed is not None:
             if observed["sha256"] != digest(old_assets[name]["data"]):
                 raise Refusal("managed_preimage_modified", name)
@@ -353,7 +383,7 @@ def plan(root: Path, candidate_evidence: dict[str, str], previous_evidence: dict
         else:
             # Retired assets stay intact, outside the newly active inventory.
             before.pop(name)
-    policy_before = snapshot(safe(root, POLICY))
+    policy_before = observe(POLICY)
     policy = decode_json(content(policy_before))
     if policy.get("runtime", {}).get("package") != old_name:
         raise Refusal("policy_identity_mismatch", "runtime package")
@@ -372,10 +402,9 @@ def plan(root: Path, candidate_evidence: dict[str, str], previous_evidence: dict
         new_inventory["assets"][name] = {"type": row["type"], "templateVersion": new_inventory["packageVersion"],
                                           "sourceSha256": digest(row["data"]), "installedSha256": digest(row["data"])}
     compatibility._bind_instruction_bundle_identity(new_inventory)
-    before.update({POLICY: policy_before, INVENTORY: inventory_image, IDENTITY: snapshot(safe(root, IDENTITY))})
+    before.update({POLICY: policy_before, INVENTORY: inventory_image, IDENTITY: observe(IDENTITY)})
     after.update({POLICY: image(encoded(policy)), INVENTORY: image(encoded(new_inventory)),
                   IDENTITY: image(encoded(runtime_identity(candidate)))})
-    config_before = snapshot(Path(authority["config_path"]))
     with tempfile.TemporaryDirectory(prefix="yylo-generation-config-") as temporary:
         config = Path(temporary) / "config"
         config.write_bytes(content(config_before))
@@ -384,7 +413,8 @@ def plan(root: Path, candidate_evidence: dict[str, str], previous_evidence: dict
             subprocess.run(["git", "config", "--file", str(config), "--replace-all", key, value], check=True)
         after[CONFIG] = image(config.read_bytes(), config_before["mode"])
     before[CONFIG] = config_before
-    before[CURRENT] = snapshot(safe(root, CURRENT))
+    before[CURRENT] = observe(CURRENT)
+    current = {}
     if before[CURRENT]:
         current = decode_json(content(before[CURRENT]))
         if (current.get("schema_version") != "yylo_controller_generation.v1"
@@ -400,14 +430,26 @@ def plan(root: Path, candidate_evidence: dict[str, str], previous_evidence: dict
             "package_scripts": str(Path(previous_evidence["root"]) / "dist/templates/scripts")}}))
     guards = {}
     for name in (".juno_task/config/task-workspace.json", STATE):
-        guards[name] = snapshot(safe(root, name))
+        guards[name] = observe(name)
     state = decode_json(content(guards[STATE])) if guards[STATE] else {"tasks": {}}
     pins = {name: {"state": value.get("state"), "attempt": value.get("fencing", {}).get("attempt"),
-                   "executable": previous["executable"]} for name, value in state["tasks"].items()
+                   "executable": previous["executable"], "generation": previous_evidence}
+            for name, value in state["tasks"].items()
             if value.get("state") in {"WORKING", "HYDRATING", "HYDRATION_FAILED"}
             or value.get("fencing", {}).get("state") == "ACTIVE"}
     if guards[STATE] and state.get("schema_version") not in state_schemas(candidate) & state_schemas(previous):
         raise Refusal("shared_state_incompatible", "defer migration; preserve active attempts")
+    prior_pins = current.get("active_pins", {})
+    if not isinstance(prior_pins, dict):
+        raise Refusal("active_pin_unverified", "invalid retained pin map")
+    for name, pin in pins.items():
+        prior = prior_pins.get(name)
+        if prior is not None and prior.get("attempt") == pin["attempt"]:
+            retained = authenticate(prior["generation"])
+            if (prior.get("executable") != retained["executable"]
+                    or state.get("schema_version") not in state_schemas(retained)):
+                raise Refusal("active_pin_unverified", name)
+            pins[name] = prior
     marker = decode_json(content(after[CURRENT]))
     marker["active_pins"] = pins
     after[CURRENT] = image(encoded(marker))
@@ -427,7 +469,7 @@ def assert_ready(root: Path) -> None:
 @contextmanager
 def locked(root: Path):
     path = safe(root, ROOT + "/lock")
-    path.parent.mkdir(parents=True, exist_ok=True)
+    durable_directory(path.parent)
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         try:
@@ -455,12 +497,16 @@ def check_plan(value: dict[str, Any], root: Path, rollback: bool = False) -> Non
             raise Refusal("shared_state_changed", name)
 
 
-def result(root: Path, value: dict[str, Any], outcome: str) -> dict[str, Any]:
-    receipt = {"schema_version": SCHEMA, "id": value["id"], "outcome": outcome,
+def receipt_value(root: Path, value: dict[str, Any], outcome: str) -> dict[str, Any]:
+    return {"schema_version": SCHEMA, "id": value["id"], "outcome": outcome,
                "candidate": value["candidate"], "previous": value["previous"], "active_pins": value["active_pins"],
                "retained_runtime": {"executable": str(Path(value["previous"]["root"]) / "dist/bin/cli.mjs"),
                    "package_scripts": str(Path(value["previous"]["root"]) / "dist/templates/scripts"),
                    "controller_preimages": str(root / ROOT / value["id"] / "previous")}}
+
+
+def result(root: Path, value: dict[str, Any], outcome: str) -> dict[str, Any]:
+    receipt = receipt_value(root, value, outcome)
     publish(safe(root, ROOT + "/" + value["id"] + "/" + outcome + ".json"), encoded(receipt), immutable=True)
     return receipt
 
@@ -474,11 +520,11 @@ def publish_endpoint(root: Path, value: dict[str, Any], name: str,
     inode is never silently discarded by replacement or rollback unlink.
     """
     destination = path_for(root, name, value["authority"])
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    durable_directory(destination.parent)
     if name != CONFIG:
         safe(root, name)
     quarantine = safe(root, ROOT + "/" + value["id"] + "/displaced")
-    quarantine.mkdir(parents=True, exist_ok=True)
+    durable_directory(quarantine)
     directory_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     quarantine_fd = os.open(quarantine, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     temporary_name = f".{destination.name}.generation-{value['id'][:16]}-{'rollback' if rollback else 'apply'}"
@@ -520,7 +566,7 @@ def retire_temporary(root: Path, value: dict[str, Any], name: str, rollback: boo
     if observed not in (value["before"][name], value["after"][name]):
         raise Refusal("activation_race", "unowned leftover temporary endpoint")
     quarantine = safe(root, ROOT + "/" + value["id"] + "/displaced")
-    quarantine.mkdir(parents=True, exist_ok=True)
+    durable_directory(quarantine)
     directory_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     quarantine_fd = os.open(quarantine, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -579,11 +625,17 @@ def transition(root: Path, value: dict[str, Any], rollback: bool = False, bounda
     receipt = result(root, value, "rolled_back" if rollback else "completed")
     if boundary:
         boundary("receipt")
+    release_fence(root, value)
+    return receipt
+
+
+def release_fence(root: Path, value: dict[str, Any]) -> None:
+    fence = safe(root, ROOT + "/fence.json")
     expected_fence = snapshot(fence)
     if expected_fence is None or content(expected_fence) != encoded({"id": value["id"], "schema_version": SCHEMA}):
         raise Refusal("fence_mismatch", "fence changed before release")
-    quarantine = safe(root, journal + "/displaced")
-    quarantine.mkdir(parents=True, exist_ok=True)
+    quarantine = safe(root, ROOT + "/" + value["id"] + "/displaced")
+    durable_directory(quarantine)
     directory_fd = os.open(fence.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     quarantine_fd = os.open(quarantine, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -595,7 +647,6 @@ def transition(root: Path, value: dict[str, Any], rollback: bool = False, bounda
     finally:
         os.close(directory_fd)
         os.close(quarantine_fd)
-    return receipt
 
 
 def apply(root: Path, value: dict[str, Any], boundary=None) -> dict[str, Any]:
@@ -631,22 +682,37 @@ def recover(root: Path, transaction_id: str, rollback: bool = False, boundary=No
         raise Refusal("journal_corrupt", "invalid transaction ID")
     with locked(root):
         value = decode_json(safe(root, ROOT + "/" + transaction_id + "/intent.json").read_bytes())
+        outcomes = [outcome for outcome in ("completed", "rolled_back")
+                    if safe(root, ROOT + "/" + transaction_id + "/" + outcome + ".json").exists()]
+        if len(outcomes) > 1:
+            raise Refusal("journal_corrupt", "contradictory terminal receipts")
+        terminal = outcomes[0] if outcomes else None
+        if terminal:
+            rollback = terminal == "rolled_back"
         check_plan(value, root, rollback=rollback)
         if transaction_id != value["id"]:
             raise Refusal("journal_corrupt", "journal path differs from identity")
-        retain_preimages(root, value)
+        # A self-hash is integrity, not write authority. Reconstruct the complete
+        # authenticated adapter output against frozen preimages before any writes.
+        reconstructed = prepare(root, value["candidate"], value["previous"],
+                                frozen={**value["before"], **value["guards"]})
+        if reconstructed != value:
+            raise Refusal("journal_authority_invalid", "write set is not the authenticated generation projection")
         fence = safe(root, ROOT + "/fence.json")
+        if terminal:
+            receipt_path = safe(root, ROOT + "/" + transaction_id + "/" + terminal + ".json")
+            receipt = decode_json(receipt_path.read_bytes())
+            if receipt != receipt_value(root, value, terminal):
+                raise Refusal("journal_corrupt", "terminal receipt differs from intent")
+            expected = value["before"] if rollback else value["after"]
+            for name, item in expected.items():
+                if snapshot(path_for(root, name, value["authority"])) != item:
+                    raise Refusal("operational_readback_failed", name)
+            if fence.exists():
+                release_fence(root, value)
+            return receipt
+        retain_preimages(root, value)
         if not fence.exists():
-            for outcome in ("completed", "rolled_back"):
-                receipt = safe(root, ROOT + "/" + transaction_id + "/" + outcome + ".json")
-                if receipt.exists():
-                    authenticate(value["candidate"])
-                    authenticate(value["previous"])
-                    expected = value["after"] if outcome == "completed" else value["before"]
-                    for name, item in expected.items():
-                        if snapshot(path_for(root, name, value["authority"])) != item:
-                            raise Refusal("operational_readback_failed", name)
-                    return decode_json(receipt.read_bytes())
             # Intent was durable but activation never started. Revalidate and fence.
             for name, old in value["before"].items():
                 if snapshot(path_for(root, name, value["authority"])) != old:
@@ -657,13 +723,19 @@ def recover(root: Path, transaction_id: str, rollback: bool = False, boundary=No
 
 def main() -> int:
     parser = argparse.ArgumentParser(allow_abbrev=False)
-    parser.add_argument("operation", choices=["plan", "apply", "resume", "rollback", "ready"])
+    parser.add_argument("operation", choices=["plan", "apply", "resume", "rollback", "ready", "hold-lock"])
     parser.add_argument("--controller", type=Path, required=True)
     parser.add_argument("--request", type=Path)
     parser.add_argument("--transaction-id")
     args = parser.parse_args()
     try:
         request = decode_json(args.request.read_bytes()) if args.request else {}
+        if args.operation == "hold-lock":
+            with locked(args.controller.resolve()):
+                assert_ready(args.controller.resolve())
+                print(json.dumps({"locked": True}), flush=True)
+                sys.stdin.readline()  # release on explicit close or parent process death
+            return 0
         if args.operation == "plan":
             answer = plan(args.controller, request["candidate"], request["previous"])
         elif args.operation == "apply":
