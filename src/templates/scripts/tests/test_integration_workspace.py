@@ -1919,6 +1919,27 @@ class ManagedRuntimeTests(unittest.TestCase):
             self.assertEqual(runtime.managed_sha256(preserved.read_bytes()),
                              byte_set["sha256"])
 
+    def test_generation_lock_and_interruption_fence_exclude_refresh_and_source_adoption(self) -> None:
+        directory = self.controller / '.juno_task/runtime/generation-migration'
+        directory.mkdir(parents=True)
+        script = self.controller / '.juno_task/scripts/one.py'
+        before = script.read_bytes()
+        def attempt(expected):
+            with self.assertRaisesRegex(runtime.ManagedRuntimeError, expected):
+                runtime.managed_runtime_refresh(self.controller, self.repo, self.previous, self.target)
+            with mock.patch.object(runtime, 'load_policy', return_value=(None, {'target_ref': 'product'}, None)), \
+                 mock.patch.object(runtime.task_workspace, 'product_repository', return_value=self.repo), \
+                 mock.patch.object(runtime, '_source_runtime_adopt_locked') as mutation:
+                with self.assertRaisesRegex(runtime.ManagedRuntimeError, expected):
+                    runtime.source_runtime_adopt(mock.Mock(controller=self.controller))
+                mutation.assert_not_called()
+            self.assertEqual(script.read_bytes(), before)
+        with (directory / 'lock').open('wb') as owner:
+            runtime.fcntl.flock(owner.fileno(), runtime.fcntl.LOCK_EX | runtime.fcntl.LOCK_NB)
+            attempt('generation_migration_busy')
+        (directory / 'fence.json').write_text('{}')
+        attempt('generation_transition_incomplete')
+
     def test_refresh_uses_exact_target_preserves_policy_customization_and_receipts_log(self) -> None:
         result = runtime.managed_runtime_refresh(self.controller, self.repo, self.previous, self.target,
                                  task_id="UOsd11")
