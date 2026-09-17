@@ -202,6 +202,12 @@ class GenerationTests(unittest.TestCase):
             b'\ndef derived_output_admission(*args, **kwargs):\n    raise RuntimeError("old admission deadlock")\n')
         self.previous = self.pack(Path(self.previous['root']))
         self.install(self.previous)
+        target = self.root / 'new-target'
+        git(self.controller, 'worktree', 'add', '--detach', str(target), 'product')
+        write(target / '.juno_task/scripts/task_workspace.py', (SCRIPTS / 'task_workspace.py').read_bytes())
+        git(target, 'add', '.')
+        git(target, 'commit', '-m', 'new target while old controller admission is broken')
+        git(self.controller, 'branch', '-f', 'product', git(target, 'rev-parse', 'HEAD'))
         plan = self.plan()
         self.assertEqual(migration.apply(self.controller, plan)['outcome'], 'completed')
         self.assertNotIn(b'old admission deadlock', (self.controller / '.juno_task/scripts/task_workspace.py').read_bytes())
@@ -220,6 +226,86 @@ class GenerationTests(unittest.TestCase):
             migration.assert_ready(self.controller)
         self.assertFalse((self.controller / migration.ROOT / plan['id'] / 'completed.json').exists())
         self.assertEqual(migration.recover(self.controller, plan['id'], rollback=True)['outcome'], 'rolled_back')
+
+    def test_real_runtime_admission_refuses_candidate_target_mismatch_before_activation(self):
+        runtime = Path(self.candidate['root']) / 'dist/templates/scripts/task_workspace.py'
+        runtime.write_bytes(runtime.read_bytes() + b'\n# changed candidate lifecycle bytes\n')
+        self.candidate = self.pack(Path(self.candidate['root']))
+        with self.assertRaisesRegex(migration.Refusal, 'proposed_admission_failed'):
+            self.plan()
+        self.assertFalse((self.controller / migration.ROOT).exists())
+
+    def test_forged_recovery_cannot_expand_or_change_authenticated_write_set(self):
+        for name in ('unrelated.txt', '.juno_task/scripts/fixture.sh'):
+            with self.subTest(name=name):
+                if name == 'unrelated.txt':
+                    write(self.controller / name, b'preserve unrelated')
+                value = self.plan()
+                value['before'][name] = migration.snapshot(self.controller / name)
+                value['after'][name] = migration.image(b'forged overwrite')
+                value.pop('id')
+                value['id'] = migration.digest(migration.encoded(value))
+                journal = self.controller / migration.ROOT / value['id']
+                write(journal / 'intent.json', value)
+                before = (self.controller / name).read_bytes()
+                with self.assertRaisesRegex(migration.Refusal, 'journal_authority_invalid'):
+                    migration.recover(self.controller, value['id'])
+                self.assertEqual((self.controller / name).read_bytes(), before)
+                self.assertFalse((journal / 'previous').exists())
+                self.assertFalse((self.controller / migration.ROOT / 'fence.json').exists())
+
+    def test_consecutive_upgrades_preserve_existing_attempt_pins(self):
+        first = self.plan()
+        migration.apply(self.controller, first)
+        state_path = self.controller / migration.STATE
+        state = json.loads(state_path.read_text())
+        state['tasks']['NEW456'] = {'state': 'WORKING', 'fencing': {'state': 'ACTIVE', 'attempt': 1}}
+        write(state_path, state)
+        old_candidate = self.candidate
+        self.previous = old_candidate
+        self.candidate = self.package('third')
+        second = self.plan()
+        self.assertEqual(second['active_pins']['ABC123'], first['active_pins']['ABC123'])
+        self.assertEqual(second['active_pins']['NEW456']['generation'], old_candidate)
+        migration.apply(self.controller, second)
+
+    def test_resume_honors_rollback_receipt_before_releasing_fence(self):
+        value = self.plan()
+        def crash_write(boundary):
+            if boundary == 'readback':
+                raise InterruptedError()
+        with self.assertRaises(InterruptedError):
+            migration.apply(self.controller, value, boundary=crash_write)
+        def crash_receipt(boundary):
+            if boundary == 'receipt':
+                raise InterruptedError()
+        with self.assertRaises(InterruptedError):
+            migration.recover(self.controller, value['id'], rollback=True, boundary=crash_receipt)
+        outcome = migration.recover(self.controller, value['id'])
+        self.assertEqual(outcome['outcome'], 'rolled_back')
+        journal = self.controller / migration.ROOT / value['id']
+        self.assertFalse((journal / 'completed.json').exists())
+        self.assertTrue((journal / 'rolled_back.json').exists())
+        for name, expected in value['before'].items():
+            self.assertEqual(migration.snapshot(migration.path_for(self.controller, name, value['authority'])), expected)
+
+    def test_directory_parents_are_durable_before_activation(self):
+        value = self.plan()
+        seen = []
+        actual = migration.fsync_dir
+        def sync(path):
+            seen.append(path)
+            actual(path)
+        def boundary(name):
+            if name == 'fence':
+                self.assertIn(self.controller / '.juno_task/runtime', seen)
+                self.assertIn(self.controller / migration.ROOT, seen)
+                self.assertIn(self.controller / migration.ROOT / value['id'], seen)
+                raise InterruptedError()
+        with mock.patch.object(migration, 'fsync_dir', side_effect=sync):
+            with self.assertRaises(InterruptedError):
+                migration.apply(self.controller, value, boundary=boundary)
+        migration.recover(self.controller, value['id'], rollback=True)
 
     def test_simultaneous_migration_refuses_lock_owner(self):
         plan = self.plan()
