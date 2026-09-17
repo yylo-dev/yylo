@@ -241,7 +241,7 @@ npm install -g @mariozechner/pi-coding-agent
 - Multi-provider support (Anthropic, OpenAI, Google, Groq, xAI, etc.)
 - Model shorthand aliases (`:pi`, `:sonnet`, `:opus`, `:luna`, `:sol`, `:gpt`, `:gpt5.5`, `:mini`, `:gpt-5`, `:api-codex`, `:gemini-pro`, etc.)
 - Support for inline prompts or prompt files
-- Non-live headless mode emits ordered `[THINKING]`, `[TOOL]`, `[INPUT]`, `[TOOL_RESPONSE]`, `[ANSWER]`, and notable `[STATUS]` blocks; ordinary lifecycle noise is hidden
+- Non-live headless mode emits ordered `[THINKING]`, `[tool:{name}] ... [/{name}]`, `[INPUT]`, `[TOOL_RESPONSE]`, `[ANSWER]`, and notable `[STATUS]` blocks; ordinary lifecycle noise is hidden
 - Fast tools emit one complete block; tools still running after 500 ms emit an append-only running block followed by a correlated completion block without repeated input
 - Tool responses retain the first 15 lines, an exact omitted-middle marker, and the final 2 lines; long input uses an explicit truncation marker
 - TTYs use subtle semantic color, `NO_COLOR` and pipes preserve the same plain layout, and `PI_PRETTY=false` preserves untouched raw Pi NDJSON
@@ -289,6 +289,8 @@ npm install -g @mariozechner/pi-coding-agent
 - `--live`: Run Pi in interactive mode (no `--mode json`, prompt passed positionally)
 - `--no-extensions`: Disable Pi extensions (incompatible with `--live`)
 - `--verbose`: Enable verbose output
+
+Headless output uses bold cyan tool input, muted green responses, italic subdued thinking, and bold terminal-default answers. Labels and spacing distinguish these roles without relying on color. Structured `oldText` / `newText` replacements (including `edits` arrays) display red `-` and green `+` lines. The CLI forwards the outer terminal capability through its internal pipe; redirected output and `NO_COLOR` remain uncolored. Thinking blocks display only thinking events supplied by the provider; live TUI and raw NDJSON modes are unchanged.
 
 Headless turn cost display is provider-neutral. Set `headlessUi.turnCostDisplayThresholdUsd` in `.juno_task/config.json` (default `0.5`), or override it with `HEADLESS_UI_TURN_COST_DISPLAY_THRESHOLD_USD`. Authoritative per-turn cost is shown as a `[STATUS]` block only when it is strictly above the threshold; unavailable cost and ordinary `turn_end` events are omitted. Tool failures are colored red only when Pi supplies structured `isError:true`; words such as `error`, `failed`, or `blocked` in successful output do not alter styling.
 

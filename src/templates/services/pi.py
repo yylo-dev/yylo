@@ -268,9 +268,12 @@ class PiService:
         self._managed_prompt_files.clear()
 
     def _color_enabled(self) -> bool:
-        """Check if ANSI color output is appropriate (TTY + NO_COLOR not set)."""
+        """Honor the outer CLI terminal when our own stdout is a transport pipe."""
         if os.environ.get("NO_COLOR") is not None:
             return False
+        terminal = os.environ.get("JUNO_PI_OUTPUT_TTY")
+        if terminal is not None:
+            return terminal == "1"
         return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 
     def _colorize_lines(self, text: str, color_code: str) -> str:
@@ -534,6 +537,52 @@ class PiService:
             return json.dumps(args, ensure_ascii=False, separators=(",", ":"))
         return ""
 
+    def _semantic_input_block(self, state: dict) -> str:
+        """Render structured replacements as readable, color-independent diff lines."""
+        args = state.get("args")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except (ValueError, TypeError):
+                pass
+
+        def has_replacement(value):
+            if isinstance(value, dict):
+                return any(key in value for key in ("oldText", "newText")) or any(
+                    has_replacement(item) for item in value.values())
+            return isinstance(value, list) and any(has_replacement(item) for item in value)
+
+        if state.get("command") is not None or not has_replacement(args):
+            return self._semantic_indent(self._semantic_input_text(state), self._style_semantic_input)
+
+        lines = []
+
+        def render(value, depth=1):
+            prefix = "  " * depth
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    label = self._strip_ansi_sequences(str(key))
+                    if key in ("oldText", "newText") and isinstance(item, str):
+                        lines.append(self._style_semantic_input(prefix + label + ":"))
+                        sign, color = ("-", self.ANSI_RED) if key == "oldText" else ("+", self.ANSI_GREEN)
+                        for line in self._strip_ansi_sequences(item).split("\n"):
+                            lines.append(self._style_text(prefix + sign + " " + line, color))
+                    elif isinstance(item, (dict, list)):
+                        lines.append(self._style_semantic_input(prefix + label + ":"))
+                        render(item, depth + 1)
+                    else:
+                        text = json.dumps(item, ensure_ascii=False)
+                        lines.append(self._style_semantic_input(prefix + label + ": " + self._strip_ansi_sequences(text)))
+            elif isinstance(value, list):
+                for index, item in enumerate(value):
+                    lines.append(self._style_semantic_input(prefix + f"[{index}]:"))
+                    render(item, depth + 1)
+            else:
+                lines.append(self._style_semantic_input(prefix + self._strip_ansi_sequences(json.dumps(value, ensure_ascii=False))))
+
+        render(args)
+        return "\n".join(lines)
+
     def _semantic_result_text(self, payload: dict) -> str:
         value = payload.get("result")
         if isinstance(value, str):
@@ -557,12 +606,14 @@ class PiService:
             metadata["isError"] = True
         if duration:
             metadata["duration"] = duration
-        lines = [self._semantic_tag("[TOOL]" ) + " " + self._semantic_metadata(metadata)]
+        # Keep delimiters single-line even for malformed provider tool names.
+        tool_name = re.sub(r"[^\w.:-]", "_", self._strip_ansi_sequences(str(state.get("tool") or "unknown")))
+        lines = [self._semantic_tag(f"[tool:{tool_name}]") + " " + self._semantic_metadata(metadata)]
         input_text = self._semantic_input_text(state)
         if include_input and input_text:
             lines.extend([
                 self._semantic_tag("[INPUT]", input_label=True),
-                self._semantic_indent(input_text, self._style_semantic_input),
+                self._semantic_input_block(state),
                 self._semantic_tag("[/INPUT]", input_label=True),
             ])
         if result:
@@ -572,7 +623,7 @@ class PiService:
                 self._semantic_indent(result, response_style),
                 self._semantic_tag("[/TOOL_RESPONSE]"),
             ])
-        lines.append(self._semantic_tag("[/TOOL]"))
+        lines.append(self._semantic_tag(f"[/{tool_name}]"))
         return "\n".join(lines)
 
     def _semantic_find_tool_key(self, payload: dict, *, create: bool = False) -> Optional[str]:
