@@ -173,6 +173,20 @@ async function maintenance<T>(projectDir: string, operation: string, request?: u
   }
 }
 
+/** Read-only active-generation observation. Callers retain their reader lease;
+ * this value alone is not engine admission or a cross-process authority proof.
+ */
+export function checkActiveControllerGeneration(projectDir: string): Promise<{
+  schema_version: 'yylo_controller_generation_admission.v1';
+  controller: string;
+  projection: string;
+  runtime_sha256: string;
+  executable: string;
+  package: { name: string; version: string };
+}> {
+  return maintenance(projectDir, 'active-ready');
+}
+
 export function retainInstalledGeneration(projectDir: string, evidence: InstalledGenerationEvidence,
   cache: string, state: string): Promise<{ evidence: InstalledGenerationEvidence }> {
   return maintenance(projectDir, 'retain', { evidence, cache, state });

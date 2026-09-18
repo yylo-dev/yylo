@@ -89,7 +89,12 @@ def safe(root: Path, name: str) -> Path:
     return cursor
 
 
-def snapshot(path: Path) -> dict[str, Any] | None:
+def observed_bytes(path: Path) -> tuple[bytes, int] | None:
+    """Read one stable regular file without serializing a transaction image.
+
+    Authentication compares these bytes directly with the authenticated archive.
+    Journal producers still use snapshot() and retain the exact image contract.
+    """
     try:
         entry = path.lstat()
     except FileNotFoundError:
@@ -100,8 +105,12 @@ def snapshot(path: Path) -> dict[str, Any] | None:
     after = path.stat()
     if (entry.st_ino, entry.st_mtime_ns, entry.st_size) != (after.st_ino, after.st_mtime_ns, after.st_size):
         raise Refusal("concurrent_edit", str(path))
-    return {"sha256": digest(data), "mode": stat.S_IMODE(entry.st_mode),
-            "bytes": base64.b64encode(data).decode()}
+    return data, stat.S_IMODE(entry.st_mode)
+
+
+def snapshot(path: Path) -> dict[str, Any] | None:
+    observed = observed_bytes(path)
+    return image(*observed) if observed is not None else None
 
 
 def content(value: dict[str, Any]) -> bytes:
@@ -188,12 +197,12 @@ def authenticate(evidence: dict[str, str]) -> dict[str, Any]:
         raise Refusal("package_provenance_invalid", "artifact path must not contain symlinks")
     for directory in (root, artifact.parent):
         assert_outside_git(directory)
-    packed = snapshot(artifact)
-    if packed is None or packed["sha256"] != evidence["sha256"]:
+    packed = observed_bytes(artifact)
+    if packed is None or digest(packed[0]) != evidence["sha256"]:
         raise Refusal("package_provenance_invalid", "artifact hash mismatch")
     files = {}
     total = 0
-    with tarfile.open(fileobj=io.BytesIO(content(packed)), mode="r:gz") as archive:
+    with tarfile.open(fileobj=io.BytesIO(packed[0]), mode="r:gz") as archive:
         for member in archive:
             name = relative(member.name.rstrip("/"))
             if not name.startswith("package/") or (not member.isdir() and not member.isfile()):
@@ -207,8 +216,8 @@ def authenticate(evidence: dict[str, str]) -> dict[str, Any]:
             if total > LIMIT or len(files) > 10000:
                 raise Refusal("package_provenance_invalid", "archive exceeds bounds")
             data = archive.extractfile(member).read()
-            installed = snapshot(safe(root, name))
-            if installed is None or content(installed) != data:
+            installed = observed_bytes(safe(root, name))
+            if installed is None or installed[0] != data:
                 raise Refusal("package_provenance_invalid", f"installed package differs: {name}")
             files[name] = data
     for directory, directories, filenames in os.walk(root / "dist", followlinks=False):
@@ -422,6 +431,36 @@ def state_schemas(package: dict[str, Any]) -> set[str]:
                     for target in node.targets)}
 
 
+class AssessmentFacts:
+    """Exact authenticated bytes and derived schemas for ONE assessment only.
+
+    Never share this object across plan/readiness calls or a writer boundary.
+    Paths, artifact and digest all participate in the key; equal versions or
+    artifacts at different installation roots do not authenticate those roots.
+    Every caller must still validate each pin's attempt and executable.
+    """
+    def __init__(self):
+        self.packages: dict[bytes, dict[str, Any]] = {}
+        self.schemas: dict[bytes, set[str]] = {}
+        self.parsed_sources: dict[bytes, set[str]] = {}
+
+    def package(self, evidence: dict[str, str]) -> dict[str, Any]:
+        key = encoded(evidence)
+        if key not in self.packages:
+            self.packages[key] = authenticate(evidence)
+        return self.packages[key]
+
+    def state_schemas(self, evidence: dict[str, str]) -> set[str]:
+        key = encoded(evidence)
+        if key not in self.schemas:
+            package = self.package(evidence)  # authenticate every distinct root first
+            source = package["files"].get("dist/templates/scripts/task_workspace.py", b"")
+            if source not in self.parsed_sources:
+                self.parsed_sources[source] = state_schemas(package)
+            self.schemas[key] = self.parsed_sources[source]
+        return self.schemas[key]
+
+
 def registration(root: Path) -> dict[str, str]:
     if Path(git(root, "rev-parse", "--show-toplevel")).resolve() != root:
         raise Refusal("registration_invalid", "controller must be exact Git root")
@@ -500,16 +539,6 @@ def prepare(root: Path, candidate_evidence: dict[str, str], previous_evidence: d
             repair: bool = False) -> dict[str, Any]:
     """Pure preparation, also used to authenticate recovery against frozen preimages."""
     authority = registration(root)
-    # Reuse only syntax extracted from exact authenticated bytes in this prepare.
-    # Authentication and every pin's compatibility decision remain independent.
-    schema_cache: dict[bytes, set[str]] = {}
-
-    def schemas(package: dict[str, Any]) -> set[str]:
-        source = package["files"].get("dist/templates/scripts/task_workspace.py", b"")
-        if source not in schema_cache:
-            schema_cache[source] = state_schemas(package)
-        return schema_cache[source]
-
     def observe(name):
         if frozen is not None and name in frozen:
             value = frozen[name]
@@ -517,7 +546,8 @@ def prepare(root: Path, candidate_evidence: dict[str, str], previous_evidence: d
                 content(value)
             return value
         return snapshot(path_for(root, name, authority))
-    candidate, previous = authenticate(candidate_evidence), authenticate(previous_evidence)
+    facts = AssessmentFacts()
+    candidate, previous = facts.package(candidate_evidence), facts.package(previous_evidence)
     identity = decode_json(content(observe(IDENTITY)))
     if identity != runtime_identity(previous):
         raise Refusal("previous_identity_unverified", "registered identity does not authenticate previous package")
@@ -636,23 +666,17 @@ def prepare(root: Path, candidate_evidence: dict[str, str], previous_evidence: d
             for name, value in state["tasks"].items()
             if value.get("state") in {"WORKING", "HYDRATING", "HYDRATION_FAILED"}
             or value.get("fencing", {}).get("state") == "ACTIVE"}
-    if guards[STATE] and state.get("schema_version") not in schemas(candidate) & schemas(previous):
+    if guards[STATE] and state.get("schema_version") not in facts.state_schemas(candidate_evidence) & facts.state_schemas(previous_evidence):
         raise Refusal("shared_state_incompatible", "defer migration; preserve active attempts")
     prior_pins = current.get("active_pins", {})
     if not isinstance(prior_pins, dict):
         raise Refusal("active_pin_unverified", "invalid retained pin map")
-    # Many live attempts can share one immutable predecessor. Authenticate each
-    # exact evidence tuple once in this plan, never cache trust across calls.
-    authenticated = {encoded(candidate_evidence): candidate, encoded(previous_evidence): previous}
     for name, pin in pins.items():
         prior = prior_pins.get(name)
         if prior is not None and prior.get("attempt") == pin["attempt"]:
-            key = encoded(prior["generation"])
-            if key not in authenticated:
-                authenticated[key] = authenticate(prior["generation"])
-            retained = authenticated[key]
+            retained = facts.package(prior["generation"])
             if (prior.get("executable") != retained["executable"]
-                    or state.get("schema_version") not in schemas(retained)):
+                    or state.get("schema_version") not in facts.state_schemas(prior["generation"])):
                 raise Refusal("active_pin_unverified", name)
             pins[name] = prior
     marker = decode_json(content(after[CURRENT]))
@@ -943,7 +967,8 @@ def runtime_ready(root: Path, repository: Path, running: Path) -> dict[str, Any]
     marker = decode_json(content(snapshot(safe(root, CURRENT))))
     if marker.get("schema_version") != "yylo_controller_generation.v1":
         raise Refusal("current_generation_unverified", "unknown generation schema")
-    package = authenticate(marker["candidate"])
+    facts = AssessmentFacts()
+    package = facts.package(marker["candidate"])
     inventory_image = snapshot(safe(root, INVENTORY))
     inventory = decode_json(content(inventory_image))
     identity = decode_json(content(snapshot(safe(root, IDENTITY))))
@@ -970,22 +995,44 @@ def runtime_ready(root: Path, repository: Path, running: Path) -> dict[str, Any]
     permitted = {digest(package["files"]["dist/templates/scripts/task_workspace.py"])}
     state_image = snapshot(safe(root, STATE))
     state = decode_json(content(state_image)) if state_image else {"tasks": {}}
-    if state_image and state.get("schema_version") not in state_schemas(package):
+    if state_image and state.get("schema_version") not in facts.state_schemas(marker["candidate"]):
         raise Refusal("shared_state_incompatible", "preserve active tasks")
     for task_id, pin in marker.get("active_pins", {}).items():
         task = state.get("tasks", {}).get(task_id, {})
         if (task.get("fencing", {}).get("attempt") == pin.get("attempt")
-                and task.get("state") in {"WORKING", "HYDRATING", "HYDRATION_FAILED"}):
-            retained = authenticate(pin["generation"])
+                and (task.get("state") in {"WORKING", "HYDRATING", "HYDRATION_FAILED"}
+                     or task.get("fencing", {}).get("state") == "ACTIVE")):
+            retained = facts.package(pin["generation"])
             if (pin.get("executable") != retained["executable"]
-                    or state.get("schema_version") not in state_schemas(retained)):
+                    or state.get("schema_version") not in facts.state_schemas(pin["generation"])):
                 raise Refusal("active_pin_unverified", task_id)
             permitted.add(digest(retained["files"]["dist/templates/scripts/task_workspace.py"]))
     if running_sha not in permitted:
         raise Refusal("running_generation_unverified", "runtime is not current or attempt-pinned")
     return {"schema_version": "yylo_controller_generation_admission.v1", "controller": str(repository),
-            "projection": str(root), "runtime_sha256": running_sha,
+            "projection": str(root), "runtime_sha256": running_sha, "executable": package["executable"],
             "package": {"name": package["package"]["name"], "version": package["package"]["version"]}}
+
+
+def active_runtime_ready(root: Path) -> dict[str, Any]:
+    """Admit only the bound active generation; never discover or plan a candidate.
+
+    The caller must hold a generation read lease through dispatch/execution.
+    This result is an observation, not a transferable authority token.
+    """
+    assert_ready(root)
+    result = runtime_ready(root, root, safe(root, '.juno_task/scripts/task_workspace.py'))
+    # runtime_ready authenticates the full active package, inventory and pins.
+    # Unlike projected preactivation readiness, live dispatch must also prove
+    # the installed executable selector has not diverged from that identity.
+    config_path = git(root, 'rev-parse', '--path-format=absolute', '--git-path', 'config.worktree')
+    selected = git(root, 'config', '--file', config_path, '--get',
+                   'juno.controller.runtimeExecutable')
+    version = git(root, 'config', '--file', config_path, '--get',
+                  'juno.controller.runtimeVersion')
+    if selected != result['executable'] or version != result['package']['version']:
+        raise Refusal('current_generation_unverified', 'registered selector differs from active package')
+    return result
 
 
 def pinned_task_runtime(root: Path, task_id: str) -> dict[str, Any]:
@@ -1031,7 +1078,7 @@ def pinned_task_runtime(root: Path, task_id: str) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(allow_abbrev=False)
-    parser.add_argument("operation", choices=["plan", "repair-plan", "discover", "retain", "apply", "resume", "rollback", "ready", "hold-lock", "hold-read", "task-pin", "runtime-ready"])
+    parser.add_argument("operation", choices=["plan", "repair-plan", "discover", "retain", "apply", "resume", "rollback", "ready", "hold-lock", "hold-read", "task-pin", "runtime-ready", "active-ready"])
     parser.add_argument("--controller", type=Path, required=True)
     parser.add_argument("--request", type=Path)
     parser.add_argument("--transaction-id")
@@ -1052,7 +1099,9 @@ def main() -> int:
                 print(json.dumps({"locked": True}), flush=True)
                 sys.stdin.readline()  # release on explicit close or parent process death
             return 0
-        if args.operation == "task-pin":
+        if args.operation == "active-ready":
+            answer = active_runtime_ready(args.controller.resolve())
+        elif args.operation == "task-pin":
             answer = pinned_task_runtime(args.controller, request["task_id"])
         elif args.operation == "discover":
             answer = {'evidence': discover_installed(Path(request['root']), Path(request['cache']))}

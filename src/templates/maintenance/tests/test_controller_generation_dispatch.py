@@ -41,6 +41,7 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         controller, root = fixture.controller, fixture.root
         env = {k: v for k, v in os.environ.items() if not k.startswith(('JUNO_', 'YYLO_', 'GIT_'))}
         env['PYTHONDONTWRITEBYTECODE'] = '1'
+        # Retention belongs to this fixture, never the developer's live state.
         env['XDG_STATE_HOME'] = str(root / 'state')
         # Install dependencies from the actual packed package, offline and with
         # scripts disabled. Never borrow node_modules from another checkout.
@@ -128,7 +129,9 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         # Pin identity must survive upgrade exactly, including retained paths.
         retained_previous = json.loads((controller / migration.CURRENT).read_text())['candidate']
         self.assertEqual(retained_previous['sha256'], previous['sha256'])
-        migration.authenticate(retained_previous)
+        self.assertTrue(Path(retained_previous['root']).is_relative_to(root / 'state'))
+        self.assertNotEqual(retained_previous['root'], previous['root'])
+        self.assertEqual(migration.authenticate(retained_previous)['files'], old['files'])
         for relative in runtime_paths: write(fixture.repository / relative, (SCRIPTS / 'task_workspace.py').read_bytes())
         git(fixture.repository, 'add', *runtime_paths)
         git(fixture.repository, 'commit', '-m', 'candidate source runtime fixture')
