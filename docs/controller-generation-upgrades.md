@@ -117,6 +117,25 @@ Source adoption now reports `controller_generation`, `controller_ready` and a
 safe next action separately from source-script admission. A completed source
 transaction is not a claim that a mixed instruction generation is agent-ready.
 
+Source adoption selects every command declared by the authenticated package's
+`bin` manifest, including `ypl` and `feedback-yylo`, using its own target rather
+than assuming all commands point to `yylo.sh`. Both endpoint installations must
+retain `.yylo-generation-evidence.json` and their exact artifacts; this explicit
+selector check never searches the npm cache. Missing, foreign, mixed or shadowed
+launchers, and added/removed command sets, require installation review before
+adoption. Matching version labels do not establish ownership.
+
+A selector sidecar records exact before/after links before the first replacement.
+Readback authenticates the candidate and verifies the complete set visible on
+PATH. Failure rollback authenticates the predecessor and restores only links
+still owned by the operation; an independent change is preserved and incomplete
+rollback retains the candidate installation. Legacy adoption receipts without
+complete command-set evidence refuse replay rather than claim all commands were
+updated. Link replacements are individually atomic, not an atomic multi-link
+switch; the existing source-adoption writer lock and recovery boundaries still
+apply. This does not change ordinary global-to-retained dispatch or establish the
+separate explicit-only startup policy.
+
 ## Source controllers versus consumer projects
 
 Juno source targets still require exact source-runtime agreement and full
