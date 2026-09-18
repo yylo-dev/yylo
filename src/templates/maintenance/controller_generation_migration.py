@@ -500,6 +500,16 @@ def prepare(root: Path, candidate_evidence: dict[str, str], previous_evidence: d
             repair: bool = False) -> dict[str, Any]:
     """Pure preparation, also used to authenticate recovery against frozen preimages."""
     authority = registration(root)
+    # Reuse only syntax extracted from exact authenticated bytes in this prepare.
+    # Authentication and every pin's compatibility decision remain independent.
+    schema_cache: dict[bytes, set[str]] = {}
+
+    def schemas(package: dict[str, Any]) -> set[str]:
+        source = package["files"].get("dist/templates/scripts/task_workspace.py", b"")
+        if source not in schema_cache:
+            schema_cache[source] = state_schemas(package)
+        return schema_cache[source]
+
     def observe(name):
         if frozen is not None and name in frozen:
             value = frozen[name]
@@ -626,7 +636,7 @@ def prepare(root: Path, candidate_evidence: dict[str, str], previous_evidence: d
             for name, value in state["tasks"].items()
             if value.get("state") in {"WORKING", "HYDRATING", "HYDRATION_FAILED"}
             or value.get("fencing", {}).get("state") == "ACTIVE"}
-    if guards[STATE] and state.get("schema_version") not in state_schemas(candidate) & state_schemas(previous):
+    if guards[STATE] and state.get("schema_version") not in schemas(candidate) & schemas(previous):
         raise Refusal("shared_state_incompatible", "defer migration; preserve active attempts")
     prior_pins = current.get("active_pins", {})
     if not isinstance(prior_pins, dict):
@@ -642,7 +652,7 @@ def prepare(root: Path, candidate_evidence: dict[str, str], previous_evidence: d
                 authenticated[key] = authenticate(prior["generation"])
             retained = authenticated[key]
             if (prior.get("executable") != retained["executable"]
-                    or state.get("schema_version") not in state_schemas(retained)):
+                    or state.get("schema_version") not in schemas(retained)):
                 raise Refusal("active_pin_unverified", name)
             pins[name] = prior
     marker = decode_json(content(after[CURRENT]))
