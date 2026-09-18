@@ -178,7 +178,13 @@ export async function prepareControllerCommand(cwd: string, commandArgs: string[
     await releaseControllerCommand();
     throw new Error('generation_changed_before_dispatch: retry the unchanged command');
   }
-  if (assessment.disposition !== 'retained') return false;
+  if (assessment.disposition !== 'retained') {
+    // The hop ends only after this runtime passes admission and the locked
+    // readback. Do not leak its loop guard into providers/hooks and their new
+    // CLI invocations. This marker grants no runtime or controller authority.
+    if (assessment.disposition === 'ready') delete process.env.YYLO_GENERATION_REDISPATCH;
+    return false;
+  }
   if (process.env.YYLO_GENERATION_REDISPATCH) {
     await releaseControllerCommand();
     throw new Error('generation_dispatch_cycle: YYLO_CONTROLLER_GENERATION_DISPATCH_V1 permits only one retained-runtime hop');
