@@ -224,6 +224,51 @@ class GenerationTests(unittest.TestCase):
         with self.assertRaisesRegex(migration.Refusal, 'package_provenance_invalid'):
             migration.plan(self.controller, self.candidate, self.candidate)
 
+    def test_schema_parsing_scales_with_sources_not_pins(self):
+        migration.apply(self.controller, self.plan())
+        marker = json.loads((self.controller / migration.CURRENT).read_text())
+        original_pin = marker['active_pins']['ABC123']
+        for count in (1, 100, 1000):
+            with self.subTest(pins=count):
+                state = json.loads((self.controller / migration.STATE).read_text())
+                state['tasks'] = {f'PIN{i:04}': {'state': 'WORKING', 'fencing': {'attempt': 3}}
+                                  for i in range(count)}
+                marker['active_pins'] = {name: copy.deepcopy(original_pin) for name in state['tasks']}
+                write(self.controller / migration.STATE, state)
+                write(self.controller / migration.CURRENT, marker)
+                for _ in range(2):  # independent operations must parse afresh
+                    with mock.patch.object(migration.ast, 'parse', wraps=migration.ast.parse) as parse:
+                        result = migration.prepare(self.controller, self.candidate, self.candidate)
+                    self.assertEqual(parse.call_count, 1)
+                    self.assertEqual(result['active_pins'], marker['active_pins'])
+
+    def test_distinct_authenticated_pin_sources_and_invalid_sources(self):
+        migration.apply(self.controller, self.plan())
+        marker = json.loads((self.controller / migration.CURRENT).read_text())
+        path = Path(self.previous['root']) / 'dist/templates/scripts/task_workspace.py'
+        original = path.read_bytes()
+        for source, error in ((original + b'\n# distinct source\n', None),
+                              (original.replace(b'juno_task_workspace_state.v1', b'future_state.v7'),
+                               migration.Refusal),
+                              (b'def invalid syntax', SyntaxError)):
+            with self.subTest(error=error):
+                write(path, source)
+                evidence = self.pack(Path(self.previous['root']))
+                marker['active_pins']['ABC123']['generation'] = evidence
+                write(self.controller / migration.CURRENT, marker)
+                with mock.patch.object(migration.ast, 'parse', wraps=migration.ast.parse) as parse:
+                    if error:
+                        with self.assertRaises(error):
+                            migration.prepare(self.controller, self.candidate, self.candidate)
+                    else:
+                        result = migration.prepare(self.controller, self.candidate, self.candidate)
+                        self.assertEqual(result['active_pins'], marker['active_pins'])
+                self.assertEqual(parse.call_count, 2)
+        # A successful earlier assessment cannot authorize subsequently changed bytes.
+        write(path, original)
+        with self.assertRaisesRegex(migration.Refusal, 'package_provenance_invalid'):
+            migration.prepare(self.controller, self.candidate, self.candidate)
+
     def test_retained_task_pin_is_authenticated_and_attempt_bound(self):
         migration.apply(self.controller, self.plan())
         pin = migration.pinned_task_runtime(self.controller, 'ABC123')
