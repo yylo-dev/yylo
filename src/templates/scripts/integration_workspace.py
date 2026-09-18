@@ -8,13 +8,16 @@ import difflib
 import errno
 import fcntl
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from contextlib import contextmanager
@@ -2796,30 +2799,151 @@ def adoption_task_start_admission(controller: Path, repository: Path, target_sha
             "declaration_admission": admission}
 
 
+def adoption_launcher_bytes(path: Path, limit: int = 64 * 1024 * 1024) -> bytes:
+    """Bounded stable regular-file read; never follow package symlinks."""
+    if path != path.resolve():
+        raise AdoptionError(f"unsafe launcher package path: {path}")
+    entry = path.lstat()
+    if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1 or entry.st_size > limit:
+        raise AdoptionError(f"unsafe launcher package file: {path}")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_size > limit):
+            raise AdoptionError(f"unsafe launcher package file: {path}")
+        data = stream.read(limit + 1)
+        after = os.fstat(stream.fileno())
+    current = path.lstat()
+    if not stat.S_ISREG(current.st_mode) or path != path.resolve():
+        raise AdoptionError(f"launcher package changed while reading: {path}")
+    identity = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    if (len(data) != before.st_size or identity(entry) != identity(before) or identity(before) != identity(after)
+            or identity(before) != identity(current)):
+        raise AdoptionError(f"launcher package changed while reading: {path}")
+    return data
+
+
+def adoption_package_bins(executable: Path) -> dict[str, str]:
+    """Authenticate manifest and the complete installed artifact before using bin.
+
+    Explicit source adoption requires retained artifact evidence; it never scans
+    npm caches. This is a selector ownership check, not controller admission.
+    """
+    executable = executable.absolute()
+    if executable.parts[-3:] != ("dist", "bin", "cli.mjs"):
+        raise AdoptionError("launcher selection requires a retained package cli.mjs")
+    root = executable.parents[2]
+    try:
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise AdoptionError(f"duplicate launcher package key: {key}")
+                result[key] = value
+            return result
+        evidence = json.loads(adoption_launcher_bytes(
+            root / ".yylo-generation-evidence.json", 65536), object_pairs_hook=unique)
+        if (not isinstance(evidence, dict) or set(evidence) != {"root", "artifact", "sha256"}
+                or evidence["root"] != str(root)
+                or not isinstance(evidence["sha256"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", evidence["sha256"])):
+            raise AdoptionError("invalid launcher artifact evidence")
+        artifact = Path(evidence["artifact"])
+        if not artifact.is_absolute():
+            raise AdoptionError("launcher artifact path must be absolute")
+        packed = adoption_launcher_bytes(artifact)
+        if hashlib.sha256(packed).hexdigest() != evidence["sha256"]:
+            raise AdoptionError("launcher artifact digest mismatch")
+        files: dict[str, bytes] = {}
+        total = 0
+        with tarfile.open(fileobj=io.BytesIO(packed), mode="r:gz") as archive:
+            for index, member in enumerate(archive):
+                name = member.name.rstrip("/")
+                if (index >= 10000 or not name.startswith("package/") or "\\" in name
+                        or any(part in {"", ".", "..", ".git"} for part in name.split("/"))
+                        or not (member.isfile() or member.isdir())):
+                    raise AdoptionError("unsafe launcher artifact member")
+                if member.isdir():
+                    continue
+                name = name.removeprefix("package/")
+                total += member.size
+                if name in files or total > 64 * 1024 * 1024:
+                    raise AdoptionError("launcher artifact exceeds bounds or repeats a path")
+                data = archive.extractfile(member).read()
+                if adoption_launcher_bytes(root / name) != data:
+                    raise AdoptionError(f"launcher package differs from artifact: {name}")
+                files[name] = data
+        execution_entries = 0
+        for directory, directories, filenames in os.walk(root / "dist", followlinks=False):
+            for entry in directories + filenames:
+                execution_entries += 1
+                if execution_entries > 20000:
+                    raise AdoptionError("launcher execution tree exceeds bounds")
+                path = Path(directory) / entry
+                if path.is_symlink() or (not path.is_dir() and path.relative_to(root).as_posix() not in files):
+                    raise AdoptionError(f"unverified launcher execution entry: {path}")
+        manifest = json.loads(files["package.json"], object_pairs_hook=unique)
+        if not isinstance(manifest, dict):
+            raise AdoptionError("invalid authenticated package manifest")
+        bins = manifest.get("bin")
+        if (manifest.get("name") != "@yylo/cli" or not managed_valid_package_version(manifest.get("version"))
+                or "dist/bin/cli.mjs" not in files
+                or not isinstance(bins, dict) or not 1 <= len(bins) <= 64
+                or not {"yy", "yylo"}.issubset(bins)):
+            raise AdoptionError("invalid authenticated package bin manifest")
+        result = {}
+        for name, value in bins.items():
+            if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name)
+                    or not isinstance(value, str)):
+                raise AdoptionError("unsafe package bin name or target")
+            relative = value.removeprefix("./")
+            if (not relative.startswith("dist/bin/") or "\\" in relative
+                    or any(part in {"", ".", ".."} for part in relative.split("/"))
+                    or relative not in files or not os.access(root / relative, os.X_OK)):
+                raise AdoptionError(f"unsafe or nonexecutable package bin target: {name}")
+            result[name] = str(root / relative)
+        return dict(sorted(result.items()))
+    except (OSError, ValueError, TypeError, KeyError, tarfile.TarError) as exc:
+        raise AdoptionError(f"launcher artifact authentication failed: {exc}; retain explicit artifact evidence") from exc
+
+
 def adoption_public_launcher_preflight(old_executable: str) -> list[dict[str, str]]:
-    if not Path(old_executable).is_file():
-        raise AdoptionError("currently selected controller executable is missing")
+    bins = adoption_package_bins(Path(old_executable))
     launchers: list[dict[str, str]] = []
-    for name in ("yylo", "yy"):
+    for name, expected in bins.items():
         found = shutil.which(name)
         if not found:
-            raise AdoptionError(f"public {name} launcher is unavailable")
-        path = Path(found)
-        if not path.is_symlink():
-            raise AdoptionError(f"public {name} launcher is not an atomically selectable symlink")
-        launchers.append({"name": name, "path": str(path.absolute()),
-                          "before": os.readlink(path), "before_resolved": str(path.resolve())})
-    if len({row["before_resolved"] for row in launchers}) != 1:
-        raise AdoptionError("public yy and yylo launchers do not share one prior runtime identity")
+            raise AdoptionError(f"public {name} launcher is unavailable; review installation before adoption")
+        path = Path(found).absolute()
+        if (not path.is_symlink() or str(path.resolve()) != expected):
+            raise AdoptionError(f"public {name} launcher is foreign, mixed or shadowed; preserve it for review")
+        launchers.append({"name": name, "path": str(path),
+                          "before": os.readlink(path), "before_resolved": expected})
     return launchers
 
 
 def adoption_public_launchers(old_executable: str, new_executable: Path,
-                              preflight: list[dict[str, str]] | None = None) -> dict[str, Any]:
-    launchers = preflight or adoption_public_launcher_preflight(old_executable)
-    new_launcher = new_executable.resolve().with_name("yylo.sh")
-    if not new_launcher.is_file() or not new_executable.is_file():
-        raise AdoptionError("installed source runtime is missing its public launcher or executable")
+                              preflight: list[dict[str, str]] | None = None,
+                              journal: Path | None = None) -> dict[str, Any]:
+    # Reauthenticate both endpoints and all selectors, even with an earlier preflight.
+    launchers = adoption_public_launcher_preflight(old_executable)
+    if preflight is not None and launchers != preflight:
+        raise AdoptionError("public runtime selector changed after preflight")
+    bins = adoption_package_bins(new_executable)
+    if set(bins) != {row["name"] for row in launchers}:
+        raise AdoptionError("package command set changed; review added/removed command installation before adoption")
+    launchers = [{**row, "after": bins[row["name"]]} for row in launchers]
+    selection = {"schema_version": "yylo_public_launchers.v2",
+                 "previous_executable": old_executable,
+                 "previous_evidence_sha256": hashlib.sha256(adoption_launcher_bytes(
+                     Path(old_executable).parents[2] / ".yylo-generation-evidence.json", 65536)).hexdigest(),
+                 "evidence_sha256": hashlib.sha256(adoption_launcher_bytes(
+                     new_executable.parents[2] / ".yylo-generation-evidence.json", 65536)).hexdigest(),
+                 "executable": str(new_executable.absolute()), "links": launchers}
+    if journal is not None:
+        # Durable exact preimages precede the first link replacement.
+        adoption_atomic_write(journal, selection)
     changed: list[dict[str, str]] = []
     try:
         for row in launchers:
@@ -2827,53 +2951,73 @@ def adoption_public_launchers(old_executable: str, new_executable: Path,
             if (not path.is_symlink() or os.readlink(path) != row["before"]
                     or str(path.resolve()) != row["before_resolved"]):
                 raise AdoptionError("public runtime selector changed after preflight")
-            temporary = path.with_name(f".{path.name}.source-adoption-{os.getpid()}")
-            temporary.unlink(missing_ok=True)
-            temporary.symlink_to(new_launcher)
-            os.replace(temporary, path)
+            adoption_replace_launcher(path, row["after"])
             changed.append(row)
-        if any(Path(row["path"]).resolve() != new_launcher for row in launchers):
+        if any(not Path(row["path"]).is_symlink()
+               or os.readlink(row["path"]) != row["after"] for row in launchers):
             raise AdoptionError("public runtime selector exact readback failed")
-    except BaseException:
-        for row in reversed(changed):
-            path = Path(row["path"])
-            if path.is_symlink() and path.resolve() == new_launcher:
-                temporary = path.with_name(f".{path.name}.source-adoption-abort-{os.getpid()}")
-                temporary.unlink(missing_ok=True)
-                temporary.symlink_to(row["before"])
-                os.replace(temporary, path)
+    except BaseException as exc:
+        rollback = {**selection, "links": changed}
+        try:
+            complete = adoption_restore_public_launchers(rollback)
+        except BaseException:
+            complete = False
+        if not complete:
+            failure = AdoptionError("public launcher rollback incomplete; preserve candidate and exact selector preimages")
+            failure.launcher_selection = selection
+            raise failure from exc
         raise
-    return {"executable": str(new_executable.resolve()), "launcher": str(new_launcher),
-            "links": launchers}
+    return selection
+
+
+def adoption_replace_launcher(path: Path, target: str) -> None:
+    # Never unlink a guessed temporary filename that could belong to another writer.
+    with tempfile.TemporaryDirectory(prefix=f".{path.name}.source-adoption-", dir=path.parent) as directory:
+        temporary = Path(directory) / "link"
+        temporary.symlink_to(target)
+        os.replace(temporary, path)
 
 
 def adoption_restore_public_launchers(selection: dict[str, Any]) -> bool:
-    selected = Path(selection["launcher"]).resolve()
+    if selection.get("schema_version") != "yylo_public_launchers.v2":
+        raise AdoptionError("legacy launcher receipt requires explicit review; no complete command-set proof")
+    previous_executable = Path(selection["previous_executable"])
+    previous_evidence = adoption_launcher_bytes(previous_executable.parents[2] / ".yylo-generation-evidence.json", 65536)
+    if hashlib.sha256(previous_evidence).hexdigest() != selection.get("previous_evidence_sha256"):
+        raise AdoptionError("retained predecessor artifact identity changed; preserve selectors")
+    previous = adoption_package_bins(previous_executable)
+    if any(previous.get(row["name"]) != row["before_resolved"] for row in selection["links"]):
+        raise AdoptionError("retained predecessor launcher identity changed; preserve selectors")
     complete = True
     for row in reversed(selection["links"]):
         path = Path(row["path"])
-        if not path.is_symlink() or path.resolve() != selected:
+        if not path.is_symlink() or os.readlink(path) != row["after"]:
             complete = False
             continue
-        temporary = path.with_name(f".{path.name}.source-adoption-rollback-{os.getpid()}")
-        temporary.unlink(missing_ok=True)
-        temporary.symlink_to(row["before"])
-        os.replace(temporary, path)
+        adoption_replace_launcher(path, row["before"])
     return complete and all(Path(row["path"]).is_symlink()
                             and os.readlink(Path(row["path"])) == row["before"]
                             for row in selection["links"])
 
 
 def adoption_verify_public_dispatch(selection: dict[str, Any]) -> None:
+    if selection.get("schema_version") != "yylo_public_launchers.v2":
+        raise AdoptionError("legacy launcher receipt requires explicit review; no complete command-set proof")
     executable = Path(selection.get("executable", ""))
-    launcher = Path(selection.get("launcher", ""))
-    if (not executable.is_file() or not launcher.is_file()
-            or any(not Path(row["path"]).is_symlink()
-                   or Path(row["path"]).resolve() != launcher.resolve()
-                   for row in selection.get("links", []))):
+    bins = adoption_package_bins(executable)
+    evidence = adoption_launcher_bytes(executable.parents[2] / ".yylo-generation-evidence.json", 65536)
+    if hashlib.sha256(evidence).hexdigest() != selection.get("evidence_sha256"):
+        raise AdoptionError("completed source runtime adoption artifact identity drifted")
+    rows = selection.get("links", [])
+    if (len(rows) != len(bins) or {row["name"] for row in rows} != set(bins)
+            or any(row.get("after") != bins[row["name"]]
+                   or not Path(row["path"]).is_symlink()
+                   or os.readlink(row["path"]) != row["after"]
+                   or str(Path(row["path"]).resolve()) != row["after"]
+                   or shutil.which(row["name"]) != row["path"] for row in rows)):
         raise AdoptionError("completed source runtime adoption public selector drifted")
-    result = adoption_run([str(Path(selection["links"][-1]["path"])), "merge", "--help"],
-                          Path.cwd())
+    yy = next(row["path"] for row in rows if row["name"] == "yy")
+    result = adoption_run([yy, "merge", "--help"], Path.cwd())
     help_text = result.stdout + result.stderr
     native = all(re.search(rf"(?m)^  {name}(?: |$)", help_text)
                  for name in ("status", "land", "project"))
@@ -2919,7 +3063,15 @@ def adoption_replay(receipt_path: Path, controller: Path, repository: Path, targ
     configured = adoption_controller_config(controller, "juno.controller.runtimeExecutable")
     if configured != receipt.get("dispatch", {}).get("executable"):
         raise AdoptionError("completed source runtime adoption controller selection drifted")
-    adoption_verify_public_dispatch(receipt.get("dispatch", {}))
+    dispatch = receipt.get("dispatch", {})
+    if dispatch.get("schema_version") == "yylo_public_launchers.v2":
+        journal = receipt.get("launcher_journal", {})
+        journal_path = Path(journal.get("path", ""))
+        if (not journal_path.is_file() or journal_path.is_symlink()
+                or adoption_digest(journal_path) != journal.get("sha256")
+                or adoption_read_json(journal_path, "launcher journal") != dispatch):
+            raise AdoptionError("completed source runtime adoption launcher journal drifted")
+    adoption_verify_public_dispatch(dispatch)
     doctor = managed_runtime_inspect(controller, repository, target_sha)
     generation = adoption_task_start_admission(controller, repository, target_sha)
     if not doctor["healthy"] or not generation["current"]:
@@ -2987,6 +3139,10 @@ def _source_runtime_adopt_locked(args: argparse.Namespace, controller: Path,
     old_version = adoption_controller_config(controller, "juno.controller.runtimeVersion")
     old_identity = controller / ".juno_task/runtime/identity.json"
     launcher_before = adoption_public_launcher_preflight(old_executable)
+    source_bins = package.get("bin")
+    if (not isinstance(source_bins, dict)
+            or set(source_bins) != {row["name"] for row in launcher_before}):
+        raise AdoptionError("package command set changed; review added/removed command installation before adoption")
     before = {"controller_head": adoption_git(controller, "rev-parse", "HEAD"),
               "controller_tree": adoption_git(controller, "write-tree"),
               "runtime_executable": old_executable, "runtime_version": old_version,
@@ -2995,7 +3151,8 @@ def _source_runtime_adopt_locked(args: argparse.Namespace, controller: Path,
     artifact = output.with_name(f"{output.stem}-{target_sha[:12]}.tgz")
     install_receipt = output.with_name(f"{output.stem}-install.json")
     rollback_receipt = output.with_name(f"{output.stem}-rollback.json")
-    if any(path.exists() or path.is_symlink() for path in (artifact, install_receipt, rollback_receipt)):
+    launcher_journal = output.with_name(f"{output.stem}-launchers.json")
+    if any(path.exists() or path.is_symlink() for path in (artifact, install_receipt, rollback_receipt, launcher_journal)):
         raise AdoptionError("source runtime adoption sidecar path already exists")
     # Full target declaration/start compatibility must pass before owner movement,
     # packing, installation or rebind. Script-byte equality is not admission.
@@ -3049,7 +3206,8 @@ def _source_runtime_adopt_locked(args: argparse.Namespace, controller: Path,
         with ownership.open("x", encoding="utf-8") as stream:
             stream.write(adoption_canonical(marker).decode())
         prefix_owned = True
-        dispatch = adoption_public_launchers(old_executable, new_executable, launcher_before)
+        dispatch = adoption_public_launchers(old_executable, new_executable, launcher_before,
+                                             journal=launcher_journal)
         adoption_verify_public_dispatch(dispatch)
         assert_source()
         if os.environ.get("YYLO_SOURCE_ADOPTION_TEST_FAIL_AFTER_REBIND") == "1":
@@ -3081,6 +3239,7 @@ def _source_runtime_adopt_locked(args: argparse.Namespace, controller: Path,
                                 "sha256": adoption_digest(install_receipt)},
                    "refresh_receipt": refresh["receipt"], "doctor": {"healthy": True},
                    "runtime_generation": admission, "dispatch": dispatch,
+                   "launcher_journal": {"path": str(launcher_journal), "sha256": adoption_digest(launcher_journal)},
                    "source_mode": "isolated" if isolated_source else "integration-owner",
                    "integration_owner": {"path": str(owner), "before": owner_before,
                                          "after_head": owner_before["head"] if isolated_source else target_sha},
@@ -3093,6 +3252,8 @@ def _source_runtime_adopt_locked(args: argparse.Namespace, controller: Path,
         adoption_atomic_write(output, payload)
         return payload
     except BaseException as exc:
+        if dispatch is None:
+            dispatch = getattr(exc, "launcher_selection", None)
         rollback: dict[str, Any] = {"attempted": rebound or owner_before["moved"],
                                      "complete": not rebound and not owner_before["moved"]}
         try:
@@ -3111,7 +3272,7 @@ def _source_runtime_adopt_locked(args: argparse.Namespace, controller: Path,
                     receipt_reference = {"path": str(rollback_receipt),
                                          "sha256": adoption_digest(rollback_receipt)}
             prefix_removed = not prefix.exists()
-            if prefix_owned:
+            if prefix_owned and dispatch_restored and runtime_restored:
                 marker = prefix / ".juno-source-adoption-owner.json"
                 owned = marker.is_file() and adoption_read_json(
                     marker, "source runtime adoption prefix ownership").get("receipt") == str(output)
@@ -3136,6 +3297,7 @@ def _source_runtime_adopt_locked(args: argparse.Namespace, controller: Path,
                    "controller": str(controller), "repository": str(repository),
                    "previous_sha": previous_sha, "target_sha": target_sha,
                    "error": str(exc), "rollback": rollback, "rollback_identity": before,
+                   "dispatch": dispatch,
                    "duration_seconds": time.monotonic() - started,
                    "operator_steps": {"before": 5, "after": 2},
                    "product_ref_mutation": False, "publication": False}
