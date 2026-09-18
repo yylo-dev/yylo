@@ -41,6 +41,8 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         controller, root = fixture.controller, fixture.root
         env = {k: v for k, v in os.environ.items() if not k.startswith(('JUNO_', 'YYLO_', 'GIT_'))}
         env['PYTHONDONTWRITEBYTECODE'] = '1'
+        # Retention belongs to this fixture, never the developer's live state.
+        env['XDG_STATE_HOME'] = str(root / 'state')
         # Install dependencies from the actual packed package, offline and with
         # scripts disabled. Never borrow node_modules from another checkout.
         packed = subprocess.run(['npm', 'pack', '--ignore-scripts', '--json', '--pack-destination', str(root)],
@@ -122,6 +124,11 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         self.assertEqual(active['state'], 'WORKING')
         self.assertEqual(active['hydration']['status'], 'passed')
         active_record = json.loads((controller / migration.STATE).read_text())['tasks']['Y']
+        retained_previous = json.loads((controller / migration.CURRENT).read_text())['candidate']
+        self.assertEqual(retained_previous['sha256'], previous['sha256'])
+        self.assertTrue(Path(retained_previous['root']).is_relative_to(root / 'state'))
+        self.assertNotEqual(retained_previous['root'], previous['root'])
+        self.assertEqual(migration.authenticate(retained_previous)['files'], old['files'])
         for relative in runtime_paths: write(fixture.repository / relative, (SCRIPTS / 'task_workspace.py').read_bytes())
         git(fixture.repository, 'add', *runtime_paths)
         git(fixture.repository, 'commit', '-m', 'candidate source runtime fixture')
@@ -138,7 +145,7 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         self.assertEqual(json.loads((controller / migration.STATE).read_text())['tasks']['Y'], active_record)
         pin = migration.pinned_task_runtime(controller, 'Y')
         self.assertTrue(pin.get('pinned') or pin.get('retained_pin'))
-        self.assertEqual(json.loads((controller / migration.CURRENT).read_text())['active_pins']['Y']['generation'], previous)
+        self.assertEqual(json.loads((controller / migration.CURRENT).read_text())['active_pins']['Y']['generation'], retained_previous)
         invoke('task', 'lease-heartbeat', 'Y', '--lease-token', active['lease_token'])
         fixture.commit_task('Y', 'src/pinned.txt')
         self.assertEqual(invoke('task', 'finish', 'Y', '--lease-token', active['lease_token'])['state'], 'QUEUED')

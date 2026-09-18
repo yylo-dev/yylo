@@ -18,7 +18,16 @@ yy integration runtime-doctor
 ```
 
 After activation these doctors use the same package-generation assessment as
-startup. Workspace topology checks remain separate. A prospective migration is
+startup. When the invoked package root is already the selected active generation,
+assessment validates the active package, managed inventory, runtime selectors and
+applicable attempt/ACTIVE-lease pins directly, without discovering a candidate or
+building a hypothetical migration plan. Authentication and schema facts are reused
+only within one assessment and only for identical evidence tuples; different roots
+and later invocations still require authentication. This read-only observation is
+not a transferable admission proof. Dispatch retains its reader-lease readback.
+Different/global package roots still follow the first-use behavior described above;
+this optimization does not introduce an explicit-only upgrade command or certify
+provider/session startup timing. Workspace topology checks remain separate. A prospective migration is
 not a claim that an old controller has already been upgraded.
 
 Both package generations require authenticated artifact evidence. Supported

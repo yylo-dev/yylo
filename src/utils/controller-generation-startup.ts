@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import {
   assertControllerGenerationReady, prepareControllerGeneration, applyControllerGeneration,
   recoverControllerGeneration, GENERATION_MIGRATION_ROOT, discoverInstalledGeneration, retainInstalledGeneration,
+  checkActiveControllerGeneration,
   type InstalledGenerationEvidence, type ControllerGenerationPlan,
 } from './controller-generation-migration.js';
 import { assertSafeManagedWritePath } from './managed-update-transaction.js';
@@ -127,6 +128,16 @@ export async function assessControllerGeneration(controller: string, packageRoot
     }
     await assertControllerGenerationReady(controller);
     const current = await safeJson(controller, `${GENERATION_MIGRATION_ROOT}/current.json`);
+    if (current?.candidate?.root === packageRoot) {
+      // An already-selected immutable runtime needs active admission, not a
+      // hypothetical upgrade plan. The engine still authenticates its complete
+      // package, managed bytes, selectors, schema and every applicable pin.
+      const active = await checkActiveControllerGeneration(controller);
+      if (active.executable !== path.join(packageRoot, 'dist/bin/cli.mjs')) {
+        throw new Error('generation_changed_before_dispatch: active executable changed during assessment');
+      }
+      return { disposition: 'ready', controller };
+    }
     let candidate = await installedEvidence(packageRoot);
     const identity = await safeJson(controller, '.juno_task/runtime/identity.json');
     const previousRoot = typeof identity?.executable === 'string'
