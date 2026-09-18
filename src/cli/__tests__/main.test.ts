@@ -4363,6 +4363,19 @@ describe('Verbose/Quiet Output Modes', () => {
     expect(lastCall.cliConfig.verbose).toBe(0);
   });
 
+  it('labels iteration-start time as display elapsed, not provider runtime', async () => {
+    const engine = createExecutionEngine({} as any);
+    vi.mocked(engine.on).mockImplementation(((event: string, handler: any) => {
+      if (event === 'iteration:start') handler({ iterationNumber: 1 });
+      return engine;
+    }) as any);
+    await mainCommandHandler([], {
+      subagent: 'pi', prompt: 'timing label', verbose: 1, quiet: false, logLevel: 'info',
+    }, mockCommand);
+    expect(consoleErrorSpy.mock.calls.some(call =>
+      /Iteration 1 started \(display elapsed: .*; not provider runtime\)/.test(String(call[0])))).toBe(true);
+  });
+
   it('prints the quiet final result after suppressed raw streaming events', async () => {
     const { createExecutionEngine } = await import('../../core/engine.js');
     const engine = createExecutionEngine({} as any);

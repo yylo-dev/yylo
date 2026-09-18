@@ -1371,7 +1371,7 @@ class MainProgressDisplay {
     this.currentIteration = iteration;
     if (this.verboseLevel === 0) return;
     const elapsed = this.getElapsedTime();
-    console.error(chalk.yellow(`\n🔄 Iteration ${iteration} started (${elapsed})`));
+    console.error(chalk.yellow(`\n🔄 Iteration ${iteration} started (display elapsed: ${elapsed}; not provider runtime)`));
   }
 
   onIterationComplete(success: boolean, duration: number): void {
