@@ -7,7 +7,7 @@ import { assessControllerGeneration, ensureControllerGeneration, prepareInstalle
 import { assertExternalGenerationPlan, generationCommandKind, generationInvocationContext } from '../controller-generation-command.js';
 import { Command } from 'commander';
 
-const engine = vi.hoisted(() => ({ plan: vi.fn(), apply: vi.fn(), recover: vi.fn(), ready: vi.fn(), discover: vi.fn(), retain: vi.fn() }));
+const engine = vi.hoisted(() => ({ plan: vi.fn(), apply: vi.fn(), recover: vi.fn(), ready: vi.fn(), active: vi.fn(), discover: vi.fn(), retain: vi.fn() }));
 vi.mock('../controller-generation-migration.js', () => ({
   GENERATION_MIGRATION_ROOT: '.juno_task/runtime/generation-migration',
   prepareControllerGeneration: engine.plan, applyControllerGeneration: engine.apply,
@@ -15,6 +15,7 @@ vi.mock('../controller-generation-migration.js', () => ({
   packagedGenerationRoot: () => '/package',
   discoverInstalledGeneration: engine.discover,
   retainInstalledGeneration: engine.retain,
+  checkActiveControllerGeneration: engine.active,
 }));
 
 describe('operation-specific first-use generation dispatch', () => {
@@ -38,6 +39,7 @@ describe('operation-specific first-use generation dispatch', () => {
     engine.retain.mockResolvedValue({ evidence });
     engine.apply.mockResolvedValue({ id, outcome: 'completed' });
     engine.ready.mockResolvedValue(undefined);
+    engine.active.mockImplementation(async () => ({ executable: path.join(candidate, 'dist/bin/cli.mjs') }));
   });
   afterEach(async () => {
     if (oldCache === undefined) delete process.env.npm_config_cache;
@@ -99,6 +101,35 @@ describe('operation-specific first-use generation dispatch', () => {
     });
     expect((await assessControllerGeneration(controller, candidate)).disposition).toBe('ready');
     expect(engine.apply).not.toHaveBeenCalled();
+  });
+
+  it('admits the selected active root without candidate discovery, planning or mutation', async () => {
+    await fs.outputJson(path.join(controller, '.juno_task/runtime/generation-migration/current.json'), {
+      candidate: { root: candidate },
+    });
+    expect((await ensureControllerGeneration(controller, candidate)).disposition).toBe('ready');
+    expect(engine.active).toHaveBeenCalledOnce();
+    for (const operation of [engine.discover, engine.plan, engine.apply, engine.recover, engine.retain]) {
+      expect(operation).not.toHaveBeenCalled();
+    }
+  });
+
+  it('does not fall through to upgrade when active authentication refuses', async () => {
+    await fs.outputJson(path.join(controller, '.juno_task/runtime/generation-migration/current.json'), {
+      candidate: { root: candidate },
+    });
+    engine.active.mockRejectedValue(new Error('active_pin_unverified: attempt pin'));
+    expect(await assessControllerGeneration(controller, candidate)).toMatchObject({ disposition: 'refused', code: 'active_pin_unverified' });
+    expect(engine.plan).not.toHaveBeenCalled(); expect(engine.apply).not.toHaveBeenCalled();
+  });
+
+  it('refuses if active admission names a different executable after the root observation', async () => {
+    await fs.outputJson(path.join(controller, '.juno_task/runtime/generation-migration/current.json'), {
+      candidate: { root: candidate },
+    });
+    engine.active.mockResolvedValue({ executable: '/different/runtime/cli.mjs' });
+    expect(await assessControllerGeneration(controller, candidate)).toMatchObject({ disposition: 'refused', code: 'generation_changed_before_dispatch' });
+    expect(engine.plan).not.toHaveBeenCalled();
   });
 
   it('automatically applies an authenticated engine plan before execution', async () => {
