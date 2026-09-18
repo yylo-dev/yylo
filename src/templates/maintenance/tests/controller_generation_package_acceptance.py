@@ -34,6 +34,121 @@ def git(root, *args):
     return subprocess.check_output(['git', '-C', str(root), *args], text=True, stderr=subprocess.PIPE).strip()
 
 
+def public_launcher_checks(root, controller, candidate_root, candidate_bin, old_root, env, historical):
+    """Probe actual installed wrappers; no provider/model or candidate byte edits."""
+    bins = json.loads((candidate_root / 'package.json').read_bytes())['bin']
+    roles = {'yy': 'generation-admission', 'yylo': 'generation-admission',
+             'ypl': 'live-generation-admission', 'feedback-yylo': 'auxiliary-artifact-mapping'}
+    assert set(bins) == set(roles), 'Every new package bin needs an explicit safe release probe/classification'
+    for name, target in bins.items():
+        assert (candidate_bin / name).is_symlink(), f'missing npm launcher: {name}'
+        assert (candidate_bin / name).resolve() == candidate_root / target.removeprefix('./'), name
+    selected_bin = candidate_bin
+    selection_check = 'not-applicable-historical-package-name'
+    if not historical:
+        active = Path(json.loads((controller / migration.CURRENT).read_bytes())['candidate']['root'])
+        selected_bin = root / 'adoption-bin'
+        selected_bin.mkdir()
+        for name, target in bins.items():
+            (selected_bin / name).symlink_to(old_root / target.removeprefix('./'))
+        # Import the shipped implementation in a fresh isolated interpreter. The
+        # outer harness authenticated its complete package before this point.
+        # This tests source-adoption's selector component, not a source build.
+        script = r'''
+import json, os, sys
+from pathlib import Path
+from unittest import mock
+sys.path.insert(0, sys.argv[1])
+import integration_workspace as adoption
+old, new, directory, journal = map(Path, sys.argv[2:])
+expected = json.loads((new.parents[2] / 'package.json').read_bytes())['bin']
+before = {name: os.readlink(directory / name) for name in expected}
+replace = adoption.adoption_replace_launcher
+for fail_at in range(1, len(expected) + 1):
+    calls = [0]
+    def injected(path, target):
+        calls[0] += 1
+        if calls[0] == fail_at: raise OSError('injected selector failure')
+        replace(path, target)
+    with mock.patch.object(adoption, 'adoption_replace_launcher', side_effect=injected):
+        try:
+            adoption.adoption_public_launchers(str(old), new)
+            raise AssertionError('injected selector failure did not fail')
+        except OSError as error:
+            assert 'injected selector failure' in str(error)
+    assert {name: os.readlink(directory / name) for name in expected} == before
+selection = adoption.adoption_public_launchers(str(old), new, journal=journal)
+adoption.adoption_verify_public_dispatch(selection)
+assert {row['name'] for row in selection['links']} == set(expected)
+for name, target in expected.items():
+    assert (directory / name).resolve() == new.parents[2] / target.removeprefix('./')
+# Mutation control reproduces the escaped incident: yy stays current, ypl old.
+ypl = directory / 'ypl'
+ypl.unlink(); ypl.symlink_to(before['ypl'])
+try:
+    adoption.adoption_verify_public_dispatch(selection)
+    raise AssertionError('stale ypl was not detected')
+except adoption.AdoptionError as error:
+    assert 'selector drifted' in str(error)
+assert not adoption.adoption_restore_public_launchers(selection), 'foreign successor must be preserved'
+assert os.readlink(ypl) == before['ypl']
+assert {name: os.readlink(directory / name) for name in expected} == before
+selection = adoption.adoption_public_launchers(str(old), new)
+adoption.adoption_verify_public_dispatch(selection)
+print(json.dumps({'selection': 'passed', 'stale_ypl': 'rejected', 'rollback': 'passed'}))
+'''
+        checked = subprocess.run([sys.executable, '-I', '-B', '-c', script,
+            str(candidate_root / 'dist/templates/scripts'), str(old_root / 'dist/bin/cli.mjs'),
+            str(active / 'dist/bin/cli.mjs'), str(selected_bin), str(root / 'selector-preimages.json')],
+            cwd=controller, env={**env, 'PATH': str(selected_bin) + os.pathsep + env['PATH']},
+            capture_output=True, text=True, timeout=120)
+        assert checked.returncode == 0, checked.stdout + checked.stderr
+        assert json.loads(checked.stdout.splitlines()[-1]) == {
+            'selection': 'passed', 'stale_ypl': 'rejected', 'rollback': 'passed'}
+        selection_check = 'passed'
+    probe_env = {**env, 'PATH': str(selected_bin) + os.pathsep + env['PATH']}
+    for name in ('yy', 'yylo'):
+        check = subprocess.run([str(selected_bin / name), '-q', 'scripts', 'generation', 'doctor'],
+            cwd=controller, env=probe_env, capture_output=True, text=True, timeout=120)
+        assert check.returncode == 0, check.stdout + check.stderr
+        rows = [json.loads(line) for line in check.stdout.splitlines() if line.startswith('{')]
+        assert rows[-1]['disposition'] == 'ready', rows
+    tools = root / 'launcher-probe-tools'
+    tools.mkdir()
+    marker = root / 'launcher-provider-called'
+    fake_pi = tools / 'pi'
+    write(fake_pi, b'''#!/usr/bin/env python3
+import os, pathlib, sys
+if '--version' in sys.argv:
+    print('pi 0.60.0'); raise SystemExit(0)
+pathlib.Path(os.environ['FIXTURE_LAUNCHER_PROVIDER_MARKER']).write_text('fixture-only')
+print('FIXTURE_LIVE_LAUNCHER_OK')
+''')
+    fake_pi.chmod(0o755)
+    probe_env.update(PATH=str(tools) + os.pathsep + probe_env['PATH'],
+                     FIXTURE_LAUNCHER_PROVIDER_MARKER=str(marker))
+    request = [str(selected_bin / 'ypl'), '-p', 'offline launcher admission fixture']
+    passed = subprocess.run(request, cwd=controller, env=probe_env,
+                            capture_output=True, text=True, timeout=120)
+    assert passed.returncode == 0 and marker.exists(), passed.stdout[-4000:] + passed.stderr[-4000:]
+    marker.unlink()
+    inventory = controller / migration.INVENTORY
+    before = inventory.read_bytes()
+    altered = json.loads(before); altered['packageVersion'] = '999.0.0'
+    try:
+        write(inventory, altered)
+        refused = subprocess.run(request, cwd=controller, env=probe_env,
+                                 capture_output=True, text=True, timeout=120)
+        assert refused.returncode != 0 and not marker.exists(), refused.stdout + refused.stderr
+        assert 'generation' in (refused.stdout + refused.stderr).lower(), refused.stdout + refused.stderr
+        assert inventory.read_bytes() == migration.encoded(altered), 'refused launch changed inventory'
+    finally:
+        inventory.write_bytes(before)
+    return {'commands': sorted(bins), 'roles': roles, 'mapping': 'passed',
+            'yy_admission': 'passed', 'yylo_admission': 'passed', 'ypl_admission': 'passed',
+            'ypl_unsafe_generation': 'refused-before-provider', 'source_selector': selection_check}
+
+
 def scenario(artifact, historical=False):
     fixture = TaskWorkspaceFixture()
     fixture._build_hermetic_fixture()
@@ -173,6 +288,11 @@ def scenario(artifact, historical=False):
         assert invoke('scripts', 'generation', 'doctor')['disposition'] == 'ready'
         assert invoke('integration', 'runtime-doctor')['disposition'] == 'ready'
         assert git(controller, 'rev-parse', 'product') == target
+        task_state_before_launchers = (controller / migration.STATE).read_bytes()
+        public_launchers = public_launcher_checks(root, controller, candidate_root, candidate_bin, old_root, env, historical)
+        assert (controller / migration.STATE).read_bytes() == task_state_before_launchers, 'launcher probes changed task pins/state'
+        migration.authenticate(json.loads((controller / migration.CURRENT).read_bytes())['candidate'])
+        assert git(controller, 'rev-parse', 'product') == target
         fixture.commit_task('X')
         finished = invoke('task', 'finish', 'X', '--lease-token', task['lease_token'])
         assert finished['state'] == 'QUEUED'
@@ -289,7 +409,8 @@ print(json.dumps({'type': 'agent_end', 'messages': [message]}))
                 'predecessor_kind': 'representative-fixture', 'previous_sha256': previous['sha256'],
                 'candidate_sha256': candidate['sha256'], 'managed_asset_count': len(migration.assets(migration.authenticate(candidate))),
                 'migration': 'automatic', 'doctor': 'ready', 'hydration': 'passed', 'finish': 'QUEUED',
-                'native_merge': landed['outcome'], 'independent_bytes': 'preserved', 'candidate_package': 'unchanged', 'agent_checks': agent_checks}
+                'native_merge': landed['outcome'], 'independent_bytes': 'preserved', 'candidate_package': 'unchanged', 'agent_checks': agent_checks,
+                'public_launchers': public_launchers}
     finally:
         fixture.tearDown()
 

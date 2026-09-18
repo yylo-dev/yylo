@@ -176,6 +176,19 @@ failure. Separate engine/public-dispatch suites cover malformed/unsupported
 state, occupied destinations, active pins, concurrent readers/writers,
 interruption recovery, rollback and preserved retained-runtime exits.
 
+The packed gate enumerates the artifact's complete `bin` manifest and requires a
+safe probe/classification for every command. Both aliases exercise generation
+admission; `ypl` reaches a deterministic external Pi substitute and refuses an
+unsafe generation before that substitute starts (not merely `--help`). The
+auxiliary feedback command is authenticated by its package mapping without
+starting its service. The source fixture additionally runs the shipped
+source-adoption **selector component**, injects each link-update failure, and
+proves that a deliberately stale `ypl` cannot pass complete-set readback. This is
+not a full source rebuild/adoption or process-kill recovery certification. Task
+state, product target and authenticated installed bytes must remain intact.
+Release readback rejects missing launcher coverage and binds both the JavaScript
+gate and Python scenario implementation, as well as the exact artifact/source.
+
 Predecessors in the reproducible matrix are **representative generated fixture
 artifacts**, including historical `juno-code 2.1.3-rc.0.32` identity—not purported
 published historical tarballs. Ledger and the model process are deterministic

@@ -32,15 +32,29 @@ try {
   const before = fs.readFileSync(artifact);
   const output = run('python3', ['-E', '-B', 'src/templates/maintenance/tests/controller_generation_package_acceptance.py', '--artifact', artifact]);
   const result = JSON.parse(output.trim().split('\n').at(-1));
+  const binNames = Object.keys(JSON.parse(run('tar', ['-xOf', artifact, 'package/package.json'], 10_000)).bin).sort();
+  const launcherChecksPass = row => {
+    const checks = row.public_launchers;
+    return checks && JSON.stringify(checks.commands) === JSON.stringify(binNames)
+      && JSON.stringify(Object.keys(checks.roles).sort()) === JSON.stringify(binNames)
+      && checks.mapping === 'passed' && checks.yy_admission === 'passed' && checks.yylo_admission === 'passed'
+      && checks.ypl_admission === 'passed' && checks.ypl_unsafe_generation === 'refused-before-provider'
+      && (row.profile !== 'source-controller' || checks.source_selector === 'passed');
+  };
   if (result.schema_version !== 'yylo_controller_upgrade_acceptance.v1' || result.outcome !== 'passed'
-      || result.scenarios?.length !== 2 || result.scenarios.some(row => row.candidate_sha256 !== sha256(before)
-        || row.native_merge !== 'GIT_INTEGRATED' || row.hydration !== 'passed' || row.candidate_package !== 'unchanged')
+      || result.scenarios?.length !== 2
+      || JSON.stringify(result.scenarios.map(row => row.profile).sort()) !== JSON.stringify(['historical-consumer-shape', 'source-controller'])
+      || result.scenarios.some(row => row.candidate_sha256 !== sha256(before)
+        || row.native_merge !== 'GIT_INTEGRATED' || row.hydration !== 'passed' || row.candidate_package !== 'unchanged'
+        || !launcherChecksPass(row))
       || sha256(fs.readFileSync(artifact)) !== sha256(before)) throw new Error('Contradictory packed acceptance result');
   const sourceSha = run('git', ['rev-parse', 'HEAD'], 10_000).trim();
   const sourceDirty = Boolean(run('git', ['status', '--porcelain'], 10_000).trim());
+  const gateBytes = Buffer.concat([fs.readFileSync(fileURLToPath(import.meta.url)),
+    fs.readFileSync(path.join(root, 'src/templates/maintenance/tests/controller_generation_package_acceptance.py'))]);
   const evidence = { ...result, artifact: { sha256: sha256(before), bytes: before.length },
-    source: { sha: sourceSha, dirty: sourceDirty },
-    gate_sha256: sha256(fs.readFileSync(fileURLToPath(import.meta.url))) };
+    source: { sha: sourceSha, dirty: sourceDirty }, public_launcher_coverage: 'manifest-complete.v1',
+    gate_sha256: sha256(gateBytes) };
   const bytes = JSON.stringify(evidence, null, 2) + '\n';
   if (report) fs.writeFileSync(report, bytes, { flag: 'wx', mode: 0o600 });
   process.stdout.write(bytes);
