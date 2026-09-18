@@ -259,7 +259,8 @@ preflight_command_shaped_invocation() {
 
 read_runtime_version() {
     local runtime="$1" output
-    output="$(YYLO_PREFLIGHT_ONLY= YYLO_RUNTIME_PROBE=1 "$YYLO_NODE_EXECUTABLE" "$runtime" --version 2>/dev/null)" || return 1
+    # Probes are not lifecycle owners and must not consume the continuation.
+    output="$(YYLO_PREFLIGHT_ONLY= YYLO_RUNTIME_PROBE=1 YYLO_WRAPPER_LIFECYCLE= "$YYLO_NODE_EXECUTABLE" "$runtime" --version 2>/dev/null)" || return 1
     printf '%s\n' "$output" | tail -n 1 | sed -E 's/^yylo[[:space:]]+//; s/^v//'
 }
 
@@ -372,6 +373,11 @@ route_registered_product_control() {
     export JUNO_CONTROL_EFFECTIVE_ROOT="$controller"
     export JUNO_CONTROL_OPERATION="$effective_operation"
     cd "$controller"
+    # A compatible continuation-capable runtime owns completion. Replace the
+    # wrapper rather than finalizing again after the runtime unlinks its state.
+    if grep -q 'YYLO_WRAPPER_LIFECYCLE' "$runtime" 2>/dev/null; then
+        exec -a "$YYLO_LAUNCH_SURFACE_VALUE" "$YYLO_NODE_EXECUTABLE" "$runtime" "$@"
+    fi
     run_owned_command "$YYLO_NODE_EXECUTABLE" "$runtime" "$@"
     ROUTED_COMMAND_STATUS=$?
     return 0
