@@ -440,7 +440,11 @@ setInterval(() => {}, 1000);
     ]);
   });
 
-  it('wrapper-finalizes a successful same-version pinned runtime without continuation support', async () => {
+  it.each([
+    { continuation: false, exitCode: 0 },
+    { continuation: true, exitCode: 0 },
+    { continuation: true, exitCode: 17 },
+  ])('finalizes a same-version pinned runtime once: %j', async ({ continuation, exitCode }) => {
     const root = await temp('pinned-runtime');
     const controller = path.join(root, 'controller');
     const product = path.join(root, 'product');
@@ -460,7 +464,27 @@ setInterval(() => {}, 1000);
     expect(git(['config', '--worktree', 'juno.workspace.roleAuthority', 'protected-integration.v1'], product).status).toBe(0);
     const packageJson = await fs.readJson(path.resolve('package.json'));
     const runtime = path.join(controller, 'pinned-runtime.mjs');
-    await fs.writeFile(runtime, `if (process.argv.includes('--version')) console.log('yylo ${packageJson.version}'); else process.exitCode = 0;\n`);
+    await fs.writeFile(runtime, continuation ? `
+import { readFileSync, unlinkSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+const fd = Number(process.env.YYLO_WRAPPER_LIFECYCLE);
+if (process.argv.includes('--version')) {
+  // The real CLI consumes continuation before dispatching its version probe.
+  // Any capability here would let the probe steal the eventual runtime's state.
+  if (Number.isInteger(fd) && fd >= 3) process.exit(71);
+  console.log('yylo ${packageJson.version}');
+} else {
+  const state = JSON.parse(readFileSync(fd, 'utf8'));
+  const finished = spawnSync(process.execPath, [
+    ${JSON.stringify(path.join(wrapperFixtureRoot, 'bin', 'invocation-boundary.mjs'))},
+    'finish', '${exitCode}', state.stateFile,
+  ], { env: { ...process.env, YYLO_WRAPPER_LIFECYCLE: '3' }, stdio: ['ignore', 'inherit', 'inherit', fd] });
+  if (finished.status !== 0) process.exit(72);
+  unlinkSync(state.stateFile);
+  process.stdout.write(readFileSync(0, 'utf8'));
+  process.exitCode = ${exitCode};
+}
+` : `if (process.argv.includes('--version')) console.log('yylo ${packageJson.version}'); else process.exitCode = ${exitCode};\n`);
     expect(git(['config', '--worktree', 'juno.controller.runtimeExecutable', runtime], controller).status).toBe(0);
 
     // The fixture yy already resolves to the same installation as its yylo
@@ -474,14 +498,18 @@ setInterval(() => {}, 1000);
         PATH: `${path.dirname(yy)}${path.delimiter}${process.env.PATH ?? ''}`,
         XDG_STATE_HOME: path.join(root, 'state'),
       },
+      input: 'routed stdin survives\n',
       encoding: 'utf8', timeout: 15_000,
     });
-    expect(result.status, result.stderr).toBe(0);
+    expect(result.status, result.stderr).toBe(exitCode);
+    expect(result.stderr).not.toContain('invocation boundary failed');
+    if (continuation) expect(result.stdout).toBe('routed stdin survives\n');
     const written = await events(product, root);
     expect(written.filter((event) => event.event_type === 'invocation_started')).toHaveLength(1);
     expect(written.filter((event) => event.event_type === 'invocation_finished')).toEqual([
-      expect.objectContaining({ launch_surface: 'yy', status: 'success', exit_code: 0 }),
+      expect.objectContaining({ launch_surface: 'yy', status: exitCode === 0 ? 'success' : 'failure', exit_code: exitCode }),
     ]);
+    expect(new Set(written.map(event => event.request_id)).size).toBe(1);
   }, 30_000);
 
   it('terminates an unauthenticated controller refusal before provider dispatch', async () => {
