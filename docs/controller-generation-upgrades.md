@@ -5,11 +5,58 @@ controller. A package generation owns scripts, instruction identity, managed
 inventory, controller policy and executable selection together. Updating just one
 of these is not recovery.
 
-## First use and diagnosis
+## Harness-handoff diagnostics
 
-Normal task/merge execution and agent startup assess the generation before local
-runtime selection. Exact recognized preimages migrate automatically, without a
-prompt or network installation. Read-only commands do not migrate:
+The standalone Python service regression suites can use a task-local Python 3.12
+venv with the hash-pinned `test_pi_service/requirements.lock` (`uv pip sync --python
+.venv/bin/python --require-hashes test_pi_service/requirements.lock`). Do not borrow
+another checkout's interpreter packages.
+
+`YYLO_STARTUP_TIMING=1` opts into a bounded JSON diagnostic on service stderr
+when a shipped Pi, Claude, Codex or Gemini service successfully launches its
+harness executable. Pi's terminal and piped paths both observe the final harness,
+not the intermediate Python service. Normal invocations emit no timing diagnostic.
+The observation contains only the harness name, launch index, elapsed milliseconds,
+clock and origin precision; it contains no prompt, session, path or model data.
+It never imposes a runtime deadline or changes a launch failure.
+
+The public shell wrapper resets the origin at entry, and retained Node runtime
+redispatch preserves it. Service entry consumes it before harness descendants
+launch. Bash without `EPOCHREALTIME`, missing/malformed origins and backwards clock
+movement produce no sample. `unix_wall` and `origin_precision_us` describe the
+clock representation, not guaranteed accuracy. Caller-provided environment data
+is advisory, never authentication or accepted performance evidence.
+
+This is **T_handoff**, not internal session readiness, provider acknowledgment or
+first output. The diagnostic marks successful exec, not completed prompt-pipe
+consumption. Validate exact prompt/resume routing separately with isolated harness
+fixtures and cross-check wrapper-to-entry timing externally using a monotonic
+clock. Neither a component sample nor this optional diagnostic alone establishes
+the five-second end-to-end acceptance budget.
+
+## Ordinary execution and explicit upgrade
+
+Normal task/merge execution and agent startup authenticate the selected active
+runtime under a reader lease. They never discover candidate artifacts, plan an
+upgrade, migrate, repair or recover an interrupted transaction. Installing a new
+global package does not activate it: ordinary execution uses the authenticated
+retained active executable unless the invoking package is an exact-byte authenticated
+copy of that active artifact. This comparison uses the already authenticated active
+archive bytes, verifies every file and execution-directory entry at the distinct
+invoking root, and includes those inputs in the reader guard's checked engine reuse.
+It does not discover a candidate or infer trust from version equality. Differing,
+Git-owned, symlinked or poisoned copies still dispatch only to the safe retained
+runtime. Legacy controllers/runtimes unable to guarantee this
+explicit-only contract refuse with maintenance guidance instead of being reentered.
+
+Activate exact recognized preimages explicitly, without a prompt or network
+installation:
+
+```sh
+yy scripts generation upgrade
+```
+
+Read-only diagnostics may assess a prospective candidate but do not migrate:
 
 ```sh
 yy scripts generation doctor
@@ -24,11 +71,32 @@ applicable attempt/ACTIVE-lease pins directly, without discovering a candidate o
 building a hypothetical migration plan. Authentication and schema facts are reused
 only within one assessment and only for identical evidence tuples; different roots
 and later invocations still require authentication. This read-only observation is
-not a transferable admission proof. Dispatch retains its reader-lease readback.
-Different/global package roots still follow the first-use behavior described above;
-this optimization does not introduce an explicit-only upgrade command or certify
-provider/session startup timing. Workspace topology checks remain separate. A prospective migration is
+not a transferable admission proof. Same-artifact distinct-root comparison avoids
+redundant retained redispatch, not distinct-root authentication. Dispatch acquires the reader lease before its
+single active assessment, retaining post-lock race protection. Different/global
+package roots dispatch only to the authenticated active runtime with an authenticated
+`explicit-only-v1` package capability; version equality is not authority.
+
+The invocation-owned reader guard can retain the exact authenticated file digests,
+directory entries, absent repository/fence markers and Git query results in memory.
+Engine entry reuses that assessment only for the same controller/package roots,
+unchanged Git environment, a live reader guard and checked unchanged inputs. It
+rereads bytes and directory/Git observations; it does not repeat archive extraction,
+schema parsing or pin authentication. Input changes invalidate reuse. Direct engine
+callers without that checked guard validate independently. Neither callers nor
+inherited environment variables can supply a proof, and no persistent trust cache
+or serialized proof is created. Ordinary task-pin selection likewise uses active
+readiness rather than a hypothetical upgrade plan. This does not certify provider/session
+startup timing. Workspace topology checks remain separate. A prospective migration is
 not a claim that an old controller has already been upgraded.
+
+Generation assessment/explicit upgrade and engine dependency/backend/startup-hook
+waits emit phase-specific stderr progress immediately and every four seconds while
+pending. Quiet CLI/engine modes suppress these notices. Each timer is invocation-local,
+clears on success or failure, owns no cancellation authority and never imposes a
+performance deadline. Shipped Python services likewise report their pre-harness wait
+and stop at successful exec; their progress flag is removed before harness children.
+Custom hooks still run in their original order with their original failure policy.
 
 Both package generations require authenticated artifact evidence. Supported
 sources are installation-owned `.yylo-generation-evidence.json` or npm's installed
@@ -43,9 +111,10 @@ never authenticates a candidate. Missing/evicted evidence still refuses without
 network acquisition. Discovery reads at most 20,000 index files / 32 MiB and 2,048
 unique candidate artifacts, with a 30-second discovery deadline; a larger cache
 requires an explicit artifact-bound installation rather than unbounded startup
-work. Nonregular cache entries and ambiguous repository paths are rejected.
+work during explicit maintenance/diagnostics, never ordinary admission. Nonregular
+cache entries and ambiguous repository paths are rejected.
 
-Before automatic activation, the candidate is retained in a content-addressed
+Before explicit activation, the candidate is retained in a content-addressed
 prefix under `${XDG_STATE_HOME:-$HOME/.local/state}/yylo/installed-generations`.
 This uses the authenticated tarball and offline npm with lifecycle scripts,
 network access, audit and funding requests disabled. If dependencies are absent
@@ -70,8 +139,8 @@ the old **executable**, not merely old scripts under the new executable. If that
 complete runtime cannot be proved safe, the command refuses precisely instead of
 promising availability.
 
-Interrupted owned transactions are resumed on first execution. Explicit recovery
-is independent of old task admission:
+Interrupted transactions block ordinary execution without mutation. Explicit
+recovery is independent of old task admission:
 
 ```sh
 yy scripts generation resume EXACT_TRANSACTION_ID
@@ -85,7 +154,7 @@ or reuse an unrelated recovery receipt to force admission.
 ## Explicit mixed-predecessor recovery
 
 Older source adoption/rebind transactions may have moved the runtime while leaving
-a previous instruction inventory. Automatic upgrade deliberately refuses this
+a previous instruction inventory. Normal explicit upgrade deliberately refuses this
 mixed state; repeated global installation or force-copying files is not recovery.
 The installed maintenance engine offers an exact, separately reviewed repair:
 
@@ -107,7 +176,7 @@ retained executable; apply cannot silently substitute another installation.
 It owns only package-declared CLI destinations. Explicit
 apply backs up every replaced preimage in the transaction journal, refuses stale
 inputs, preserves independent skills/unrelated files and task state, and uses the
-same fenced rollback and operational readback as automatic migration. Customized
+same fenced rollback and operational readback as normal explicit upgrade. Customized
 CLI-owned instructions may be replaced **only after this explicit review**; their
 exact prior bytes remain in `previous/`. Automatic startup never chooses repair.
 Malformed inventory, foreign occupied new destinations, bad package evidence,
@@ -150,7 +219,8 @@ node scripts/verify-managed-assets.mjs --check-dist --check-pack
 
 The packed gate installs offline in disposable registered fixtures and consumes an
 unmodified npm artifact. It exercises source and consumer targets separately:
-automatic migration, compatible future instruction revision, all runtime doctors,
+unchanged/refused ordinary launch before explicit activation, explicit upgrade and
+same-artifact repeat, compatible future instruction revision, all runtime doctors,
 clean frozen hydration, task finish, native merge, independent byte preservation,
 and deterministic successful/failing agent processes with secondary checkpoint
 failure. Separate engine/public-dispatch suites cover malformed/unsupported

@@ -16,6 +16,7 @@ from typing import List, Optional, Tuple
 
 from environment_boundary import (
     ModelShortcutError,
+    record_harness_handoff,
     resolve_model_shortcut,
     sanitize_current_process_environment,
     sanitize_model_shortcut_environment,
@@ -421,6 +422,8 @@ Examples:
                 universal_newlines=True,
                 cwd=self.project_path,
             )
+
+            record_harness_handoff("gemini")
 
             if self._stdin_prompt and process.stdin:
                 try:

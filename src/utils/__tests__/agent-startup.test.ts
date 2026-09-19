@@ -6,10 +6,14 @@ import { execFileSync } from 'node:child_process';
 import { AgentStartupError, agentStartupHooks, checkAgentReadiness, errorMessage, resolveAgentWorkspace } from '../agent-startup.js';
 import { getDefaultHooks } from '../../templates/default-hooks.js';
 
-const mocks = vi.hoisted(() => ({ ledger: vi.fn(), runtime: vi.fn() }));
+const mocks = vi.hoisted(() => ({ ledger: vi.fn(), runtime: vi.fn(), reuse: vi.fn(), assertHeld: vi.fn(), release: vi.fn() }));
 vi.mock('../../cli/commands/ledger.js', () => ({ checkLedgerReadiness: mocks.ledger }));
-vi.mock('../controller-generation-startup.js', () => ({ assessControllerGeneration: mocks.runtime }));
-vi.mock('../controller-generation-migration.js', () => ({ packagedGenerationRoot: () => '/installed/package' }));
+vi.mock('../controller-generation-startup.js', () => ({ ensureControllerGeneration: mocks.runtime,
+  reuseControllerCommandAdmission: mocks.reuse }));
+vi.mock('../controller-generation-migration.js', () => ({
+  packagedGenerationRoot: () => '/installed/package',
+  acquireControllerGenerationReadLease: vi.fn(async () => Object.assign(mocks.release, { assertHeld: mocks.assertHeld })),
+}));
 let temp: string;
 let saved: NodeJS.ProcessEnv;
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: 'pipe' }).trim();
@@ -72,6 +76,19 @@ describe('workspace-owned agent startup', () => {
     expect(git(task, 'status', '--porcelain')).toBe(''); expect(git(root, 'status', '--porcelain')).toBe('');
     expect(() => resolveAgentWorkspace(task, temp)).toThrow(AgentStartupError);
     expect(resolveAgentWorkspace(task, root).path).toBe(root);
+  });
+  it('reuses only the checked command admission and still checks Ledger', async () => {
+    mocks.reuse.mockResolvedValueOnce(true);
+    await checkAgentReadiness(resolveAgentWorkspace(controller()));
+    expect(mocks.runtime).not.toHaveBeenCalled();
+    expect(mocks.ledger).toHaveBeenCalledOnce();
+  });
+  it('refuses a lost reader guard before Ledger readiness', async () => {
+    const authority = resolveAgentWorkspace(controller());
+    mocks.assertHeld.mockImplementationOnce(() => { throw new Error('generation_read_lock_lost'); });
+    await expect(checkAgentReadiness(authority)).rejects.toThrow('generation_read_lock_lost');
+    expect(mocks.ledger).not.toHaveBeenCalled();
+    expect(mocks.release).toHaveBeenCalledOnce();
   });
   it('does not swallow incomplete registration or wrong branch failures', () => {
     const root = controller();

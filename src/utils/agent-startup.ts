@@ -2,8 +2,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { hasSimpleWorkspaceHint, resolveController, type ControllerResolution } from './controller-resolver.js';
-import { assessControllerGeneration } from './controller-generation-startup.js';
-import { packagedGenerationRoot } from './controller-generation-migration.js';
+import { ensureControllerGeneration, reuseControllerCommandAdmission } from './controller-generation-startup.js';
+import { acquireControllerGenerationReadLease, packagedGenerationRoot } from './controller-generation-migration.js';
 import { checkLedgerReadiness } from '../cli/commands/ledger.js';
 import { getDefaultHooks } from '../templates/default-hooks.js';
 import type { Hooks, HookType } from '../types/index.js';
@@ -83,14 +83,19 @@ export function resolveAgentWorkspace(cwd: string, delegatedController?: string,
 export async function checkAgentReadiness(authority: ControllerResolution): Promise<void> {
   if (authority.role === 'unregistered') return;
   try {
-    if (authority.role !== 'simple') {
-      const assessment = await assessControllerGeneration(authority.path, packagedGenerationRoot());
-      if (assessment.disposition !== 'ready') {
-        const detail = assessment.disposition === 'refused'
-          ? `${assessment.detail}; ${assessment.safeNextAction}`
-          : 'run through the public CLI first-use boundary or inspect yy scripts generation doctor.';
-        throw new Error(`Controller generation ${assessment.disposition}; ${detail}`);
-      }
+    if (authority.role !== 'simple'
+        && !await reuseControllerCommandAdmission(authority.path, packagedGenerationRoot())) {
+      const release = await acquireControllerGenerationReadLease(authority.path);
+      try {
+        const assessment = await ensureControllerGeneration(authority.path, packagedGenerationRoot());
+        release.assertHeld();
+        if (assessment.disposition !== 'ready') {
+          const detail = assessment.disposition === 'refused'
+            ? `${assessment.detail}; ${assessment.safeNextAction}`
+            : 'run through the public CLI active-runtime boundary or use yy scripts generation upgrade.';
+          throw new Error(`Controller generation ${assessment.disposition}; ${detail}`);
+        }
+      } finally { await release(); }
     }
     await checkLedgerReadiness({ cwd: authority.path });
   } catch (error) {
