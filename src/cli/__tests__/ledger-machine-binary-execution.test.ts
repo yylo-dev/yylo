@@ -33,7 +33,7 @@ beforeAll(async () => {
   await fs.writeFile(path.join(bin, 'yylo-ledger'), `#!/usr/bin/env python3
 import argparse, json, os, sys
 if sys.argv[1:] == ['--version']:
-    print('yylo-ledger 0.3.1'); sys.exit(0)
+    print('yylo-ledger 0.3.2'); sys.exit(0)
 with open(os.path.join(os.getcwd(), 'argv.json'), 'w') as f: json.dump(sys.argv[1:], f)
 p = argparse.ArgumentParser()
 p.add_argument('--config'); p.add_argument('--format', '-f'); p.add_argument('--raw', action='store_true')

@@ -11,7 +11,7 @@ describe('explicit controller upgrade release/finish gate contract', () => {
     const guidance = fs.readFileSync('docs/controller-generation-upgrades.md', 'utf8');
     expect(guidance).toContain('representative generated fixture');
     expect(guidance).toContain('before task finish');
-    expect(guidance).toContain('prompt or network installation');
+    expect(guidance.replace(/\s+/g, ' ')).toContain('prompt or network installation');
   });
 
   it('requires exact artifact-bound evidence in maintainer preparation and readback', () => {

@@ -23,8 +23,8 @@ describe('YYLO release documentation identity', () => {
 
     expect([acceptance, hook, merge].join('\n')).not.toMatch(/juno[-_ ](?:code|ledger)/i);
     expect(readme).toContain('pypi.org/project/yylo-ledger');
-    expect(readme).toContain("pip install 'yylo-ledger==0.3.1'");
-    expect(readme).toContain('exact Ledger compatibility policy `0.3.1`');
+    expect(readme).toContain("pip install 'yylo-ledger==0.3.2'");
+    expect(readme).toContain('exact Ledger compatibility policy `0.3.2`');
     expect(readme).not.toContain('pypi.org/project/juno-ledger');
     expect(readme).not.toContain('yy release train');
     expect(security).toContain('`YYLO_*` prefix for application settings');
