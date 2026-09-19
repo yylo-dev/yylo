@@ -509,7 +509,21 @@ def install_runtime_scripts(executable: Path, controller: Path) -> dict[str, Any
     return {"source": str(source), "file_count": len(entries), "sha256": digest(entries)}
 
 
+def package_uses_ledger_wiki(executable: Path) -> bool:
+    declaration = executable.expanduser().resolve().parent.parent / "templates/managed-assets.json"
+    if not declaration.is_file():
+        return False  # Authenticated historical packages retain their old contract.
+    value = json.loads(declaration.read_text()).get("ledgerWiki")
+    if value is not None and (not isinstance(value, dict)
+                             or value.get("schemaVersion") != "yylo_package_wiki_sources.v1"):
+        raise BoundaryError("unsupported package Ledger wiki declaration")
+    return value is not None
+
+
 def packaged_controller_wiki(executable: Path) -> tuple[dict[str, bytes], dict[str, Any]]:
+    if package_uses_ledger_wiki(executable):
+        return {}, {"runtime_authority": "ledger", "file_count": 0,
+                    "activation": "requires authenticated package publication and generation binding"}
     source = executable.expanduser().resolve().parent.parent / "templates/wiki/controller"
     if not source.is_dir() or source.is_symlink():
         raise BoundaryError(f"installed runtime is missing packaged controller wiki: {source}")
@@ -1085,7 +1099,10 @@ def inspect(root: Path, policy: dict[str, Any], *, expected_branch: str | None =
         preservation_receipt_ok = False
     canonical_prefixes = (".juno_task/tasks", ".juno_task/ledger", ".juno_task/specs")
     missing_canonical = [prefix for prefix in canonical_prefixes if not any(name.startswith(prefix + "/") for name in names)]
-    missing_generated = [name for name in policy["generated_metadata"] if name not in names]
+    selected_runtime = git(root, "config", "--worktree", "--get", "juno.controller.runtimeExecutable", check=False)
+    ledger_guidance = bool(selected_runtime and package_uses_ledger_wiki(Path(selected_runtime)))
+    missing_generated = [name for name in policy["generated_metadata"] if name not in names
+                         and not (ledger_guidance and name.startswith(".juno_task/wiki/"))]
     generated_contract_ok = False
     agent_profile_diagnostic = {"status": "missing", "findings": ["agentProfile is absent; package defaults remain active"],
                                 "next_command": "yy migrate inventory --help"}
@@ -1189,6 +1206,20 @@ def inspect(root: Path, policy: dict[str, Any], *, expected_branch: str | None =
             runtime_ok = False
     controller_wiki_core = all(
         f".juno_task/wiki/controller/{name}" in names for name in CORE_CONTROLLER_WIKI)
+    if runtime_ok and package_uses_ledger_wiki(Path(runtime_executable)):
+        # Pending evacuation is not activation. New packages do not materialize
+        # runbooks; active controllers must prove the exact Ledger binding.
+        controller_wiki_core = not require_active
+        if require_active:
+            package_root = Path(runtime_executable).resolve().parent.parent.parent
+            helper = package_root / "dist/templates/maintenance/package_wiki_publication.py"
+            try:
+                verified = subprocess.run([sys.executable, "-I", "-B", str(helper), "--verify-binding", str(root),
+                                           "--package-root", str(package_root)],
+                                          stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
+                controller_wiki_core = verified.returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                controller_wiki_core = False
     checks = {"branch_exact": expected_branch is None or branch == expected_branch, "single_root_ancestry": len(ancestry_roots) == 1,
               "root_boundary": not [name for name in forbidden_root if not agent_surface_path(name)],
               "root_preservation": preservation_receipt_ok,
