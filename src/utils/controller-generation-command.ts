@@ -117,7 +117,12 @@ export async function prepareControllerCommand(cwd: string, commandArgs: string[
   const packageRoot = packagedGenerationRoot();
   if (kind === 'maintenance') {
     const operation = commandArgs[2];
-    if (operation === 'doctor') {
+    if (operation === 'readiness') {
+      const { controllerGenerationReadiness } = await import('./controller-generation-readiness.js');
+      const report = await controllerGenerationReadiness(controller, packageRoot);
+      console.log(JSON.stringify(report));
+      if (report.disposition !== 'ready') process.exitCode = 2;
+    } else if (operation === 'doctor') {
       const assessment = await assessControllerGeneration(controller, packageRoot);
       // Plans contain exact preimage bytes (including Git config): diagnostics
       // expose identity and paths, never dump those private payloads to stdout.
@@ -154,7 +159,7 @@ export async function prepareControllerCommand(cwd: string, commandArgs: string[
       const id = commandArgs[3] ?? '';
       if (!/^[a-f0-9]{64}$/.test(id ?? '')) throw new Error('Exact generation transaction ID required');
       console.log(JSON.stringify(await recoverControllerGeneration(controller, id, operation === 'rollback')));
-    } else throw new Error('Use yy scripts generation doctor|upgrade|repair-plan|repair-apply|resume|rollback');
+    } else throw new Error('Use yy scripts generation readiness|doctor|upgrade|repair-plan|repair-apply|resume|rollback');
     return true;
   }
   if (kind === 'read') {

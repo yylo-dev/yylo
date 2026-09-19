@@ -151,6 +151,65 @@ Recovery checks journal identity, current endpoints and independent changes.
 Never remove a fence, overwrite scripts, rewrite a lease, retarget a product ref,
 or reuse an unrelated recovery receipt to force admission.
 
+## Optional combined readiness report
+
+After a pull, from the registered controller, run:
+
+```sh
+yy scripts generation readiness
+```
+
+This optional read-only command emits `yylo_controller_readiness.v1` JSON and
+exits 0 for `ready`, 2 for `action_required`. It is not a task/agent prerequisite,
+a new version authority or an activation command. The checks remain separate:
+
+- `active`: reader-protected ordinary admission of the selected runtime, including
+  managed scripts/inventory, source compatibility and applicable historical pins.
+  A safe retained runtime passes even when the invoking global package differs.
+- `source`: the assessed registered local target SHA, with `remote_verified: false`.
+  No fetch or remote synchronization claim is made.
+- `launchers`: the invoking package's authenticated complete `bin` manifest checked
+  against PATH, using the existing source-adoption selector preflight. All commands,
+  including auxiliary commands, must select their own declared role. Missing
+  explicit installation evidence or mixed/shadowed commands require review; version
+  equality and a successful `yy` alone are insufficient.
+- `candidate`: `current`, `available`, or `action_required`. Available means a
+  prospective authenticated upgrade, **not** an unsafe active runtime or a required
+  upgrade. Actual source incompatibility is reported by active admission; candidate
+  provenance failure does not erase a successful active check. Private migration
+  preimages are never included in this report.
+
+The aggregate is conservative: unknown required checks yield `action_required`,
+not guessed compatibility. This diagnostic is an observation, not a transferable
+admission token or a promise that inputs cannot change afterward. Ordinary startup
+continues to use its own single admission, without running this report. It never
+installs, activates, repairs, prunes, retargets refs or writes installation bytecode.
+
+No additional portable requirement schema is introduced. Existing package
+`yyloControllerGeneration` capability, managed-assets instruction declaration,
+source-runtime compatibility checks and external release manifest/artifact evidence
+remain the authorities. An artifact's final digest belongs in the external release
+manifest or project pin, never inside its own tarball. Installation prefixes,
+launcher paths, generation receipts and task pins remain machine-local.
+
+For example, machines A and B can assess the same source SHA independently. A's
+complete launchers and authenticated active runtime may pass, while B's stale
+`ypl` produces `action_required`. A does not certify B. A newer installed candidate
+on B alone does not require activation; inspect active source compatibility first.
+A completed source-adoption transaction likewise does not certify generation
+readiness, and historical task pins need not match the latest candidate.
+
+If candidate discovery refuses cache bounds, preserve the cache and retained
+runtimes. Obtain the exact release tarball and externally published release-manifest
+digest (or registry integrity), verify those bytes, and use the supported explicit
+artifact installation/rebind workflow (`runtime-install-rebind` in the public
+migration help) under separate installation review. That workflow is a mutation, not part of this
+check. Review its exact package/version, artifact, prefix and receipt before
+execution; then explicitly activate and rerun diagnostics on that machine. Never
+invent `.yylo-generation-evidence.json`, raise cache bounds, or delete evidence to
+make this report pass. Source adoption and mixed-predecessor repair retain their
+own reviewed procedures below.
+
 ## Explicit mixed-predecessor recovery
 
 Older source adoption/rebind transactions may have moved the runtime while leaving

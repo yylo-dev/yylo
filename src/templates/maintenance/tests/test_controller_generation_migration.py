@@ -125,6 +125,45 @@ class GenerationTests(unittest.TestCase):
     def plan(self):
         return migration.plan(self.controller, self.candidate, self.previous)
 
+    def test_readiness_context_authenticates_all_launchers_without_writes(self):
+        package = Path(self.candidate['root'])
+        bins = {'yy': 'dist/bin/yylo.sh', 'yylo': 'dist/bin/yylo.sh',
+                'ypl': 'dist/bin/ypl.sh', 'feedback-yylo': 'dist/bin/feedback.sh'}
+        manifest = json.loads((package / 'package.json').read_text())
+        manifest['bin'] = bins
+        write(package / 'package.json', manifest)
+        for target in bins.values():
+            write(package / target, b'#!/bin/sh\nexit 0\n')
+            (package / target).chmod(0o755)
+        evidence = self.pack(package)
+        write(package / '.yylo-generation-evidence.json', evidence)
+        homes = [self.root / 'machine-a', self.root / 'machine-b']
+        for home in homes:
+            home.mkdir()
+            for name, target in bins.items():
+                (home / name).symlink_to(package / target)
+        def observe(home):
+            # Retain Git on PATH for registered local-source observation.
+            with mock.patch.dict(os.environ, {'PATH': str(home) + os.pathsep + os.environ['PATH']}):
+                return migration.diagnostic_context(self.controller, package)
+        def snapshot():
+            return {str(p): p.read_bytes() for p in self.root.rglob('*') if p.is_file() and not p.is_symlink()}
+        before = snapshot()
+        first = observe(homes[0])
+        self.assertEqual(first['source']['sha'], git(self.controller, 'rev-parse', 'product'))
+        self.assertFalse(first['source']['remote_verified'])
+        self.assertEqual(first['launchers']['status'], 'pass')
+        self.assertEqual(len(first['launchers']['commands']), 4)
+        self.assertEqual(snapshot(), before)
+        (homes[1] / 'ypl').unlink()
+        (homes[1] / 'ypl').symlink_to(package / 'dist/bin/yylo.sh')
+        self.assertEqual(observe(homes[1])['launchers']['status'], 'action_required')
+        self.assertEqual(observe(homes[0])['launchers']['status'], 'pass')
+        (package / 'dist/bin/ypl.sh').write_bytes(b'#!/bin/sh\nexit 1\n')
+        self.assertEqual(observe(homes[0])['launchers']['status'], 'action_required')
+        write(package / '.yylo-generation-evidence.json', {'invalid': True})
+        self.assertEqual(observe(homes[0])['launchers']['status'], 'action_required')
+
     def test_authentication_compares_raw_bytes_without_building_journal_images(self):
         with mock.patch.object(migration, 'snapshot', side_effect=AssertionError('journal image on auth path')):
             package = migration.authenticate(self.candidate)

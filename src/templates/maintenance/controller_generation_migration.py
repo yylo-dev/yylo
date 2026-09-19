@@ -1193,9 +1193,29 @@ def pinned_task_runtime(root: Path, task_id: str) -> dict[str, Any]:
             "script": str(Path(pin["generation"]["root"]) / "dist/templates/scripts/task_workspace.py")}
 
 
+def diagnostic_context(root: Path, package_root: Path) -> dict[str, Any]:
+    """Optional observation only; reuse source authority and complete bin checks."""
+    import integration_workspace
+    result: dict[str, Any] = {"source": {"status": "action_required"},
+                              "launchers": {"status": "action_required"}}
+    try:
+        authority = registration(root)
+        result["source"] = {"status": "pass", "sha": authority["target_sha"],
+                            "remote_verified": False}
+    except (Refusal, endpoints.BoundaryError, OSError, ValueError) as exc:
+        result["source"]["reason"] = str(exc)
+    try:
+        links = integration_workspace.adoption_public_launcher_preflight(
+            str(package_root / "dist/bin/cli.mjs"))
+        result["launchers"] = {"status": "pass", "commands": links}
+    except (integration_workspace.AdoptionError, OSError, ValueError) as exc:
+        result["launchers"]["reason"] = str(exc)
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(allow_abbrev=False)
-    parser.add_argument("operation", choices=["plan", "repair-plan", "discover", "retain", "apply", "resume", "rollback", "ready", "hold-lock", "hold-read", "task-pin", "runtime-ready", "active-ready"])
+    parser.add_argument("operation", choices=["plan", "repair-plan", "discover", "retain", "apply", "resume", "rollback", "ready", "hold-lock", "hold-read", "task-pin", "runtime-ready", "active-ready", "diagnostic-context"])
     parser.add_argument("--controller", type=Path, required=True)
     parser.add_argument("--request", type=Path)
     parser.add_argument("--transaction-id")
@@ -1245,7 +1265,9 @@ def main() -> int:
                 else:
                     sys.stdin.readline()
             return 0
-        if args.operation == "active-ready":
+        if args.operation == "diagnostic-context":
+            answer = diagnostic_context(args.controller.resolve(), Path(request['package_root']))
+        elif args.operation == "active-ready":
             answer = active_runtime_ready(args.controller.resolve(), invocation_root=invocation_root)
         elif args.operation == "task-pin":
             answer = pinned_task_runtime(args.controller, request["task_id"])
