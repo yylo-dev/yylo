@@ -1520,6 +1520,42 @@ class DoctorBatchReadTests(unittest.TestCase):
             self.assertNotIn("PRIVATE", str(failure.exception))
 
 
+class RetiredTaskExecutionTests(unittest.TestCase):
+    def test_runtime_refuses_before_controller_resolution_or_audit(self) -> None:
+        for operation in ("run", "resume", "recover-predispatch", "recover-wall-budget"):
+            with self.subTest(operation=operation), \
+                    mock.patch.object(task_runtime, "exact_root") as resolve, \
+                    mock.patch.object(task_runtime, "record_control_audit") as audit, \
+                    mock.patch.object(task_runtime, "managed_task_run") as launch, \
+                    contextlib.redirect_stderr(io.StringIO()) as stderr:
+                result = task_runtime.main([operation, "--task", "ABC123",
+                                            "--controller", "/missing-controller"])
+                self.assertEqual(result, 2)
+                self.assertIn("managed_task_execution_retired", stderr.getvalue())
+                resolve.assert_not_called()
+                audit.assert_not_called()
+                launch.assert_not_called()
+
+    def test_historical_readiness_never_admits_resume_or_changes_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            controller = Path(temporary)
+            root = controller / ".juno_task/runtime/lifecycle-runs/task/ABC123"
+            attempt = root / "historical"
+            attempt.mkdir(parents=True)
+            (root / "latest.json").write_text(json.dumps({"run_id": "historical", "terminal": False}))
+            (attempt / "journal.json").write_text(json.dumps({
+                "run_id": "historical", "state": "NEEDS_DECISION", "terminal": False,
+                "events": [{"type": "ERROR", "message": "settlement failed"}]}))
+            before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+            for state in ("WORKING", "QUEUED", "MERGED"):
+                result = task_runtime._task_resume_projection(controller, "ABC123", {"state": state})
+                self.assertFalse(result["admitted"])
+                self.assertEqual(result["classification"], "retired")
+                self.assertEqual(result["owner_command"], "yy task lease-status ABC123")
+                self.assertIsNone(result["restart_stage"])
+            self.assertEqual(before, {p: p.read_bytes() for p in root.rglob("*") if p.is_file()})
+
+
 class TaskWorkspaceTests(TaskWorkspaceFixture):
     """Real-Git scenario suite for the canonical task-workspace lifecycle."""
 
@@ -7009,9 +7045,9 @@ class TaskFencingLeaseTests(TaskWorkspaceFixture):
         status_after = self.payload("lease-status", "X")
         self.assertEqual(status_after["successor_readiness"]["code"], "lease_released")
         task_status = self.payload("status", "X")
-        self.assertEqual(task_status["resume_decision"]["classification"],
-                         task_runtime.decisions.RESUME_EXACT_TERMINAL_CAPTURE)
-        self.assertEqual(task_status["resume_decision"]["owner_command"], "yy task run X")
+        self.assertEqual(task_status["resume_decision"]["classification"], "retired")
+        self.assertFalse(task_status["resume_decision"]["admitted"])
+        self.assertEqual(task_status["resume_decision"]["owner_command"], "yy task lease-status X")
         # The queued idempotent retry proceeds unfenced and stays released.
         again = self.payload("finish", "X")
         self.assertEqual((again["outcome"], self.fencing_record("X")["state"]),

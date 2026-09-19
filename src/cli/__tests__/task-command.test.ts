@@ -5,12 +5,28 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   checkpointTaskWorkspaceAfterFinalization,
+  invokeTaskWorkspace,
   configureTaskWorkspaceCommand,
   selectTaskWorkspaceRuntime,
   taskWorkspaceControlOperation,
 } from '../commands/task.js';
 
 describe('task workspace CLI', () => {
+  it.each(['run', 'resume'] as const)('retires task %s before dispatch', async (operation) => {
+    const invoke = vi.fn(async () => undefined);
+    const program = new Command().exitOverride();
+    configureTaskWorkspaceCommand(program, invoke);
+    await expect(program.parseAsync(['node', 'yy', 'task', operation, 'T123']))
+      .rejects.toThrow('is retired');
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it.each(['run', 'resume', 'recover-predispatch', 'recover-wall-budget'] as const)(
+    'refuses direct %s invocation before routing or selecting retained runtime', async (operation) => {
+      await expect(invokeTaskWorkspace(operation, 'T123')).rejects.toThrow('is retired');
+    },
+  );
+
   it('selects the real shipped template for hydrate by stable capability', async () => {
     const controller = await fs.mkdtemp(path.join(os.tmpdir(), 'yylo-hydrate-capability-'));
     const source = path.resolve(process.cwd(), 'src/templates/scripts/task_workspace.py');
@@ -24,8 +40,6 @@ describe('task workspace CLI', () => {
   });
 
   it.each([
-    { operation: 'run', expected: undefined },
-    { operation: 'resume', expected: undefined },
     { operation: 'start', expected: [] },
     { operation: 'status', expected: undefined },
     { operation: 'admission', expected: undefined },
@@ -121,23 +135,17 @@ describe('task workspace CLI', () => {
     expect(invoke).toHaveBeenLastCalledWith('start', 'EXTRA', ['juno_kanban', 'frontend'], []);
   });
 
-  it('forwards receipt-bound task-run recovery arguments without legacy umbrella options', async () => {
+  it('refuses retired receipt-bound recovery before invoking any runtime', async () => {
     const invoke = vi.fn(async () => undefined);
     const program = new Command().exitOverride().configureOutput({ writeOut: () => undefined });
     configureTaskWorkspaceCommand(program, invoke);
-    await program.parseAsync(['node', 'yy', 'task', 'recover-predispatch', 'U1',
-      '--run-id', 'run-12345678']);
-    expect(invoke).toHaveBeenLastCalledWith('recover-predispatch', 'U1', [],
-      ['--run-id', 'run-12345678']);
-    await program.parseAsync(['node', 'yy', 'task', 'recover-wall-budget', 'U1',
+    await expect(program.parseAsync(['node', 'yy', 'task', 'recover-predispatch', 'U1',
+      '--run-id', 'run-12345678'])).rejects.toThrow('is retired');
+    await expect(program.parseAsync(['node', 'yy', 'task', 'recover-wall-budget', 'U1',
       '--run-id', 'run-12345678', '--attempt', '1',
       '--predispatch-receipt-sha256', 'a'.repeat(64),
-      '--original-deadline-unix-ns', '1787895956343575000']);
-    expect(invoke).toHaveBeenLastCalledWith('recover-wall-budget', 'U1', [], [
-      '--run-id', 'run-12345678', '--attempt', '1',
-      '--predispatch-receipt-sha256', 'a'.repeat(64),
-      '--original-deadline-unix-ns', '1787895956343575000',
-    ]);
+      '--original-deadline-unix-ns', '1787895956343575000'])).rejects.toThrow('is retired');
+    expect(invoke).not.toHaveBeenCalled();
     const task = program.commands.find((command) => command.name() === 'task');
     const start = task?.commands.find((command) => command.name() === 'start');
     expect(start?.options.map((option) => option.long)).not.toContain('--umbrella-admission');
@@ -191,8 +199,9 @@ describe('task workspace CLI', () => {
     expect(help).toContain('yy task start TASK_ID --lease-token <returned-token>');
     expect(help).toContain('remains valid after this helper exits');
     expect(help).toContain('do not repeat successor');
-    expect(help).toContain('yy task run TASK_ID (or resume)');
-    expect(help).toContain('lifecycle blockers and budgets still apply');
+    expect(help).not.toContain('yy task run TASK_ID (or resume)');
+    expect(help).toContain('external agent in the existing admitted worktree');
+    expect(help).toContain('ownership and finish checks still apply');
     expect(help).toContain('never include them in logs or task evidence');
   });
 
