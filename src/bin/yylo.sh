@@ -17,6 +17,13 @@
 
 set -euo pipefail
 
+# Advisory timing only, never generation/dispatch authority. Reset at every
+# public wrapper entry (including nested agent tools); Node-only retained-runtime
+# redispatch preserves this origin. Bash 5 supplies microsecond wall-clock time
+# without adding a startup subprocess. Older Bash reports no wrapper sample.
+YYLO_STARTUP_WRAPPER_EPOCH="${EPOCHREALTIME:-}"
+export YYLO_STARTUP_WRAPPER_EPOCH
+
 # Bounded 0.1 migration: accept legacy environment names without keeping them
 # active. Conflicting mixed installs/configurations fail instead of silently
 # selecting one runtime identity. Remove after the documented RC migration window.

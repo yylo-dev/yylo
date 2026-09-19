@@ -17,6 +17,7 @@ from typing import Optional, List, Dict, Any
 
 from environment_boundary import (
     ModelShortcutError,
+    record_harness_handoff,
     resolve_model_shortcut,
     sanitize_current_process_environment,
     sanitize_model_shortcut_environment,
@@ -656,6 +657,8 @@ Environment Variables:
                 bufsize=1,  # Line buffering for immediate output
                 universal_newlines=True
             )
+
+            record_harness_handoff("claude")
 
             if self._stdin_prompt and process.stdin:
                 try:

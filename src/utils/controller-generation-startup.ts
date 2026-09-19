@@ -5,7 +5,8 @@ import { createHash } from 'node:crypto';
 import {
   assertControllerGenerationReady, prepareControllerGeneration, applyControllerGeneration,
   recoverControllerGeneration, GENERATION_MIGRATION_ROOT, discoverInstalledGeneration, retainInstalledGeneration,
-  checkActiveControllerGeneration,
+  checkActiveControllerGeneration, acquireControllerGenerationReadLease,
+  type ControllerGenerationReadLease, type ActiveControllerGeneration,
   type InstalledGenerationEvidence, type ControllerGenerationPlan,
 } from './controller-generation-migration.js';
 import { assertSafeManagedWritePath } from './managed-update-transaction.js';
@@ -184,6 +185,94 @@ export async function assessControllerGeneration(controller: string, packageRoot
   }
 }
 
+/** Ordinary admission: authenticate only the selected runtime, never a candidate.
+ * The caller must hold the generation reader lease across assessment and use.
+ * Legacy runtimes without the authenticated explicit-only contract are refused,
+ * rather than reentered with a new environment-based authority mechanism.
+ */
+export async function ensureControllerGeneration(controller: string, packageRoot: string): Promise<GenerationAssessment> {
+  return assessOrdinaryGeneration(controller, packageRoot, () => checkActiveControllerGeneration(controller));
+}
+
+async function assessOrdinaryGeneration(controller: string, packageRoot: string,
+  activeAssessment: () => Promise<ActiveControllerGeneration>): Promise<GenerationAssessment> {
+  controller = path.resolve(controller);
+  packageRoot = path.resolve(packageRoot);
+  const guidance = 'Run explicit maintenance: yy scripts generation upgrade; for interrupted transactions use yy scripts generation resume EXACT_TRANSACTION_ID or rollback EXACT_TRANSACTION_ID. Preserve prior runtime and controller bytes.';
+  try {
+    await assertControllerGenerationReady(controller);
+    const current = await safeJson(controller, `${GENERATION_MIGRATION_ROOT}/current.json`);
+    if (!current) throw new Error('generation_explicit_upgrade_required: legacy controller requires explicit activation');
+    const active = await activeAssessment();
+    if (active.controller !== controller || active.projection !== controller) {
+      throw new Error('generation_assessment_mismatch: active observation names another controller');
+    }
+    const selectedRoot = path.resolve(path.dirname(active.executable), '../..');
+    if (active.executable !== path.join(selectedRoot, 'dist/bin/cli.mjs')
+        || current.candidate?.root !== selectedRoot) {
+      throw new Error('generation_changed_before_dispatch: selected runtime changed');
+    }
+    // active-ready authenticates every package byte before this capability is read.
+    const pkg = await safeJson(selectedRoot, 'package.json');
+    if (pkg?.yyloControllerGeneration?.ordinaryDispatch !== 'explicit-only-v1') {
+      throw new Error('generation_explicit_upgrade_required: selected legacy runtime cannot guarantee explicit-only upgrades');
+    }
+    // A different physical root is admitted only after the same locked Python
+    // assessment compared ALL its bytes/entries with the authenticated active
+    // artifact. Those alias inputs remain part of the guard's engine recheck.
+    return selectedRoot === packageRoot || active.equivalent_executable === path.join(packageRoot, 'dist/bin/cli.mjs')
+      ? { disposition: 'ready', controller }
+      : { disposition: 'retained', controller, executable: active.executable,
+        reason: 'using authenticated active generation until explicit upgrade' };
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.message : 'generation_invalid'}; ${guidance}`, { cause: error });
+  }
+}
+
+// One public CLI invocation owns this guard. Nothing serialized, inherited by
+// providers, or supplied by a caller can install an admission proof here.
+function gitAdmissionEnvironment(): string {
+  return JSON.stringify(Object.keys(process.env).filter(key => /^(GIT_|HOME$|PATH$|XDG_CONFIG_HOME$)/.test(key))
+    .sort().map(key => [key, process.env[key]]));
+}
+let commandAdmission: { controller: string; packageRoot: string; environment: string;
+  reader: ControllerGenerationReadLease } | undefined;
+
+export async function admitControllerCommand(controller: string, packageRoot: string): Promise<{
+  assessment: GenerationAssessment; release: () => Promise<void>;
+}> {
+  if (commandAdmission) throw new Error('generation_admission_busy: release the preceding command first');
+  const environment = gitAdmissionEnvironment();
+  const reader = await acquireControllerGenerationReadLease(controller);
+  try {
+    const assessment = await assessOrdinaryGeneration(controller, packageRoot, () => reader.assessActive());
+    reader.assertHeld();
+    if (environment !== gitAdmissionEnvironment()) throw new Error('generation_admission_inputs_changed: Git environment changed');
+    const proof = { controller: path.resolve(controller), packageRoot: path.resolve(packageRoot), environment, reader };
+    if (assessment.disposition === 'ready') commandAdmission = proof;
+    return { assessment, release: async () => {
+      if (commandAdmission === proof) commandAdmission = undefined;
+      await reader();
+    } };
+  } catch (error) { await reader(); throw error; }
+}
+
+/** A matching live guard AND unchanged authenticated inputs are both required.
+ * Direct engines and changed inputs fall back to independent full admission. */
+export async function reuseControllerCommandAdmission(controller: string, packageRoot: string): Promise<boolean> {
+  const proof = commandAdmission;
+  if (!proof || proof.controller !== path.resolve(controller) || proof.packageRoot !== path.resolve(packageRoot)) return false;
+  proof.reader.assertHeld();
+  if (proof.environment !== gitAdmissionEnvironment()) {
+    commandAdmission = undefined;
+    return false;
+  }
+  const unchanged = await proof.reader.recheckActive() && proof.environment === gitAdmissionEnvironment();
+  proof.reader.assertHeld();
+  if (!unchanged && commandAdmission === proof) commandAdmission = undefined;
+  return unchanged && commandAdmission === proof;
+}
+
 /** Explicit reviewed recovery only; never selected by automatic assessment. */
 export async function prepareInstalledControllerRepair(controller: string, packageRoot: string): Promise<ControllerGenerationPlan> {
   const candidate = await installedEvidence(path.resolve(packageRoot));
@@ -202,8 +291,8 @@ export async function prepareInstalledControllerRepair(controller: string, packa
   return prepareControllerGeneration(controller, retained.evidence, previous, true);
 }
 
-/** No prompt and no network. Only the engine can authenticate and mutate the write set. */
-export async function ensureControllerGeneration(controller: string, packageRoot: string): Promise<GenerationAssessment> {
+/** Explicit maintenance only. Ordinary admission must never call this function. */
+export async function upgradeControllerGeneration(controller: string, packageRoot: string): Promise<GenerationAssessment> {
   let assessment = await assessControllerGeneration(controller, packageRoot);
   if (assessment.disposition === 'transition_incomplete') {
     await recoverControllerGeneration(controller, assessment.transactionId);
@@ -225,17 +314,14 @@ export async function ensureControllerGeneration(controller: string, packageRoot
         try { await recoverControllerGeneration(controller, assessment.plan.id, true); }
         catch (rollback) { throw new Error(`generation_recovery_required: migration and rollback failed; preserve journal ${assessment.plan.id}`, { cause: rollback }); }
       }
-      const previous = assessment.plan.previous;
-      if (previous?.root && await exactCurrentPackage(controller, previous.root)) {
-        return { disposition: 'retained', controller,
-          executable: path.join(previous.root, 'dist/bin/cli.mjs'),
-          reason: 'migration failed; previous coherent generation preserved' };
-      }
+      // This is explicit maintenance, not an availability fallback. Even after
+      // successful rollback the activation failure remains the primary error.
       throw error;
     }
     await assertControllerGenerationReady(controller);
     return { disposition: 'ready', controller: path.resolve(controller) };
   }
   if (assessment.disposition === 'refused') throw new Error(`${assessment.detail}; ${assessment.safeNextAction}`);
+  if (assessment.disposition === 'retained') throw new Error(`generation_upgrade_unavailable: ${assessment.reason}; active runtime preserved`);
   return assessment;
 }

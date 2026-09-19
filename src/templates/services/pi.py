@@ -23,6 +23,7 @@ import headless_presentation as presentation
 
 from environment_boundary import (
     ModelShortcutError,
+    record_harness_handoff,
     resolve_model_shortcut,
     sanitize_current_process_environment,
     sanitize_model_shortcut_environment,
@@ -3830,6 +3831,7 @@ export default function (pi: ExtensionAPI) {
 
                 try:
                     process = subprocess.Popen(cmd, **popen_kwargs)
+                    record_harness_handoff("pi")
 
                     def _live_tty_stderr_reader():
                         """Read stderr during live TTY mode and capture terminal failures."""
@@ -3888,6 +3890,8 @@ export default function (pi: ExtensionAPI) {
                 universal_newlines=True,
                 cwd=self.project_path,
             )
+
+            record_harness_handoff("pi")
 
             # Pipe the prompt via stdin if using stdin mode (multiline/large prompts).
             # Pi CLI reads stdin when isTTY is false and prepends it to messages.

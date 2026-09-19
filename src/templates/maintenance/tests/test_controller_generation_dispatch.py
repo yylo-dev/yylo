@@ -34,7 +34,7 @@ def git(root, *args):
 
 
 class PublicGenerationDispatchTests(unittest.TestCase):
-    def test_public_doctor_first_use_task_start_and_noop_replay(self):
+    def test_public_explicit_upgrade_task_start_and_noop_replay(self):
         fixture = TaskWorkspaceFixture()
         fixture._build_hermetic_fixture()
         self.addCleanup(fixture.tearDown)
@@ -56,6 +56,7 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         for label in ('previous', 'candidate'):
             package = root / label
             write(package / 'package.json', {'name': '@yylo/cli', 'version': version, 'type': 'module',
+                'yyloControllerGeneration': {'ordinaryDispatch': 'explicit-only-v1'},
                 'dependencies': json.loads((PACKAGE / 'package.json').read_text())['dependencies']})
             write(package / 'dist/bin/cli.mjs', (PACKAGE / 'dist/bin/cli.mjs').read_bytes())
             shutil.copytree(PACKAGE / 'dist/templates/scripts', package / 'dist/templates/scripts',
@@ -121,11 +122,12 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         for relative in runtime_paths: write(fixture.repository / relative, old_bytes)
         git(fixture.repository, 'add', *runtime_paths)
         git(fixture.repository, 'commit', '-m', 'previous source runtime fixture')
+        invoke('scripts', 'generation', 'upgrade', cli=str(Path(previous['root']) / 'dist/bin/cli.mjs'))
         active = invoke('task', 'start', 'Y', cli=str(Path(previous['root']) / 'dist/bin/cli.mjs'))
         self.assertEqual(active['state'], 'WORKING')
         self.assertEqual(active['hydration']['status'], 'passed')
         active_record = json.loads((controller / migration.STATE).read_text())['tasks']['Y']
-        # First use retains the authenticated package outside its mutable install.
+        # Explicit upgrade retains the authenticated package outside its mutable install.
         # Pin identity must survive upgrade exactly, including retained paths.
         retained_previous = json.loads((controller / migration.CURRENT).read_text())['candidate']
         self.assertEqual(retained_previous['sha256'], previous['sha256'])
@@ -141,6 +143,14 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         self.assertEqual(doctor['disposition'], 'migration_required')
         self.assertNotIn('before', doctor)
         self.assertEqual((controller / migration.INVENTORY).read_bytes(), before)
+        marker_before = (controller / migration.CURRENT).read_bytes()
+        ordinary = subprocess.run(['node', executable, 'pi', '-f', 'missing-pre-upgrade-prompt.txt'],
+                                  cwd=controller, env=env, capture_output=True, text=True, timeout=120)
+        self.assertNotEqual(ordinary.returncode, 0)  # Missing input never launches a provider.
+        self.assertIn('Using retained controller runtime:', ordinary.stderr)
+        self.assertEqual((controller / migration.CURRENT).read_bytes(), marker_before)
+        self.assertEqual((controller / migration.INVENTORY).read_bytes(), before)
+        invoke('scripts', 'generation', 'upgrade')
         started = invoke('task', 'start', 'X')
         self.assertEqual(started['state'], 'WORKING')
         self.assertTrue((controller / migration.CURRENT).is_file())
