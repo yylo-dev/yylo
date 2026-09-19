@@ -241,6 +241,7 @@ def scenario(artifact, historical=False, handoff_report=None):
         definition = json.loads(declaration.read_text())
         definition['schemaVersion'] = 1
         definition.pop('instructionBundle', None)
+        definition.pop('ledgerWiki', None)  # Representative filesystem-wiki predecessor.
         write(declaration, definition)
         instructions = old_root / 'dist/templates/controller-agent/AGENTS.md'
         instructions.write_bytes(instructions.read_bytes() + b'\nRepresentative predecessor guidance.\n')
@@ -271,8 +272,18 @@ def scenario(artifact, historical=False, handoff_report=None):
         ledger_version = re.search(r"YYLO_LEDGER_COMPAT_RANGE='([^']+)'", version_policy)[1]
         subprocess.run([sys.executable, '-m', 'venv', '--without-pip', str(controller / '.venv_juno')], check=True, env=env)
         ledger = controller / '.venv_juno/bin/yylo-ledger'
-        write(ledger, FAKE_KANBAN_SOURCE.replace('@BOARD@', repr(str(fixture.board)))
-              .replace('yylo-ledger 2.0.5', 'yylo-ledger ' + ledger_version).encode())
+        ledger_source = Path(__file__).resolve().parents[5] / 'juno_kanban/src'
+        if not ledger_source.is_dir():
+            raise RuntimeError('controller-upgrade requires the selected, hydrated Ledger source for publication checks')
+        # Keep deterministic task-board transport, but exercise the REAL native
+        # Document engine for publication; a task-only stub cannot certify cutover.
+        wiki_dispatch = (f'#!{sys.executable}\nimport sys\n'
+                        'if sys.argv[1:2] == ["wiki"]:\n'
+                        f'    sys.path.insert(0, {str(ledger_source)!r})\n'
+                        '    from yylo_ledger.cli import main\n'
+                        '    raise SystemExit(main())\n')
+        write(ledger, (wiki_dispatch + FAKE_KANBAN_SOURCE.replace('@BOARD@', repr(str(fixture.board)))
+              .replace('yylo-ledger 2.0.5', 'yylo-ledger ' + ledger_version)).encode())
         ledger.chmod(0o755)
         env['VIRTUAL_ENV'] = str(controller / '.venv_juno')
         env['PATH'] = str(ledger.parent) + os.pathsep + env['PATH']

@@ -1,8 +1,23 @@
 {
   "schemaVersion": 2,
+  "ledgerWiki": {
+    "schemaVersion": "yylo_package_wiki_sources.v1",
+    "sources": [
+      "wiki/controller/git_worktree_lifecycle.md",
+      "wiki/controller/metadata_controller_boundary.md",
+      "wiki/controller/parallel_runner_and_spec_review.md",
+      "wiki/controller/runtime_migration_and_replacement_contract.md",
+      "wiki/controller/task_dependency_hydration.md",
+      "wiki/controller/tmux_best_practices.md",
+      "wiki/controller/wiki_maintenance.md",
+      "wiki/controller/yy_pi_progress.md",
+      "wiki/effective_lifecycle_field_guide.md",
+      "wiki/validation_depth_by_risk.md"
+    ]
+  },
   "instructionBundle": {
     "schemaVersion": "juno_instruction_bundle_declaration.v1",
-    "semanticVersion": "1.1.0"
+    "semanticVersion": "1.2.0"
   },
   "controllerOutputs": [
     {
