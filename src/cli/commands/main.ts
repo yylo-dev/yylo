@@ -10,6 +10,7 @@
  */
 
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import * as childProcess from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'fs-extra';
@@ -176,7 +177,10 @@ function parseJsonObject(value: unknown): Record<string, unknown> | null {
 const LEADING_PROMPT_SHORTCUT_REGEX = /^%(?:\{([^\s{}]+)\}|([^\s%][^\s]*))(.*)$/s;
 const LEADING_PROMPT_DELIMITER_MARKERS = new Set(['---', '***', '___']);
 const LEADING_DIRECTIVE_LINE_REGEX = /^(?:%(?:\{[^\s{}]+\}|[^\s%][^\s]*)|\/skill:[^\s]+|\/[^\s]+|\$[^\s]+)/;
-const KANBAN_TASK_REFERENCE_REGEX = /(?<!#)##\s*\{?([A-Za-z0-9]{6})\}?(?![A-Za-z0-9])/g;
+// Match complete identities, never an ID prefix of a slug or malformed braces.
+const KANBAN_TASK_REFERENCE_REGEX = /(?<![#\w])##[ \t]*(?:\{([A-Za-z0-9][A-Za-z0-9._~-]*)\}|([A-Za-z0-9][A-Za-z0-9._~-]*))(?![A-Za-z0-9._~{}/#-])/g;
+const RECORD_PROMPT_MAX_BYTES = 64 * 1024;
+const RECORD_MAX_REFERENCES = 32;
 const KANBAN_TASK_SCRIPT_RELATIVE_PATH = path.join('.juno_task', 'scripts', 'kanban.sh');
 const KANBAN_HYDRATION_TOTAL_TIMEOUT_MS = 30000;
 const KANBAN_GET_ATTEMPT_TIMEOUT_MS = 10000;
@@ -184,7 +188,7 @@ const KANBAN_GET_MAX_ATTEMPTS = 3;
 const KANBAN_GET_RETRY_BASE_DELAY_MS = 100;
 
 type KanbanTaskRecord = Record<string, unknown> & { id?: string };
-type KanbanLookupFailureKind = 'timeout' | 'not_found' | 'error';
+type KanbanLookupFailureKind = 'timeout' | 'not_found' | 'ambiguous' | 'error';
 
 interface KanbanLookupFailure {
   kind: KanbanLookupFailureKind;
@@ -207,7 +211,7 @@ function extractReferencedKanbanTaskIds(prompt: string): string[] {
   const seen = new Set<string>();
 
   for (const match of prompt.matchAll(KANBAN_TASK_REFERENCE_REGEX)) {
-    const taskId = match[1];
+    const taskId = match[1] || match[2];
     if (!taskId || seen.has(taskId)) {
       continue;
     }
@@ -301,8 +305,11 @@ async function runKanbanGetCommand(
     } catch (error) {
       const stderr = String((error as { stderr?: unknown } | null)?.stderr ?? '');
       const detail = lookupFailureDetail(error, stderr);
-      if (/Task(?:\(s\))? not found:/i.test(detail)) {
+      if (/RECORD_NOT_FOUND|Task(?:\(s\))? not found:/i.test(detail)) {
         return { tasks: [], failure: { kind: 'not_found', detail } };
+      }
+      if (/RECORD_IDENTITY_AMBIGUOUS/.test(detail)) {
+        return { tasks: [], failure: { kind: 'ambiguous', detail } };
       }
       if (!isKanbanLookupTimeout(error)) {
         return { tasks: [], failure: { kind: 'error', detail } };
@@ -330,40 +337,29 @@ async function fetchKanbanTasksForCommand(
     return { tasksById, failuresById };
   }
 
-  const requestedTaskIds = new Set(taskIds);
-  const addFetchedTasks = (fetchedTasks: KanbanTaskRecord[]): void => {
-    for (const task of fetchedTasks) {
-      const taskId = typeof task.id === 'string' ? task.id : undefined;
-      if (taskId && requestedTaskIds.has(taskId)) {
-        tasksById.set(taskId, task);
-        failuresById.delete(taskId);
-      }
-    }
-  };
-
-  const batchResult = await runKanbanGetCommand(command, ['get', ...taskIds], workingDirectory, deadlineMs);
-  addFetchedTasks(batchResult.tasks);
-  const unresolvedTaskIds = taskIds.filter((taskId) => !tasksById.has(taskId));
-
-  // An exhausted batch timeout is a shared operational failure. Starting another
-  // subprocess per ID would amplify the same process storm and exceed the one
-  // hydration deadline, so preserve the failure truth for every unresolved ID.
-  if (batchResult.failure?.kind === 'timeout') {
-    for (const taskId of unresolvedTaskIds) {
-      failuresById.set(taskId, batchResult.failure);
-    }
-    return { tasksById, failuresById };
-  }
-
-  for (const taskId of unresolvedTaskIds) {
-    if (Date.now() >= deadlineMs) {
-      failuresById.set(taskId, { kind: 'timeout', detail: 'total hydration deadline exhausted' });
+  // Native get accepts one identity. Never fall back to task-only resolution:
+  // doing so could hide an ambiguous identity across Record kinds.
+  let sharedTimeout: KanbanLookupFailure | undefined;
+  for (const [index, taskId] of taskIds.entries()) {
+    if (sharedTimeout || Date.now() >= deadlineMs) {
+      failuresById.set(taskId, sharedTimeout ?? { kind: 'timeout', detail: 'total hydration deadline exhausted' });
       continue;
     }
-    const result = await runKanbanGetCommand(command, ['get', taskId], workingDirectory, deadlineMs);
-    addFetchedTasks(result.tasks);
-    if (!tasksById.has(taskId) && result.failure) {
-      failuresById.set(taskId, result.failure);
+    if (index >= RECORD_MAX_REFERENCES) {
+      failuresById.set(taskId, { kind: 'error', detail: 'reference lookup limit exceeded' });
+      continue;
+    }
+    const result = await runKanbanGetCommand(command, ['record', 'get', taskId, '-f', 'json'], workingDirectory, deadlineMs);
+    const record = result.tasks[0];
+    if (result.tasks.length === 1 && record && typeof record.id === 'string' &&
+        /^[A-Za-z0-9]{6}$/.test(record.id) &&
+        (record.id === taskId || record.slug === taskId ||
+          (Array.isArray(record.aliases) && record.aliases.includes(taskId)))) {
+      tasksById.set(taskId, record);
+    } else {
+      const failure = result.failure ?? { kind: 'error' as const, detail: 'invalid or mismatched Record identity' };
+      failuresById.set(taskId, failure);
+      if (failure.kind === 'timeout') sharedTimeout = failure;
     }
   }
 
@@ -391,6 +387,7 @@ async function fetchReferencedKanbanTasks(
   return { ...fetched, manualCommand };
 }
 
+/** Expand native Ledger Records; exported name retained for existing integrations. */
 export async function expandKanbanTaskReferencesInPrompt(
   prompt: string,
   workingDirectory: string,
@@ -409,19 +406,52 @@ export async function expandKanbanTaskReferencesInPrompt(
     if (failure.kind === 'not_found') {
       continue;
     }
-    const reason = failure.kind === 'timeout' ? 'timed out' : 'failed';
+    const reason = failure.kind === 'timeout' ? 'timed out' : failure.kind === 'ambiguous' ? 'is ambiguous' : 'failed';
     console.error(
       chalk.yellow(
-        `Warning: Kanban task hydration ${reason} for ${taskId}. ` +
-          `Automatic substitution was skipped; the agent was instructed to fetch the task manually.`,
+        `Warning: Ledger Record hydration ${reason} for ${taskId}. ` +
+          `Automatic substitution was skipped; resolve the Record manually before acting.`,
       ),
     );
   }
 
-  return prompt.replace(KANBAN_TASK_REFERENCE_REGEX, (fullMatch, taskId: string) => {
+  let remainingBytes = RECORD_PROMPT_MAX_BYTES;
+  const bounded = (replacement: string, original: string): string => {
+    const size = Buffer.byteLength(replacement);
+    if (size > remainingBytes) return original;
+    remainingBytes -= size;
+    return replacement;
+  };
+  return prompt.replace(KANBAN_TASK_REFERENCE_REGEX, (fullMatch, braced: string, bare: string) => {
+    const taskId = braced || bare;
     const task = tasksById.get(taskId);
     if (task) {
-      return `\n[kanban_task:${taskId}]\n${JSON.stringify(task, null, 2)}\n[/kanban_task]`;
+      const projected = { ...task };
+      // Never fetch local/external payloads. Only verified small inline UTF-8
+      // text may accompany the descriptor; binary/base64 is never prompt text.
+      if (task.kind === 'artifact' && task.payload && typeof task.payload === 'object') {
+        const { data, text: _text, ...descriptor } = task.payload as Record<string, unknown>;
+        projected.payload = descriptor;
+        projected.retrieval = `yy ledger artifact get ${task.id}`;
+        if (descriptor.backend === 'inline' && descriptor.encoding === 'base64' &&
+            typeof task.media_type === 'string' && /^(text\/|application\/(json|yaml)(;|$))/.test(task.media_type) &&
+            typeof data === 'string' && data.length <= 5464) {
+          const bytes = Buffer.from(data, 'base64');
+          if (bytes.length <= 4096 && bytes.length === descriptor.size && bytes.toString('base64') === data &&
+              createHash('sha256').update(bytes).digest('hex') === descriptor.sha256) {
+            try {
+              projected.inline_text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+            } catch { /* Invalid UTF-8 stays metadata-only. */ }
+          }
+        }
+      }
+      let content = JSON.stringify(projected, null, 2);
+      if (Buffer.byteLength(content) > Math.min(16 * 1024, remainingBytes)) {
+        content = JSON.stringify({ id: task.id, slug: task.slug, kind: task.kind, profile: task.profile,
+          content_omitted: 'prompt content budget exceeded', retrieval: `yy ledger record get ${task.id}` });
+      }
+      const tag = task.kind && task.kind !== 'task' ? 'ledger_record' : 'kanban_task';
+      return bounded(`\n[${tag}:${task.id}]\n${content}\n[/${tag}]`, fullMatch);
     }
 
     const failure = failuresById.get(taskId);
@@ -429,13 +459,14 @@ export async function expandKanbanTaskReferencesInPrompt(
       return fullMatch;
     }
 
-    const failureLabel = failure.kind === 'timeout' ? 'timed out' : 'failed';
-    return (
-      `\n[kanban_task_hydration_warning:${taskId}]\n` +
-      `Automatic Kanban task hydration ${failureLabel}. Before acting on this task, manually run ` +
-      `\`${manualCommand} get ${taskId}\` from the project root and use its canonical task payload.\n` +
-      `Unresolved task reference: ${fullMatch}\n` +
-      `[/kanban_task_hydration_warning]\n`
+    const failureLabel = failure.kind === 'timeout' ? 'timed out' : failure.kind === 'ambiguous' ? 'is ambiguous' : 'failed';
+    return bounded(
+      `\n[ledger_record_hydration_warning:${taskId}]\n` +
+      `Automatic Ledger Record hydration ${failureLabel}. Resolve this identity before acting; ` +
+      `do not guess on ambiguity. Manually run \`${manualCommand} record get '${taskId}' -f json\` ` +
+      `from the controller and use its canonical Record payload.\n` +
+      `Unresolved Record reference: ${fullMatch}\n` +
+      `[/ledger_record_hydration_warning]\n`, fullMatch,
     );
   });
 }

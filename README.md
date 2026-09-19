@@ -196,6 +196,24 @@ yylo loop --workflow flow.yaml
 Every step receives one-based loop metadata through `YYLO_LOOP_ID`,
 `YYLO_ITERATION`, `YYLO_ITERATION_COUNT`, `YYLO_STEP`, and `YYLO_STEP_COUNT`.
 
+### Ledger references in prompts
+
+Use `##ABC123`, `##readable-slug`, or `##{readable-slug}` to include a Ledger
+Record by exact ID, slug, or retained alias. Existing `## ABC123` spacing works.
+Tasks, Wiki/PDR/workflow documents, and artifacts share native Record lookup;
+ambiguous identities are never resolved by guessing. Brace references next to
+punctuation that could be part of a slug (for example `##{design.v2}.`).
+Missing references remain unchanged. Lookup errors produce a manual-resolution
+warning; references do not execute workflows or recursively expand Record text.
+
+Hydration is bounded to 32 distinct identities, a shared 30-second lookup budget,
+and 64 KiB of inserted context (16 KiB per Record). Oversized Records carry a
+retrieval command instead. Artifacts include metadata; only verified inline UTF-8
+text up to 4 KiB is included. Binary, local, and external artifact bytes are not
+automatically read or downloaded. Use `yy ledger record get ID_OR_SLUG` for
+explicit retrieval. Immutable IDs remain authoritative for task lifecycle and
+Record relations.
+
 ## Models and project shortcuts
 
 `yy pi --help` is the source of truth for shipped aliases. Current Pi shortcuts include:
