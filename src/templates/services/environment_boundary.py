@@ -6,6 +6,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
+import time
+import threading
+from decimal import Decimal, InvalidOperation
 from collections.abc import Mapping
 
 _SCOPED_CONTINUITY_KEY_PREFIXES = (
@@ -26,6 +30,67 @@ _MODEL_SHORTCUTS_ENV = "JUNO_MODEL_SHORTCUTS"
 _MODEL_SHORTCUT_ENV_KEYS = frozenset({_MODEL_SHORTCUTS_ENV, "JUNO_SELECTED_SUBAGENT"})
 _MODEL_SHORTCUT_KEY = re.compile(r"^:[A-Za-z0-9_-]+$")
 _MODEL_SHORTCUT_SUBAGENTS = frozenset({"claude", "cursor", "codex", "gemini", "pi"})
+
+# An observation, not an authority assertion. Consume before any harness child
+# inherits it; independent public wrappers always establish their own origin.
+_STARTUP_ORIGIN_KEY = "YYLO_STARTUP_WRAPPER_EPOCH"
+_STARTUP_ORIGIN = os.environ.pop(_STARTUP_ORIGIN_KEY, "")
+_STARTUP_TIMING_ENABLED = os.environ.get("YYLO_STARTUP_TIMING") == "1"
+_HANDOFF_COUNT = 0
+_STARTUP_PROGRESS_KEY = 'YYLO_STARTUP_PROGRESS'
+_PROGRESS_STOP = threading.Event()
+
+
+def _startup_progress() -> None:
+    # This daemon owns no processes and has no cancellation authority. It only
+    # describes YYLO service work and stops at exec, not session readiness.
+    while not _PROGRESS_STOP.is_set():
+        try:
+            # One small atomic write: no buffered Python stream lock can be
+            # held by this daemon during interpreter shutdown on a primary error.
+            os.write(2, 'YYLO: Preparing requested harness executable…\n'.encode('utf-8'))
+        except OSError:
+            return
+        if _PROGRESS_STOP.wait(4):
+            return
+
+
+if os.environ.pop(_STARTUP_PROGRESS_KEY, '') == '1':
+    try:
+        threading.Thread(target=_startup_progress, daemon=True).start()
+    except RuntimeError:
+        pass  # Optional progress cannot prevent launch.
+
+
+def record_harness_handoff(harness: str) -> None:
+    """Best-effort exec completion, NOT harness/session/provider readiness.
+
+    Call only after Popen succeeds at the actual harness executable. Python's
+    exec-error pipe makes a failed exec raise instead of producing this sample.
+    Wall-clock observations require an external monotonic fixture cross-check;
+    clock adjustments and caller-supplied origins are not performance evidence.
+    No paths, prompts, session IDs, model names or environment values are logged.
+    """
+    global _HANDOFF_COUNT
+    _PROGRESS_STOP.set()
+    if not _STARTUP_TIMING_ENABLED or harness not in _MODEL_SHORTCUT_SUBAGENTS:
+        return
+    try:
+        if not re.fullmatch(r"[0-9]{1,12}\.[0-9]{1,6}", _STARTUP_ORIGIN):
+            return
+        origin_ns = int(Decimal(_STARTUP_ORIGIN) * 1_000_000_000)
+        elapsed_ns = time.time_ns() - origin_ns
+        if elapsed_ns < 0:
+            return  # Clock moved backwards; do not invent a zero-duration pass.
+        _HANDOFF_COUNT += 1
+        event = {"event": "yylo_harness_handoff", "schema_version": 1,
+                 "harness": harness, "launch_index": _HANDOFF_COUNT,
+                 "clock": "unix_wall",
+                 "origin_precision_us": 10 ** (6 - len(_STARTUP_ORIGIN.split(".")[1])),
+                 "elapsed_ms": elapsed_ns / 1_000_000}
+        print(json.dumps(event, separators=(",", ":")), file=sys.stderr, flush=True)
+    except (OSError, ValueError, InvalidOperation, OverflowError):
+        pass  # Optional diagnostics must never replace the launch outcome.
 
 
 class ModelShortcutError(ValueError):
@@ -114,11 +179,12 @@ def child_process_environment(
     return {
         name: value
         for name, value in environment.items()
-        if not is_continuity_environment_key(name) and name not in _MODEL_SHORTCUT_ENV_KEYS
+        if not is_continuity_environment_key(name)
+        and name not in _MODEL_SHORTCUT_ENV_KEYS and name not in {_STARTUP_ORIGIN_KEY, _STARTUP_PROGRESS_KEY}
     }
 
 
 def sanitize_current_process_environment() -> None:
     for name in tuple(os.environ):
-        if is_continuity_environment_key(name):
+        if is_continuity_environment_key(name) or name in {_STARTUP_ORIGIN_KEY, _STARTUP_PROGRESS_KEY}:
             os.environ.pop(name, None)

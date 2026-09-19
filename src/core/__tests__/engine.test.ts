@@ -55,7 +55,12 @@ vi.mock('../../cli/utils/advanced-logger.js', () => ({
 vi.mock('../../cli/commands/ledger.js', () => ({ checkLedgerReadiness: mocks.checkLedgerReadiness }));
 // Engine unit tests own execution orchestration, not real package migration.
 // Generation admission (including refusal) is covered by the startup/packed suites.
-vi.mock('../../utils/controller-generation-startup.js', () => ({ assessControllerGeneration: mocks.assessControllerGeneration }));
+vi.mock('../../utils/controller-generation-startup.js', () => ({ ensureControllerGeneration: mocks.assessControllerGeneration,
+  reuseControllerCommandAdmission: vi.fn(async () => false) }));
+vi.mock('../../utils/controller-generation-migration.js', () => ({
+  packagedGenerationRoot: () => '/installed/package',
+  acquireControllerGenerationReadLease: vi.fn(async () => Object.assign(async () => {}, { assertHeld() {} })),
+}));
 
 vi.mock('../../utils/hooks.js', () => ({
   executeHook: mocks.executeHook,

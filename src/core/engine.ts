@@ -31,6 +31,7 @@ import { resolvePromptMacros } from './prompt-macro-resolver.js';
 import { getPromptMacroDictionary } from './config.js';
 import { resolveController } from '../utils/controller-resolver.js';
 import { AgentStartupError, agentStartupHooks, checkAgentReadiness, errorMessage, resolveAgentWorkspace } from '../utils/agent-startup.js';
+import { withWaitingProgress } from '../utils/terminal-progress-writer.js';
 import { buildChildProcessEnvironment } from './child-process-environment.js';
 
 // =============================================================================
@@ -748,6 +749,7 @@ export class ExecutionEngine extends EventEmitter {
         JUNO_WORKSPACE_ROLE: controller.role === 'unregistered' ? undefined : controller.role,
         JUNO_MODEL_SHORTCUTS: JSON.stringify(modelShortcuts),
         JUNO_SELECTED_SUBAGENT: request.subagent,
+        YYLO_STARTUP_PROGRESS: this.engineConfig.config.verbose >= 1 ? '1' : '0',
         HEADLESS_UI_TURN_COST_DISPLAY_THRESHOLD_USD:
           process.env.HEADLESS_UI_TURN_COST_DISPLAY_THRESHOLD_USD?.trim()
           || String(this.engineConfig.config.headlessUi?.turnCostDisplayThresholdUsd ?? 0.5),
@@ -934,15 +936,17 @@ export class ExecutionEngine extends EventEmitter {
         throw new Error('Simple execution requires root-validated Simple configuration.');
       }
     }
-    await checkAgentReadiness(authority);
+    const startupProgress = this.engineConfig.config.verbose >= 1;
+    await withWaitingProgress('Checking agent dependencies…', () => checkAgentReadiness(authority), startupProgress);
     context.hooks = agentStartupHooks(this.engineConfig.config.hooks, authority.role === 'unregistered');
 
     // Execute START_RUN after authority/readiness, before backend initialization.
     try {
       if (context.hooks && !this.engineConfig.config.skipHooks) {
-        const hookResult = await executeHook(
+        const hooks = context.hooks;
+        const hookResult = await withWaitingProgress('Running startup hooks…', () => executeHook(
           'START_RUN',
-          context.hooks,
+          hooks,
           {
             workingDirectory: context.request.workingDirectory,
             sessionId: context.sessionContext.sessionId,
@@ -959,7 +963,7 @@ export class ExecutionEngine extends EventEmitter {
           {
             commandTimeout: this.engineConfig.config.hookCommandTimeout,
           },
-        );
+        ), startupProgress);
         this.displayHookOutput(hookResult);
         const failedDependencyPreflight = hookResult.commandResults.find((result) =>
           !result.success && /(?:^|[\s/])install_requirements\.sh(?:\s|$)/.test(result.command),
@@ -977,7 +981,8 @@ export class ExecutionEngine extends EventEmitter {
       engineLogger.warn('Hook START_RUN failed', { error });
     }
 
-    await this.initializeBackend(context.request, authority);
+    await withWaitingProgress('Preparing harness backend…',
+      () => this.initializeBackend(context.request, authority), startupProgress);
     try {
       await this.runIterationLoop(context);
 
@@ -1090,9 +1095,10 @@ export class ExecutionEngine extends EventEmitter {
     // Execute START_ITERATION hook
     try {
       if (context.hooks && !this.engineConfig.config.skipHooks) {
-        const hookResult = await executeHook(
+        const hooks = context.hooks;
+        const hookResult = await withWaitingProgress('Running pre-harness iteration hooks…', () => executeHook(
           'START_ITERATION',
-          context.hooks,
+          hooks,
           {
             workingDirectory: context.request.workingDirectory,
             sessionId: context.sessionContext.sessionId,
@@ -1110,7 +1116,7 @@ export class ExecutionEngine extends EventEmitter {
           {
             commandTimeout: this.engineConfig.config.hookCommandTimeout,
           },
-        );
+        ), this.engineConfig.config.verbose >= 1);
         this.displayHookOutput(hookResult);
       }
     } catch (error) {
