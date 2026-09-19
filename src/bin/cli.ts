@@ -2218,10 +2218,11 @@ async function main(): Promise<void> {
     return;
   }
   if (
-    initialArgs[initialLeading.index] === 'ledger' &&
+    ['ledger', 'wiki'].includes(initialArgs[initialLeading.index] ?? '') &&
     !hasManagedWorkspaceMarker(process.cwd())
   ) {
-    await runLedgerDelegate(initialArgs.slice(initialLeading.index + 1));
+    const tail = initialArgs.slice(initialLeading.index + 1);
+    await runLedgerDelegate(initialArgs[initialLeading.index] === 'wiki' ? ['wiki', ...tail] : tail);
     return;
   }
 
@@ -2242,7 +2243,7 @@ async function main(): Promise<void> {
   const isScriptsDoctor = commandArgs[0] === 'scripts' && commandArgs[1] === 'doctor';
   const isWorkspaceDiscovery = commandArgs[0] === 'info' || commandArgs[0] === 'where' || commandArgs[0] === 'capabilities' || (commandArgs[0] === 'doctor' && commandArgs[1] === 'workspace');
   const isTmuxCommand = commandArgs[0] === 'tmux';
-  const isControlPlaneCommand = ['ledger', 'kanban', 'task', 'merge', 'integration'].includes(commandArgs[0] ?? '');
+  const isControlPlaneCommand = ['ledger', 'kanban', 'wiki', 'task', 'merge', 'integration'].includes(commandArgs[0] ?? '');
   // Explicit mode initialization owns every write; never run legacy bootstrap first.
   const isModeInit = commandArgs[0] === 'init' && commandArgs.some((arg) => /^--(?:mode|plan-file|apply-plan)(?:=|$)/.test(arg));
   const isReadOnlyIdentityRequest = isReadOnlyVersionRequest || isReadOnlyLifecycleStatus || isReadOnlyTaskStatus || isMigrationCommand || isScriptsDoctor || isWorkspaceDiscovery || isTmuxCommand || isControlPlaneCommand || isModeInit;

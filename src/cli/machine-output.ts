@@ -94,8 +94,9 @@ function diagnosticMessage(stderr: string, fallback: string): string {
 }
 
 export function currentMachineCommand(args: readonly string[]): string {
-  const surfaceIndex = args.findIndex((token) => ['task', 'merge', 'integration', 'ledger', 'kanban'].includes(token));
+  const surfaceIndex = args.findIndex((token) => ['task', 'merge', 'integration', 'ledger', 'kanban', 'wiki'].includes(token));
   if (surfaceIndex < 0) return 'yylo';
+  if (args[surfaceIndex] === 'wiki') return 'ledger.wiki';
   const surface = args[surfaceIndex] === 'kanban' ? 'ledger' : args[surfaceIndex]!;
   const operation = args.slice(surfaceIndex + 1).find((token) => !token.startsWith('-'));
   return operation ? `${surface}.${operation}` : surface;

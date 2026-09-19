@@ -143,7 +143,7 @@ classify_prebootstrap_command() {
         esac
     done
     case "$PREBOOTSTRAP_COMMAND" in
-        -V|--version|info|where|capabilities|benchmark|ledger|kanban|task|merge|integration|evidence|tmux) return 0 ;;
+        -V|--version|info|where|capabilities|benchmark|ledger|kanban|wiki|task|merge|integration|evidence|tmux) return 0 ;;
         doctor) [ "$PREBOOTSTRAP_SUBCOMMAND" = "workspace" ] && return 0 ;;
         init)
             # Mode initialization must validate its plan before any copied hook/bootstrap.
@@ -284,11 +284,11 @@ has_managed_workspace_marker() {
 route_registered_product_control() {
     local operation="${1:-}"
     shift || true
-    case "$operation" in ledger|kanban|task|merge|integration|evidence) ;; *) return 1 ;; esac
-    case "$operation" in ledger|kanban) has_managed_workspace_marker || return 1 ;; esac
+    case "$operation" in ledger|kanban|wiki|task|merge|integration|evidence) ;; *) return 1 ;; esac
+    case "$operation" in ledger|kanban|wiki) has_managed_workspace_marker || return 1 ;; esac
     local effective_operation resolution fields controller invocation role branch source runtime
     case "$operation:$PREBOOTSTRAP_SUBCOMMAND" in
-        ledger:*|kanban:*) effective_operation=kanban ;;
+        ledger:*|kanban:*|wiki:*) effective_operation=kanban ;;
         task:local) effective_operation=kanban ;;
         task:status|task:admission|task:preflight|task:doctor|task:lease-status|task:state-archive-plan|task:state-archive-verify|task:state-archive-get|task:|task:-h|task:--help) effective_operation=kanban ;;
         task:start|task:run|task:resume|task:recover-predispatch|task:recover-wall-budget|task:hydrate|task:finish|task:checkpoint|task:sync|task:runtime-bootstrap|task:lease-heartbeat|task:lease-handoff|task:lease-successor|task:lease-revoke|task:lease-release|task:state-archive-apply|task:state-archive-rollback) effective_operation=orchestration ;;
@@ -315,7 +315,7 @@ route_registered_product_control() {
     source="$(printf '%s\n' "$fields" | sed -n '5p')"
     if [ "$role" = simple ]; then
         case "$operation:$PREBOOTSTRAP_SUBCOMMAND" in
-            task:local|ledger:*|kanban:*)
+            task:local|ledger:*|kanban:*|wiki:*)
                 require_compatible_node || return $?
                 if current_runtime_supports_lifecycle; then
                     exec_current_runtime "$@"
