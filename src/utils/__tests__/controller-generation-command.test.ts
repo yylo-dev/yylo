@@ -4,8 +4,9 @@ import { prepareControllerCommand, releaseControllerCommand } from '../controlle
 
 const mocks = vi.hoisted(() => ({
   resolve: vi.fn(), metadata: vi.fn(), ensure: vi.fn(), assess: vi.fn(), admit: vi.fn(),
-  acquire: vi.fn(), release: vi.fn(), assertHeld: vi.fn(), spawn: vi.fn(),
+  acquire: vi.fn(), release: vi.fn(), assertHeld: vi.fn(), spawn: vi.fn(), readiness: vi.fn(),
 }));
+vi.mock('../controller-generation-readiness.js', () => ({ controllerGenerationReadiness: mocks.readiness }));
 vi.mock('node:child_process', () => ({ spawn: mocks.spawn }));
 vi.mock('fs-extra', () => ({ default: { pathExists: vi.fn(async () => true) } }));
 vi.mock('../controller-resolver.js', () => ({ resolveController: mocks.resolve }));
@@ -46,6 +47,20 @@ beforeEach(() => {
 afterEach(async () => {
   await releaseControllerCommand();
   process.env = saved; process.exitCode = exitCode; vi.restoreAllMocks();
+});
+
+describe('optional readiness dispatch', () => {
+  it.each(['ready', 'action_required'])('prints structured %s without executing a command', async disposition => {
+    const report = { schema_version: 'yylo_controller_readiness.v1', disposition };
+    mocks.readiness.mockResolvedValue(report);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    process.exitCode = undefined;
+    expect(await prepareControllerCommand('/controller', ['scripts', 'generation', 'readiness'], [])).toBe(true);
+    expect(mocks.readiness).toHaveBeenCalledWith('/controller', '/retained');
+    expect(log).toHaveBeenCalledWith(JSON.stringify(report));
+    expect(process.exitCode).toBe(disposition === 'ready' ? undefined : 2);
+    expect(mocks.spawn).not.toHaveBeenCalled();
+  });
 });
 
 describe('retained dispatch marker lifetime', () => {

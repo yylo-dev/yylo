@@ -255,6 +255,15 @@ export interface ActiveControllerGeneration {
   package: { name: string; version: string };
 }
 
+export interface GenerationDiagnosticContext {
+  source: { status: 'pass' | 'action_required'; sha?: string; remote_verified?: false; reason?: string };
+  launchers: { status: 'pass' | 'action_required'; commands?: Record<string, string>[]; reason?: string };
+}
+
+export function generationDiagnosticContext(projectDir: string, packageRoot: string): Promise<GenerationDiagnosticContext> {
+  return maintenance(projectDir, 'diagnostic-context', { package_root: path.resolve(packageRoot) });
+}
+
 export function checkActiveControllerGeneration(projectDir: string): Promise<ActiveControllerGeneration> {
   return maintenance(projectDir, 'active-ready');
 }
