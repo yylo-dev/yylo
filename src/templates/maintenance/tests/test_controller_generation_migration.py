@@ -4,6 +4,7 @@ import copy
 import io
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -145,19 +146,17 @@ class GenerationTests(unittest.TestCase):
             migration.authenticate(self.candidate)
 
     def test_raw_file_observation_preserves_image_contract_and_race_refusal(self):
-        from types import SimpleNamespace
         file = self.root / 'observed'
         file.write_bytes(b'exact bytes\n')
         file.chmod(0o600)
         self.assertEqual(migration.snapshot(file), migration.image(b'exact bytes\n', 0o600))
-        original_stat = Path.stat
-        def raced_stat(path, **kwargs):
-            info = original_stat(path, **kwargs)
-            if path == file and kwargs.get('follow_symlinks', True):
-                return SimpleNamespace(st_ino=info.st_ino, st_size=info.st_size,
-                                       st_mtime_ns=info.st_mtime_ns + 1)
-            return info
-        with mock.patch.object(Path, 'stat', raced_stat):
+        original_read = Path.read_bytes
+        def raced_read(path):
+            data = original_read(path)
+            if path == file:
+                path.write_bytes(data + b'concurrent edit')
+            return data
+        with mock.patch.object(Path, 'read_bytes', raced_read):
             with self.assertRaisesRegex(migration.Refusal, 'concurrent_edit'):
                 migration.observed_bytes(file)
 
@@ -244,6 +243,52 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(git(self.controller, 'rev-parse', 'product'), target)
         self.assertEqual(git(self.controller, 'config', '--worktree', '--get', 'juno.controller.runtimeVersion'), '0.2.4')
         self.assertTrue((self.controller / migration.ROOT / plan['id'] / 'previous/AGENTS.md').is_file())
+
+    def test_exact_active_artifact_alias_is_authenticated_and_checked_for_reuse(self):
+        migration.apply(self.controller, self.plan())
+        alias = self.root / 'global-install'
+        shutil.copytree(self.candidate['root'], alias)
+        inputs = migration.AdmissionInputs()
+        token = migration.admission_inputs.set(inputs)
+        try:
+            with mock.patch.object(migration, 'authenticate', wraps=migration.authenticate) as auth, \
+                    mock.patch.object(migration, 'discover_installed', side_effect=AssertionError('no discovery')), \
+                    mock.patch.object(migration, 'plan', side_effect=AssertionError('no planning')):
+                result = migration.active_runtime_ready(self.controller, invocation_root=alias)
+            self.assertEqual(auth.call_count, 2)  # active and predecessor, not a third archive extraction
+            self.assertEqual(result['equivalent_executable'], str(alias / 'dist/bin/cli.mjs'))
+            self.assertNotEqual(result['executable'], result['equivalent_executable'])
+        finally:
+            migration.admission_inputs.reset(token)
+        self.assertTrue(inputs.unchanged())
+        file = alias / 'dist/bin/cli.mjs'
+        stamp = file.stat()
+        data = file.read_bytes()
+        file.write_bytes(b'!' + data[1:])
+        os.utime(file, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        self.assertFalse(inputs.unchanged())  # content checks, not stat-only equivalence
+
+    def test_different_or_unsafe_alias_never_admits_the_invoking_executable(self):
+        migration.apply(self.controller, self.plan())
+        for kind in ('changed', 'missing', 'poisoned-bytecode', 'symlink', 'git-owned'):
+            with self.subTest(kind=kind):
+                alias = self.root / ('alias-' + kind)
+                shutil.copytree(self.candidate['root'], alias)
+                script = alias / 'dist/bin/cli.mjs'
+                if kind == 'changed':
+                    script.write_bytes(b'not the active artifact')
+                elif kind == 'missing':
+                    script.unlink()
+                elif kind == 'poisoned-bytecode':
+                    write(alias / 'dist/templates/scripts/__pycache__/poison.pyc', b'never execute')
+                elif kind == 'symlink':
+                    script.unlink()
+                    script.symlink_to(Path(self.candidate['root']) / 'dist/bin/cli.mjs')
+                else:
+                    git(alias, 'init')
+                result = migration.active_runtime_ready(self.controller, invocation_root=alias)
+                self.assertNotIn('equivalent_executable', result)
+                self.assertEqual(result['executable'], str(Path(self.candidate['root']) / 'dist/bin/cli.mjs'))
 
     def test_many_pins_authenticate_each_retained_generation_once_per_plan(self):
         state = json.loads((self.controller / migration.STATE).read_text())
@@ -332,15 +377,23 @@ class GenerationTests(unittest.TestCase):
                     state['tasks'] = {name: {'state': 'WORKING', 'fencing': {'attempt': pin['attempt']}}
                                       for name, pin in pins.items()}
                     write(self.controller / migration.STATE, state)
-                    for operation in ('plan', 'runtime_ready'):
+                    for operation in ('plan', 'runtime_ready', 'checked-reader'):
                         with self.subTest(operation=operation), \
                                 mock.patch.object(migration, 'authenticate', wraps=migration.authenticate) as auth, \
                                 mock.patch.object(migration, 'state_schemas', wraps=migration.state_schemas) as schemas:
                             if operation == 'plan':
                                 result = migration.plan(self.controller, successor, successor)
                                 self.assertEqual(result['active_pins'], pins)
-                            else:
+                            elif operation == 'runtime_ready':
                                 migration.runtime_ready(self.controller, self.controller, running)
+                            else:
+                                inputs = migration.AdmissionInputs()
+                                token = migration.admission_inputs.set(inputs)
+                                try:
+                                    migration.active_runtime_ready(self.controller)
+                                finally:
+                                    migration.admission_inputs.reset(token)
+                                self.assertTrue(inputs.unchanged())
                             self.assertEqual(auth.call_count, generations + 1)
                             # All generations authenticate separately, but their
                             # identical schema source is parsed only once.
@@ -351,7 +404,8 @@ class GenerationTests(unittest.TestCase):
                     pins[last]['executable'] = '/foreign/executable'
                     write(self.controller / migration.CURRENT, marker)
                     for operation in (lambda: migration.plan(self.controller, successor, successor),
-                                      lambda: migration.runtime_ready(self.controller, self.controller, running)):
+                                      lambda: migration.runtime_ready(self.controller, self.controller, running),
+                                      lambda: migration.active_runtime_ready(self.controller)):
                         with self.assertRaisesRegex(migration.Refusal, 'active_pin_unverified'):
                             operation()
 
@@ -378,6 +432,83 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(authenticate.call_count, 2)
         self.assertEqual({call.args[0]['root'] for call in authenticate.call_args_list},
                          {self.candidate['root'], self.previous['root']})
+
+    def test_reader_reuse_binds_all_authenticated_inputs_without_reauthentication(self):
+        migration.apply(self.controller, self.plan())
+        inputs = migration.AdmissionInputs()
+        token = migration.admission_inputs.set(inputs)
+        try:
+            migration.active_runtime_ready(self.controller)
+        finally:
+            migration.admission_inputs.reset(token)
+        with mock.patch.object(migration, 'authenticate', side_effect=AssertionError('duplicate authentication')), \
+                mock.patch.object(migration, 'state_schemas', side_effect=AssertionError('duplicate schema parsing')):
+            self.assertTrue(inputs.unchanged())
+            for path in (self.controller / migration.CURRENT, self.controller / migration.STATE,
+                         self.controller / migration.IDENTITY, self.controller / migration.INVENTORY,
+                         self.controller / '.juno_task/scripts/task_workspace.py',
+                         Path(self.candidate['root']) / 'dist/bin/cli.mjs',
+                         Path(self.previous['root']) / 'dist/bin/cli.mjs', Path(self.previous['artifact'])):
+                with self.subTest(path=path):
+                    original = path.read_bytes()
+                    try:
+                        path.write_bytes(original + b' ')
+                        self.assertFalse(inputs.unchanged())
+                    finally:
+                        path.write_bytes(original)
+            for added in (self.controller / migration.ROOT / 'fence.json',
+                          Path(self.candidate['root']) / 'dist/poison.pyc',
+                          Path(self.previous['root']) / 'dist/poison.pyc',
+                          Path(self.previous['root']) / '.git'):
+                with self.subTest(added=added):
+                    try:
+                        write(added, b'not authenticated')
+                        self.assertFalse(inputs.unchanged())
+                    finally:
+                        added.unlink()
+            git(self.controller, 'config', '--worktree', 'juno.controller.runtimeVersion', 'foreign')
+            self.assertFalse(inputs.unchanged())
+            git(self.controller, 'config', '--worktree', 'juno.controller.runtimeVersion', '0.2.4')
+            self.assertTrue(inputs.unchanged())
+
+    def test_reader_protocol_keeps_private_inputs_until_eof_and_invalidates_changes(self):
+        migration.apply(self.controller, self.plan())
+        process = subprocess.Popen([sys.executable, '-B', migration.__file__, 'hold-read',
+                                    '--controller', str(self.controller)],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(json.loads(process.stdout.readline()), {'locked': True})
+            for request, key, expected in [('recheck-active', 'unchanged', False), ('assess-active', 'assessment', None),
+                                           ('recheck-active', 'unchanged', True)]:
+                process.stdin.write(request + '\n'); process.stdin.flush()
+                response = json.loads(process.stdout.readline())
+                self.assertIn(key, response)
+                if request == 'assess-active':
+                    self.assertNotIn('inputs', response['assessment'])
+                else:
+                    self.assertIs(response[key], expected)
+            with self.assertRaisesRegex(migration.Refusal, 'generation_migration_busy'):
+                with migration.locked(self.controller):
+                    pass
+            write(Path(self.previous['root']) / 'dist/poison.pyc', b'not executed')
+            process.stdin.write('recheck-active\n'); process.stdin.flush()
+            self.assertEqual(json.loads(process.stdout.readline()), {'unchanged': False})
+            process.stdin.write('recheck-active\n'); process.stdin.flush()
+            self.assertEqual(json.loads(process.stdout.readline()), {'unchanged': False})
+            process.stdin.write('{"unchanged":true}\n'); process.stdin.flush()
+            self.assertIn('generation_reader_request_invalid', json.loads(process.stdout.readline())['error'])
+            process.stdin.write('assess-active\n'); process.stdin.flush()
+            self.assertIn('package_provenance_invalid', json.loads(process.stdout.readline())['error'])
+            process.stdin.write('recheck-active\n'); process.stdin.flush()
+            self.assertEqual(json.loads(process.stdout.readline()), {'unchanged': False})
+        finally:
+            process.stdin.close()
+            process.wait(timeout=10)
+            process.stdout.close(); process.stderr.close()
+        self.assertEqual(process.returncode, 0)
+        with migration.locked(self.controller):
+            pass
 
     def test_active_readiness_refuses_changed_executable_and_version_selectors(self):
         migration.apply(self.controller, migration.plan(self.controller, self.candidate, self.previous))
@@ -428,7 +559,10 @@ class GenerationTests(unittest.TestCase):
 
     def test_retained_task_pin_is_authenticated_and_attempt_bound(self):
         migration.apply(self.controller, self.plan())
-        pin = migration.pinned_task_runtime(self.controller, 'ABC123')
+        with mock.patch.object(migration, 'plan', side_effect=AssertionError('ordinary task planning')), \
+                mock.patch.object(migration, 'authenticate', wraps=migration.authenticate) as authenticate:
+            pin = migration.pinned_task_runtime(self.controller, 'ABC123')
+        self.assertEqual(authenticate.call_count, 2)
         self.assertTrue(pin['pinned'])
         self.assertEqual(pin['script'], str(Path(self.previous['root']) / 'dist/templates/scripts/task_workspace.py'))
         state = json.loads((self.controller / migration.STATE).read_text())

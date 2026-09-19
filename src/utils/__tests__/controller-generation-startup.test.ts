@@ -3,11 +3,12 @@ import fs from 'fs-extra';
 import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
-import { assessControllerGeneration, ensureControllerGeneration, prepareInstalledControllerRepair } from '../controller-generation-startup.js';
+import { assessControllerGeneration, ensureControllerGeneration, upgradeControllerGeneration, prepareInstalledControllerRepair,
+  admitControllerCommand, reuseControllerCommandAdmission } from '../controller-generation-startup.js';
 import { assertExternalGenerationPlan, generationCommandKind, generationInvocationContext } from '../controller-generation-command.js';
 import { Command } from 'commander';
 
-const engine = vi.hoisted(() => ({ plan: vi.fn(), apply: vi.fn(), recover: vi.fn(), ready: vi.fn(), active: vi.fn(), discover: vi.fn(), retain: vi.fn() }));
+const engine = vi.hoisted(() => ({ acquire: vi.fn(), release: vi.fn(), held: vi.fn(), recheck: vi.fn(), plan: vi.fn(), apply: vi.fn(), recover: vi.fn(), ready: vi.fn(), active: vi.fn(), discover: vi.fn(), retain: vi.fn() }));
 vi.mock('../controller-generation-migration.js', () => ({
   GENERATION_MIGRATION_ROOT: '.juno_task/runtime/generation-migration',
   prepareControllerGeneration: engine.plan, applyControllerGeneration: engine.apply,
@@ -16,6 +17,7 @@ vi.mock('../controller-generation-migration.js', () => ({
   discoverInstalledGeneration: engine.discover,
   retainInstalledGeneration: engine.retain,
   checkActiveControllerGeneration: engine.active,
+  acquireControllerGenerationReadLease: engine.acquire,
 }));
 
 describe('operation-specific first-use generation dispatch', () => {
@@ -39,7 +41,12 @@ describe('operation-specific first-use generation dispatch', () => {
     engine.retain.mockResolvedValue({ evidence });
     engine.apply.mockResolvedValue({ id, outcome: 'completed' });
     engine.ready.mockResolvedValue(undefined);
-    engine.active.mockImplementation(async () => ({ executable: path.join(candidate, 'dist/bin/cli.mjs') }));
+    engine.active.mockImplementation(async () => ({ controller, projection: controller,
+      executable: path.join(candidate, 'dist/bin/cli.mjs') }));
+    engine.acquire.mockResolvedValue(Object.assign(engine.release, {
+      assertHeld: engine.held, assessActive: engine.active, recheckActive: engine.recheck,
+    }));
+    engine.recheck.mockResolvedValue(true);
   });
   afterEach(async () => {
     if (oldCache === undefined) delete process.env.npm_config_cache;
@@ -107,6 +114,9 @@ describe('operation-specific first-use generation dispatch', () => {
     await fs.outputJson(path.join(controller, '.juno_task/runtime/generation-migration/current.json'), {
       candidate: { root: candidate },
     });
+    await fs.outputJson(path.join(candidate, 'package.json'), {
+      yyloControllerGeneration: { ordinaryDispatch: 'explicit-only-v1' },
+    });
     expect((await ensureControllerGeneration(controller, candidate)).disposition).toBe('ready');
     expect(engine.active).toHaveBeenCalledOnce();
     for (const operation of [engine.discover, engine.plan, engine.apply, engine.recover, engine.retain]) {
@@ -132,8 +142,8 @@ describe('operation-specific first-use generation dispatch', () => {
     expect(engine.plan).not.toHaveBeenCalled();
   });
 
-  it('automatically applies an authenticated engine plan before execution', async () => {
-    expect((await ensureControllerGeneration(controller, candidate)).disposition).toBe('ready');
+  it('applies an authenticated engine plan only through explicit upgrade', async () => {
+    expect((await upgradeControllerGeneration(controller, candidate)).disposition).toBe('ready');
     expect(engine.apply).toHaveBeenCalledWith(controller, expect.objectContaining({ id }));
     expect(engine.ready).toHaveBeenCalledWith(controller);
   });
@@ -162,7 +172,7 @@ describe('operation-specific first-use generation dispatch', () => {
     engine.plan.mockRejectedValue(new Error('managed_preimage_modified: .juno_task/scripts/task_workspace.py'));
     const result = await assessControllerGeneration(controller, candidate);
     expect(result).toMatchObject({ disposition: 'refused', code: 'managed_preimage_modified' });
-    await expect(ensureControllerGeneration(controller, candidate)).rejects.toThrow('managed_preimage_modified');
+    await expect(upgradeControllerGeneration(controller, candidate)).rejects.toThrow('managed_preimage_modified');
     expect(engine.apply).not.toHaveBeenCalled();
   });
   it('resumes a valid owned interrupted journal but doctor leaves it untouched', async () => {
@@ -171,7 +181,7 @@ describe('operation-specific first-use generation dispatch', () => {
     expect((await assessControllerGeneration(controller, candidate)).disposition).toBe('transition_incomplete');
     expect(engine.recover).not.toHaveBeenCalled();
     engine.recover.mockImplementation(async () => { await fs.remove(fence); return { outcome: 'completed' }; });
-    expect((await ensureControllerGeneration(controller, candidate)).disposition).toBe('ready');
+    expect((await upgradeControllerGeneration(controller, candidate)).disposition).toBe('ready');
     expect(engine.recover).toHaveBeenCalledWith(controller, id);
   });
   it('rolls back only its own failed activation, not a competing writer', async () => {
@@ -180,12 +190,12 @@ describe('operation-specific first-use generation dispatch', () => {
       throw new Error('operational_readback_failed');
     });
     engine.recover.mockResolvedValue({ outcome: 'rolled_back' });
-    await expect(ensureControllerGeneration(controller, candidate)).rejects.toThrow('operational_readback_failed');
+    await expect(upgradeControllerGeneration(controller, candidate)).rejects.toThrow('operational_readback_failed');
     expect(engine.recover).toHaveBeenCalledWith(controller, id, true);
   });
   it('does not erase or repair malformed fence authority', async () => {
     await fs.outputJson(path.join(controller, '.juno_task/runtime/generation-migration/fence.json'), { id: '../foreign' });
-    await expect(ensureControllerGeneration(controller, candidate)).rejects.toThrow('generation_transition_invalid');
+    await expect(upgradeControllerGeneration(controller, candidate)).rejects.toThrow('generation_transition_invalid');
     expect(engine.recover).not.toHaveBeenCalled();
   });
   it('offers retained dispatch only for a byte-verified existing package and controller', async () => {
@@ -210,10 +220,117 @@ describe('operation-specific first-use generation dispatch', () => {
         '.juno_task/scripts/task_workspace.py': { classification: 'exact', source_sha256: hash('old script'), actual_sha256: hash('old script') },
       },
     });
-    expect(await ensureControllerGeneration(controller, candidate)).toMatchObject({ disposition: 'retained', executable: path.join(previous, 'dist/bin/cli.mjs') });
+    expect(await assessControllerGeneration(controller, candidate)).toMatchObject({ disposition: 'retained', executable: path.join(previous, 'dist/bin/cli.mjs') });
     await fs.writeFile(path.join(previous, 'dist/bin/cli.mjs'), 'tampered executable');
     expect((await assessControllerGeneration(controller, candidate)).disposition).toBe('refused');
     expect(engine.apply).not.toHaveBeenCalled();
+  });
+
+  it('reuses only a live same-root command guard with checked unchanged inputs', async () => {
+    await fs.outputJson(path.join(controller, '.juno_task/runtime/generation-migration/current.json'), { candidate: { root: candidate } });
+    await fs.outputJson(path.join(candidate, 'package.json'), { yyloControllerGeneration: { ordinaryDispatch: 'explicit-only-v1' } });
+    expect(await reuseControllerCommandAdmission(controller, candidate)).toBe(false);
+    const admission = await admitControllerCommand(controller, candidate);
+    try {
+      expect(engine.active).toHaveBeenCalledOnce();
+      expect(await reuseControllerCommandAdmission(controller, '/other-package')).toBe(false);
+      expect(await reuseControllerCommandAdmission('/other-controller', candidate)).toBe(false);
+      expect(engine.recheck).not.toHaveBeenCalled();
+      expect(await reuseControllerCommandAdmission(controller, candidate)).toBe(true);
+      expect(engine.active).toHaveBeenCalledOnce();
+      expect(engine.recheck).toHaveBeenCalledOnce();
+      engine.recheck.mockResolvedValueOnce(false);
+      expect(await reuseControllerCommandAdmission(controller, candidate)).toBe(false);
+      expect(await reuseControllerCommandAdmission(controller, candidate)).toBe(false);
+      expect(engine.recheck).toHaveBeenCalledTimes(2);
+    } finally { await admission.release(); }
+    expect(await reuseControllerCommandAdmission(controller, candidate)).toBe(false);
+  });
+
+  it('invalidates reuse when Git environment changes during a checked readback', async () => {
+    await fs.outputJson(path.join(controller, '.juno_task/runtime/generation-migration/current.json'), { candidate: { root: candidate } });
+    await fs.outputJson(path.join(candidate, 'package.json'), { yyloControllerGeneration: { ordinaryDispatch: 'explicit-only-v1' } });
+    const original = process.env.GIT_CONFIG_GLOBAL;
+    const admission = await admitControllerCommand(controller, candidate);
+    try {
+      engine.recheck.mockImplementationOnce(async () => {
+        process.env.GIT_CONFIG_GLOBAL = '/changed-global-config';
+        return true;
+      });
+      expect(await reuseControllerCommandAdmission(controller, candidate)).toBe(false);
+      expect(await reuseControllerCommandAdmission(controller, candidate)).toBe(false);
+      expect(engine.recheck).toHaveBeenCalledOnce();
+    } finally {
+      if (original === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+      else process.env.GIT_CONFIG_GLOBAL = original;
+      await admission.release();
+    }
+  });
+
+  it('does not turn guard loss into a reusable assessment', async () => {
+    await fs.outputJson(path.join(controller, '.juno_task/runtime/generation-migration/current.json'), { candidate: { root: candidate } });
+    await fs.outputJson(path.join(candidate, 'package.json'), { yyloControllerGeneration: { ordinaryDispatch: 'explicit-only-v1' } });
+    const admission = await admitControllerCommand(controller, candidate);
+    try {
+      engine.held.mockImplementationOnce(() => { throw new Error('generation_read_lock_lost'); });
+      await expect(reuseControllerCommandAdmission(controller, candidate)).rejects.toThrow('generation_read_lock_lost');
+      expect(engine.recheck).not.toHaveBeenCalled();
+    } finally { await admission.release(); }
+  });
+
+  it('ordinary admission refuses legacy controllers without discovering or mutating anything', async () => {
+    await expect(ensureControllerGeneration(controller, candidate)).rejects.toThrow('generation_explicit_upgrade_required');
+    for (const operation of [engine.discover, engine.plan, engine.apply, engine.recover, engine.retain]) {
+      expect(operation).not.toHaveBeenCalled();
+    }
+  });
+
+  it('admits only the exact alias reported by the locked active assessment', async () => {
+    const selected = path.join(root, 'previous');
+    await fs.outputJson(path.join(controller, '.juno_task/runtime/generation-migration/current.json'), { candidate: { root: selected } });
+    await fs.outputJson(path.join(selected, 'package.json'), { yyloControllerGeneration: { ordinaryDispatch: 'explicit-only-v1' } });
+    engine.active.mockResolvedValue({ controller, projection: controller, executable: path.join(selected, 'dist/bin/cli.mjs'),
+      equivalent_executable: path.join(candidate, 'dist/bin/cli.mjs') });
+    const admission = await admitControllerCommand(controller, candidate);
+    try {
+      expect(admission.assessment.disposition).toBe('ready');
+      expect(await reuseControllerCommandAdmission(controller, candidate)).toBe(true);
+      engine.recheck.mockResolvedValueOnce(false);
+      expect(await reuseControllerCommandAdmission(controller, candidate)).toBe(false);
+    } finally { await admission.release(); }
+    engine.active.mockResolvedValue({ controller, projection: controller, executable: path.join(selected, 'dist/bin/cli.mjs'),
+      equivalent_executable: '/different/package/dist/bin/cli.mjs' });
+    expect((await ensureControllerGeneration(controller, candidate)).disposition).toBe('retained');
+    for (const operation of [engine.discover, engine.plan, engine.apply, engine.recover, engine.retain]) {
+      expect(operation).not.toHaveBeenCalled();
+    }
+  });
+
+  it('ordinary admission authenticates only the selected runtime when global differs', async () => {
+    const selected = path.join(root, 'previous');
+    await fs.outputJson(path.join(controller, '.juno_task/runtime/generation-migration/current.json'), {
+      candidate: { root: selected },
+    });
+    await fs.outputJson(path.join(selected, 'package.json'), {
+      yyloControllerGeneration: { ordinaryDispatch: 'explicit-only-v1' },
+    });
+    engine.active.mockResolvedValue({ controller, projection: controller, executable: path.join(selected, 'dist/bin/cli.mjs') });
+    expect(await ensureControllerGeneration(controller, candidate)).toMatchObject({ disposition: 'retained', executable: path.join(selected, 'dist/bin/cli.mjs') });
+    for (const operation of [engine.discover, engine.plan, engine.apply, engine.recover, engine.retain]) {
+      expect(operation).not.toHaveBeenCalled();
+    }
+    // An older package cannot be reentered just because its bytes authenticate.
+    await fs.outputJson(path.join(selected, 'package.json'), { name: '@yylo/cli', version: '0.2.3' });
+    await expect(ensureControllerGeneration(controller, candidate)).rejects.toThrow('selected legacy runtime');
+  });
+
+  it('ordinary admission preserves interrupted transactions and primary refusal', async () => {
+    engine.ready.mockRejectedValueOnce(new Error('generation_transition_incomplete: exact journal'));
+    await expect(ensureControllerGeneration(controller, candidate)).rejects.toThrow('generation_transition_incomplete');
+    expect(engine.active).not.toHaveBeenCalled();
+    for (const operation of [engine.discover, engine.plan, engine.apply, engine.recover, engine.retain]) {
+      expect(operation).not.toHaveBeenCalled();
+    }
   });
 
   it('keeps diagnostics read-only and explicit maintenance separate', () => {
@@ -226,6 +343,15 @@ describe('operation-specific first-use generation dispatch', () => {
     }
     expect(generationCommandKind(['scripts', 'generation', 'rollback'])).toBe('maintenance');
     expect(generationCommandKind(['migrate', 'runtime-install-rebind'])).toBe('skip');
+  });
+
+  it('suppresses notices using parsed options, never prompt contents', () => {
+    const program = new Command().option('-q, --quiet').option('-p, --prompt <text>');
+    program.command('pi').option('-q, --quiet').option('-p, --prompt <text>');
+    const context = (argv: string[]) => generationInvocationContext(program, argv, '/launcher');
+    expect(context(['pi', '--quiet', '-p', 'hello']).quiet).toBe(true);
+    expect(context(['pi', '-p', '--quiet']).quiet).toBeUndefined();
+    expect(context(['pi', '--', '--quiet']).quiet).toBeUndefined();
   });
 
   it('routes the actual agent cwd using option arity without mutating the execution parser', () => {

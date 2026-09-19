@@ -163,6 +163,24 @@ export function writeTerminalProgressWithPrefix(prefix: string, message: any): v
   getTerminalProgressWriter().writeWithPrefix(prefix, message);
 }
 
+/** Invocation-local waiting notices, never a timeout or cancellation owner. */
+export async function withWaitingProgress<T>(
+  message: string,
+  operation: () => Promise<T>,
+  enabled = true,
+): Promise<T> {
+  if (!enabled) return operation();
+  const notify = (): void => {
+    try { writeTerminalProgress(`YYLO: ${message}`); } catch { /* Preserve the primary operation. */ }
+  };
+  // Announce before potentially synchronous work, then leave headroom below
+  // the five-second progress interval. Nothing is written to stdout.
+  notify();
+  const timer = setInterval(notify, 4000);
+  timer.unref();
+  try { return await operation(); } finally { clearInterval(timer); }
+}
+
 /**
  * Reset the global writer (useful for testing)
  */
