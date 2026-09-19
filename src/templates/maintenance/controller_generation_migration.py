@@ -36,6 +36,8 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import task_workspace as compatibility
 import metadata_controller as endpoints
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import package_wiki_publication as package_wiki
 
 SCHEMA = "yylo_controller_generation_transaction.v1"
 ROOT = ".juno_task/runtime/generation-migration"
@@ -498,6 +500,8 @@ def assets(package: dict[str, Any]) -> dict[str, dict[str, Any]]:
     result = {}
     rows = [row for row in declaration.get("assets", []) if row.get("type") != "config"]
     rows += declaration.get("controllerOutputs", [])
+    if declaration.get("ledgerWiki") is not None:
+        rows = [row for row in rows if row.get("type") != "wiki"]
     for row in rows:
         name, source = relative(row["destination"]), relative(row["source"])
         if name in result:
@@ -635,7 +639,7 @@ def plan(root: Path, candidate_evidence: dict[str, str], previous_evidence: dict
 
 def prepare(root: Path, candidate_evidence: dict[str, str], previous_evidence: dict[str, str],
             frozen: dict[str, Any] | None = None, attempt: str | None = None,
-            repair: bool = False) -> dict[str, Any]:
+            repair: bool = False, frozen_package_wiki=None) -> dict[str, Any]:
     """Pure preparation, also used to authenticate recovery against frozen preimages."""
     authority = registration(root)
     def observe(name):
@@ -671,6 +675,24 @@ def prepare(root: Path, candidate_evidence: dict[str, str], previous_evidence: d
     else:
         raise Refusal("historical_identity_unsupported", f"{old_name}@{old_version}")
     old_assets, new_assets = assets(previous), assets(candidate)
+    try:
+        publication = package_wiki.prepare(root, candidate, frozen_package_wiki)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        raise Refusal("package_wiki_preparation_failed", str(exc)) from exc
+    if publication is not None:
+        new_assets[package_wiki.BINDING] = {"data": encoded(publication["binding"]), "type": "config"}
+    # Prior bindings are authenticated by the previous generation's inventory;
+    # their exact bytes are preimages, never reconstructed from latest Records.
+    if package_wiki.manifest(previous) is not None:
+        old_binding = observe(package_wiki.BINDING)
+        if old_binding is None:
+            raise Refusal("package_wiki_binding_missing", package_wiki.BINDING)
+        try:
+            package_wiki.validate_binding(previous, decode_json(content(old_binding)))
+            package_wiki.verify(root, decode_json(content(old_binding)))
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            raise Refusal("previous_package_wiki_unverified", str(exc)) from exc
+        old_assets[package_wiki.BINDING] = {"data": content(old_binding), "type": "config"}
     inventory_image = observe(INVENTORY)
     inventory = decode_json(content(inventory_image))
     if inventory.get("packageName") != old_name or (not repair and inventory.get("packageVersion") != old_version):
@@ -786,6 +808,8 @@ def prepare(root: Path, candidate_evidence: dict[str, str], previous_evidence: d
     body = {"schema_version": SCHEMA, "controller": str(root), "authority": authority, "adapter": adapter,
             "candidate": candidate_evidence, "previous": previous_evidence, "before": before, "after": after,
             "guards": guards, "active_pins": pins, "attempt": attempt or secrets.token_hex(16)}
+    if publication is not None:
+        body["package_wiki"] = publication
     if repair:
         body.update(repair=True, review_required=sorted(set(review_required)))
     return {**body, "id": digest(encoded(body))}
@@ -934,6 +958,14 @@ def transition(root: Path, value: dict[str, Any], rollback: bool = False, bounda
         observed = snapshot(path_for(root, name, value["authority"]))
         if observed not in (source[name], target[name]):
             raise Refusal("rollback_race" if rollback else "activation_race", name)
+    if not rollback and value.get("package_wiki") is not None:
+        try:
+            wiki_receipt = package_wiki.stage(root, value["package_wiki"])
+            publish(safe(root, journal + "/package-wiki-receipt.json"), encoded(wiki_receipt), immutable=True)
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            raise Refusal("package_wiki_publication_failed", str(exc)) from exc
+        if boundary:
+            boundary("package-wiki-staged")
     for index, name in enumerate(names):
         destination = path_for(root, name, value["authority"])
         expected = target[name]
@@ -1033,7 +1065,8 @@ def recover(root: Path, transaction_id: str, rollback: bool = False, boundary=No
         # A self-hash is integrity, not write authority. Reconstruct the complete
         # authenticated adapter output against frozen preimages before any writes.
         reconstructed = prepare(root, value["candidate"], value["previous"],
-                                frozen={**value["before"], **value["guards"]}, attempt=value["attempt"], repair=value.get('repair', False))
+                                frozen={**value["before"], **value["guards"]}, attempt=value["attempt"], repair=value.get('repair', False),
+                                frozen_package_wiki=value.get("package_wiki"))
         if reconstructed != value:
             raise Refusal("journal_authority_invalid", "write set is not the authenticated generation projection")
         fence = safe(root, ROOT + "/fence.json")
@@ -1085,6 +1118,29 @@ def runtime_ready(root: Path, repository: Path, running: Path,
     if not compatibility._managed_inventory_identity_valid(inventory):
         raise Refusal("current_generation_unverified", "invalid inventory identity")
     declared = assets(package)
+    wiki_manifest = package_wiki.manifest(package)
+    if wiki_manifest is not None:
+        binding_image = snapshot(safe(root, package_wiki.BINDING))
+        if binding_image is None:
+            raise Refusal("package_wiki_binding_missing", package_wiki.BINDING)
+        binding = decode_json(content(binding_image))
+        try:
+            package_wiki.validate_binding(package, binding)
+        except ValueError as exc:
+            raise Refusal("package_wiki_binding_unverified", str(exc)) from exc
+        declared[package_wiki.BINDING] = {"data": content(binding_image), "type": "config"}
+        if root.resolve() == repository.resolve():
+            # Include immutable revision bytes in the reader guard's input set;
+            # otherwise checked-engine reuse could miss out-of-band Record damage.
+            # Ledger remains the validator/reader; these are invalidation guards,
+            # not a filesystem-wiki fallback or an alternate write path.
+            for pin in binding["records"]:
+                identity, revision = pin["id"], pin["revision"]
+                snapshot(safe(root, f".juno_task/documents/{identity[:2].lower()}/{identity}/{revision:08d}.json"))
+            try:
+                package_wiki.verify(root, binding)
+            except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+                raise Refusal("package_wiki_binding_unverified", str(exc)) from exc
     if set(inventory["assets"]) != set(declared):
         raise Refusal("current_generation_unverified", "incomplete managed asset ownership")
     for name, item in declared.items():

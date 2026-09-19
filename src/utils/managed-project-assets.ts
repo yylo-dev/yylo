@@ -40,10 +40,13 @@ if (!instructionDeclarationCompatible(managedAssetManifest.schemaVersion, manage
 }
 const INSTRUCTION_BUNDLE_DECLARATION =
   managedAssetManifest.instructionBundle as InstructionBundleDeclaration;
-const MANAGED_ASSET_DEFINITIONS = managedAssetManifest.assets as ManagedAssetDefinition[];
+// Wiki rows are retained solely as legacy migration mappings, not file outputs.
+const MANAGED_ASSET_DEFINITIONS = (managedAssetManifest.assets as ManagedAssetDefinition[])
+  .filter((asset) => asset.type !== 'wiki');
 const MANAGED_CONTROLLER_OUTPUTS = (
   managedAssetManifest.controllerOutputs as ManagedControllerOutputDefinition[]
-).map((asset): ManagedAssetDefinition => ({ ...asset, installClass: 'controller' }));
+).filter((asset) => asset.type !== 'wiki')
+  .map((asset): ManagedAssetDefinition => ({ ...asset, installClass: 'controller' }));
 
 export const MANAGED_ASSETS = MANAGED_ASSET_DEFINITIONS.filter(
   (asset) => asset.installClass !== 'controller',
@@ -374,6 +377,28 @@ function targetBoundSource(
 }
 
 export class ManagedProjectAssets {
+  /** Explicit native-publication boundary, separately exercised by real-Git/ Ledger tests. */
+  static stagePackageWiki(projectDir: string, templatesDir: string): string {
+    const helper = path.join(templatesDir, 'maintenance/package_wiki_publication.py');
+    const publication = spawnSync('python3', ['-I', '-B', helper, '--bootstrap', projectDir,
+      '--package-root', path.resolve(templatesDir, '../..')], {
+      encoding: 'utf8', timeout: 90_000, maxBuffer: 1024 * 1024,
+    });
+    if (publication.error || publication.status !== 0) {
+      throw new Error('package_wiki_bootstrap_refused: preserve controller bytes; use an authenticated ' +
+        'release and compatible Ledger, or the generation migration for an existing binding');
+    }
+    return `${JSON.stringify(JSON.parse(publication.stdout), null, 2)}\n`;
+  }
+
+  static verifyPackageWiki(projectDir: string, templatesDir: string): boolean {
+    const result = spawnSync('python3', ['-I', '-B', path.join(templatesDir, 'maintenance/package_wiki_publication.py'),
+      '--verify-binding', projectDir, '--package-root', path.resolve(templatesDir, '../..')], {
+      encoding: 'utf8', timeout: 90_000, maxBuffer: 1024 * 1024,
+    });
+    return !result.error && result.status === 0;
+  }
+
   static getTemplatesDirectory(): string | null {
     const dirname = path.dirname(fileURLToPath(import.meta.url));
     const candidates = [
@@ -643,6 +668,11 @@ export class ManagedProjectAssets {
       if (result.conflicts.length > 0) return result;
     }
 
+    let packageWikiBinding: string | undefined;
+    if (isMetadataOnlyController(projectConfig)) {
+      await assertSafeManagedWritePath(projectDir, path.join(projectDir, '.juno_task/config/package-wiki.json'));
+      packageWikiBinding = this.stagePackageWiki(projectDir, templatesDir as string);
+    }
     await this.migrateRetiredGeneration(projectDir, manifest, result, Boolean(options.force));
 
     // Scripts and project guidance are one migration generation.  Handling only
@@ -733,6 +763,14 @@ export class ManagedProjectAssets {
       Object.entries(manifest.assets).filter(([destination]) =>
         applicableDestinations.has(destination)),
     );
+    if (packageWikiBinding !== undefined) {
+      const bindingRelative = '.juno_task/config/package-wiki.json';
+      const bindingPath = path.join(projectDir, bindingRelative);
+      await writeAtomic(bindingPath, packageWikiBinding, projectDir);
+      const identity = sha256(packageWikiBinding);
+      manifest.assets[bindingRelative] = { type: 'config', templateVersion: packageVersion,
+        sourceSha256: identity, installedSha256: identity };
+    }
     manifest.schemaVersion = 2;
     manifest.packageName = '@yylo/cli';
     manifest.packageVersion = options.recovery?.packageVersion ?? packageVersion;
@@ -1032,6 +1070,15 @@ export class ManagedProjectAssets {
       });
     }
 
+    if (isMetadataOnlyController(projectConfig)) {
+      const destination = '.juno_task/config/package-wiki.json';
+      const bindingPath = path.join(projectDir, destination);
+      const present = await fs.pathExists(bindingPath);
+      const record = manifest.assets[destination];
+      const current = present && record?.installedSha256 === sha256(await fs.readFile(bindingPath)) &&
+        this.verifyPackageWiki(projectDir, templatesDir as string);
+      entries.push({ destination, installClass: 'controller', state: current ? 'current' : present ? 'customized' : 'missing' });
+    }
     const scripts = entries.filter((entry) => entry.installClass === 'script');
     const guidance = entries.filter(
       (entry) =>
