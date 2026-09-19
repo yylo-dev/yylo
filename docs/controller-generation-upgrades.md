@@ -202,8 +202,8 @@ readiness, and historical task pins need not match the latest candidate.
 If candidate discovery refuses cache bounds, preserve the cache and retained
 runtimes. Obtain the exact release tarball and externally published release-manifest
 digest (or registry integrity), verify those bytes, and use the supported explicit
-artifact installation/rebind workflow (`yy migrate runtime-install-rebind --help`)
-under separate installation review. That workflow is a mutation, not part of this
+artifact installation/rebind workflow (`runtime-install-rebind` in the public
+migration help) under separate installation review. That workflow is a mutation, not part of this
 check. Review its exact package/version, artifact, prefix and receipt before
 execution; then explicitly activate and rerun diagnostics on that machine. Never
 invent `.yylo-generation-evidence.json`, raise cache bounds, or delete evidence to
