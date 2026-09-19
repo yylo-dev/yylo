@@ -74,13 +74,14 @@ Next: [run an agent](#beginner-agent-workflow), [manage a typed task](#typed-tas
 
 YYLO skill content is versioned independently in the public
 [`yylo-dev/yylo-skills`](https://github.com/yylo-dev/yylo-skills) repository and
-is not bundled in `@yylo/cli`. Install the latest stable release, or pin an exact
-stable version:
+is not bundled in `@yylo/cli`. This CLI requires stable skills `^2.0.2`, declared
+in `package.json` as `yyloSkills.version`. Install the latest compatible stable
+release, or pin an exact compatible version:
 
 ```bash
 yy skills install
-yy skills install --version 2.0.0
-yy skills update --force
+yy skills install --version 2.0.2
+yy skills update
 yy skills status
 ```
 
@@ -89,11 +90,22 @@ staged through `npx skills add` first and falls back to a shallow exact-tag Git
 clone. The seven user-intent-first skills (`artifact-yylo`, `ledger-tasks-yylo`,
 `plan-ledger-tasks-yylo`, `ralph-loop-yylo`, `understand-project-yylo`,
 `wiki-yylo`, and `workflow-yylo`) are copied to `.agents/skills`,
-`.claude/skills`, and `.pi/skills`. Differing canonical directories are refused
-unless `--force` is supplied. An explicit install/update retires a legacy YYLO
-skill only when its local install record and current digest prove it unchanged;
-customized legacy and unrelated skills are preserved with a warning. `skills
-list` and `skills status` use only the local install record.
+`.claude/skills`, and `.pi/skills`. During install/update, unchanged receipt-owned
+copies upgrade automatically without `--force`. Customized or unrecorded differing
+canonical directories refuse before mutation; review before explicitly forcing
+replacement. An explicit install/update retires a legacy YYLO skill only when its
+local install record and current digest prove it unchanged; customized/unrecorded
+legacy and unrelated skills remain preserved. Status flags these legacy copies
+because they can still inject obsolete instructions; review them separately,
+never infer cleanup authority from successful installation.
+
+`skills list` and `skills status` inspect local bytes and receipts offline. Status
+reports the required range and outdated releases even when their hashes match.
+No compatible published release means installation fails without changing skills;
+it never falls back to an old release or an unsupported future major. Installing
+the CLI alone does not install/update skills, and `scripts update` does not own
+skills. Maintainers must publish the reviewed immutable skill release before
+shipping a CLI that requires it; publication remains separately authorized.
 
 ## What YYLO owns
 
