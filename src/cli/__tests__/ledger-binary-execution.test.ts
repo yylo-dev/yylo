@@ -17,7 +17,7 @@ async function fixture() {
   const executable = path.join(bin, 'yylo-ledger');
   await writeFile(executable, `#!/usr/bin/env node
 const fs=require('node:fs');
-if(process.argv[2]==='--version'){console.log('yylo-ledger 0.3.1');process.exit(0);}
+if(process.argv[2]==='--version'){console.log('yylo-ledger 0.3.2');process.exit(0);}
 const input=fs.readFileSync(0,'utf8');fs.writeFileSync(process.env.FAKE_RECORD,JSON.stringify({argv:process.argv.slice(2),cwd:process.cwd(),input}));
 if(process.env.FAKE_SIGNAL)process.kill(process.pid,process.env.FAKE_SIGNAL);
 process.stdout.write('standalone stdout\\n');process.stderr.write('standalone stderr\\n');process.exit(Number(process.env.FAKE_EXIT||0));
@@ -30,14 +30,14 @@ beforeAll(async () => chmod(wrapper, 0o755));
 afterEach(async () => Promise.all(fixtures.splice(0).map((item) => rm(item, { recursive: true, force: true }))));
 
 describe('built yy/yylo ledger delegation', () => {
-  it.each(['yy', 'yylo'])('preserves %s args, help, stdio, cwd, environment, and exit status', async (surface) => {
+  it.each([['yy', 'ledger'], ['yylo', 'ledger'], ['yy', 'wiki'], ['yylo', 'wiki']])('preserves %s %s args, help, stdio, cwd, environment, and exit status', async (surface, command) => {
     const item = await fixture();
     await import('node:fs/promises').then(async ({ symlink }) => {
       await symlink(wrapper, path.join(item.root, 'yylo'));
       await symlink(wrapper, path.join(item.root, 'yy'));
     });
     const launcher = path.join(item.root, surface);
-    const result = await execa(launcher, ['ledger', 'list', '--help'], {
+    const result = await execa(launcher, [command!, 'list', '--help'], {
       cwd: item.root,
       env: { ...item.env, PATH: `${item.root}${path.delimiter}${item.env.PATH}`, FAKE_EXIT: '43' },
       input: 'request body',
@@ -46,13 +46,13 @@ describe('built yy/yylo ledger delegation', () => {
     expect(result.exitCode, result.stderr).toBe(43);
     expect(result.stdout).toBe('standalone stdout');
     expect(result.stderr).toBe('standalone stderr');
-    expect(JSON.parse(await readFile(item.record, 'utf8'))).toEqual({ argv: ['list', '--help'], cwd: await realpath(item.root), input: 'request body' });
+    expect(JSON.parse(await readFile(item.record, 'utf8'))).toEqual({ argv: command === 'wiki' ? ['wiki', 'list', '--help'] : ['list', '--help'], cwd: await realpath(item.root), input: 'request body' });
   });
 
-  it('mirrors standalone signal termination', async () => {
+  it.each(['ledger', 'wiki'])('%s mirrors standalone signal termination', async (command) => {
     const item = await fixture();
     const outcome = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
-      const child = spawn(wrapper, ['ledger', 'list'], { cwd: item.root, env: { ...item.env, FAKE_SIGNAL: 'SIGTERM' }, stdio: 'ignore' });
+      const child = spawn(wrapper, [command, 'list'], { cwd: item.root, env: { ...item.env, FAKE_SIGNAL: 'SIGTERM' }, stdio: 'ignore' });
       child.once('error', reject); child.once('exit', (code, signal) => resolve({ code, signal }));
     });
     expect(outcome).toEqual({ code: null, signal: 'SIGTERM' });
