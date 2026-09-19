@@ -528,10 +528,16 @@ if (process.argv.includes('--version')) {
     });
     expect(result.error).toBeUndefined();
     expect(result.status, result.stderr).toBe(2);
-    expect(result.stderr).toContain('generation_provenance_required');
-    expect(result.stderr).toContain('Preserve controller bytes');
+    expect(result.stderr).toContain('generation_explicit_upgrade_required');
+    expect(result.stderr).toContain('yy scripts generation upgrade');
+    expect(result.stderr).toContain('Preserve prior runtime and controller bytes');
     expect(await fs.pathExists(marker)).toBe(false);
-    expect(await fs.readdir(path.join(project, '.juno_task'))).toEqual([]);
+    // Reader admission creates only its lock, never migration plans/receipts.
+    const taskRoot = path.join(project, '.juno_task');
+    expect(await fs.readdir(taskRoot)).toEqual(['runtime']);
+    expect(await fs.readdir(path.join(taskRoot, 'runtime'))).toEqual(['generation-migration']);
+    expect(await fs.readdir(path.join(taskRoot, 'runtime/generation-migration'))).toEqual(['lock']);
+    expect(await fs.readFile(path.join(taskRoot, 'runtime/generation-migration/lock'), 'utf8')).toBe('');
     const written = await events(project, root);
     expect(written.filter(event => event.event_type === 'invocation_started')).toHaveLength(1);
     expect(written.filter(event => event.event_type === 'invocation_finished')).toEqual([

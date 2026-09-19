@@ -9,6 +9,7 @@ import {
   resetTerminalProgressWriter,
   writeTerminalProgress,
   writeTerminalProgressWithPrefix,
+  withWaitingProgress,
 } from '../terminal-progress-writer.js';
 import {
   setFeedbackActive,
@@ -16,6 +17,39 @@ import {
   getBufferedProgressEvents,
 } from '../feedback-state.js';
 import { Writable } from 'node:stream';
+
+describe('invocation waiting progress', () => {
+  beforeEach(() => { vi.useFakeTimers(); resetFeedbackState(); resetTerminalProgressWriter(); });
+  afterEach(() => { vi.useRealTimers(); resetTerminalProgressWriter(); });
+
+  it('announces immediately and every four seconds without terminating a slow operation', async () => {
+    const write = vi.spyOn(getTerminalProgressWriter(), 'write').mockImplementation(() => {});
+    let finish!: (value: number) => void;
+    const result = withWaitingProgress('Checking runtime…', () => new Promise<number>(resolve => { finish = resolve; }));
+    expect(write).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(12000);
+    expect(write).toHaveBeenCalledTimes(4);
+    finish(42);
+    await expect(result).resolves.toBe(42);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(write).toHaveBeenCalledTimes(4);
+  });
+
+  it('preserves primary failures even when progress throws, and removes its timer', async () => {
+    vi.spyOn(getTerminalProgressWriter(), 'write').mockImplementation(() => { throw new Error('closed progress sink'); });
+    const primary = new Error('primary startup refusal');
+    await expect(withWaitingProgress('Checking runtime…', async () => { throw primary; })).rejects.toBe(primary);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('quiet mode runs unchanged without output or timers', async () => {
+    const write = vi.spyOn(getTerminalProgressWriter(), 'write').mockImplementation(() => {});
+    await expect(withWaitingProgress('Checking runtime…', async () => 7, false)).resolves.toBe(7);
+    expect(write).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
 
 describe('TerminalProgressWriter', () => {
   let mockStream: Writable & { isTTY?: boolean };

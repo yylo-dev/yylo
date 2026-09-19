@@ -2,11 +2,14 @@
 """Real-Git contracts for guarded integration-owner synchronization."""
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -34,6 +37,221 @@ def run(argv: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedP
 
 def git(root: Path, *args: str) -> str:
     return run(["git", "-C", str(root), *args], root).stdout.strip()
+
+
+def launcher_package(root: Path, label: str, bins=None) -> Path:
+    bins = bins or {"yy": "./dist/bin/yylo.sh", "yylo": "./dist/bin/yylo.sh",
+                    "ypl": "./dist/bin/ypl.sh", "feedback-yylo": "./dist/bin/feedback.mjs",
+                    "future-command": "./dist/bin/future.sh"}
+    root.mkdir()
+    files = {"package.json": json.dumps({"name": "@yylo/cli", "version": "0.2.6", "bin": bins}).encode(),
+             "dist/bin/cli.mjs": b"// fixture only\n"}
+    for target in bins.values():
+        files[target.removeprefix("./")] = (
+            "#!/bin/sh\nprintf 'Commands:\\n  status read\\n  land one\\n  project retry\\n" + label + "\\n'\n").encode()
+    packed = io.BytesIO()
+    with tarfile.open(fileobj=packed, mode="w:gz") as archive:
+        for name, data in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            path.chmod(0o755)
+            entry = tarfile.TarInfo("package/" + name)
+            entry.size = len(data)
+            entry.mode = 0o755
+            archive.addfile(entry, io.BytesIO(data))
+    artifact = root.parent / (root.name + ".tgz")
+    artifact.write_bytes(packed.getvalue())
+    (root / ".yylo-generation-evidence.json").write_text(json.dumps({
+        "root": str(root), "artifact": str(artifact), "sha256": hashlib.sha256(packed.getvalue()).hexdigest()}))
+    return root / "dist/bin/cli.mjs"
+
+
+class LauncherSelectionTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="yylo-launchers-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.old = launcher_package(self.root / "old", "old")
+        self.new = launcher_package(self.root / "new", "new")
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.old_bins = runtime.adoption_package_bins(self.old)
+        for name, target in self.old_bins.items():
+            (self.bin / name).symlink_to(target)
+        self.environment = mock.patch.dict(os.environ, {"PATH": str(self.bin)})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+
+    def before(self):
+        return {name: os.readlink(self.bin / name) for name in self.old_bins}
+
+    def test_complete_manifest_distinct_targets_and_fresh_processes(self):
+        before = self.before()
+        selection = runtime.adoption_public_launchers(str(self.old), self.new)
+        runtime.adoption_verify_public_dispatch(selection)
+        self.assertEqual({row["name"] for row in selection["links"]}, set(self.old_bins))
+        for name, target in runtime.adoption_package_bins(self.new).items():
+            self.assertEqual(str((self.bin / name).resolve()), target)
+            self.assertIn("new", run([str(self.bin / name)], self.root).stdout)
+        self.assertTrue(runtime.adoption_restore_public_launchers(selection))
+        self.assertEqual(self.before(), before)
+
+    def test_stale_ypl_and_path_shadow_are_detected(self):
+        selection = runtime.adoption_public_launchers(str(self.old), self.new)
+        (self.bin / "ypl").unlink()
+        (self.bin / "ypl").symlink_to(self.old_bins["ypl"])
+        with self.assertRaisesRegex(runtime.AdoptionError, "selector drifted"):
+            runtime.adoption_verify_public_dispatch(selection)
+        self.assertFalse(runtime.adoption_restore_public_launchers(selection))
+        self.assertEqual(os.readlink(self.bin / "ypl"), self.old_bins["ypl"])
+        shadow = self.root / "shadow"
+        shadow.mkdir()
+        (shadow / "ypl").symlink_to(self.old_bins["ypl"])
+        with mock.patch.dict(os.environ, {"PATH": str(shadow) + os.pathsep + str(self.bin)}):
+            preflight = runtime.adoption_public_launcher_preflight(str(self.old))
+            self.assertEqual(next(row["path"] for row in preflight if row["name"] == "ypl"), str(shadow / "ypl"))
+
+    def test_foreign_missing_and_mixed_commands_refuse_before_writes(self):
+        for kind in ("file", "missing", "mixed"):
+            with self.subTest(kind=kind):
+                path = self.bin / "ypl"
+                path.unlink()
+                if kind == "file":
+                    path.write_text("#!/bin/sh\nexit 0\n")
+                    path.chmod(0o755)
+                elif kind == "mixed":
+                    path.symlink_to(runtime.adoption_package_bins(self.new)["ypl"])
+                untouched = os.readlink(self.bin / "yy")
+                with self.assertRaises(runtime.AdoptionError):
+                    runtime.adoption_public_launchers(str(self.old), self.new)
+                self.assertEqual(os.readlink(self.bin / "yy"), untouched)
+                path.unlink(missing_ok=True)
+                path.symlink_to(self.old_bins["ypl"])
+
+    def test_changed_preflight_and_command_set_refuse_without_writes(self):
+        before = self.before()
+        preflight = runtime.adoption_public_launcher_preflight(str(self.old))
+        preflight[0]["before"] = "changed"
+        with self.assertRaisesRegex(runtime.AdoptionError, "changed after preflight"):
+            runtime.adoption_public_launchers(str(self.old), self.new, preflight)
+        other = launcher_package(self.root / "other", "other", {
+            "yy": "./dist/bin/yylo.sh", "yylo": "./dist/bin/yylo.sh"})
+        with self.assertRaisesRegex(runtime.AdoptionError, "command set changed"):
+            runtime.adoption_public_launchers(str(self.old), other)
+        self.assertEqual(self.before(), before)
+
+    def test_each_replacement_failure_restores_exact_preimages(self):
+        before = self.before()
+        replace = runtime.adoption_replace_launcher
+        for fail_at in range(1, len(before) + 1):
+            calls = 0
+            def injected(path, target):
+                nonlocal calls
+                calls += 1
+                if calls == fail_at:
+                    raise OSError("injected link failure")
+                replace(path, target)
+            with self.subTest(fail_at=fail_at), mock.patch.object(runtime, "adoption_replace_launcher", side_effect=injected):
+                with self.assertRaisesRegex(OSError, "injected link failure"):
+                    runtime.adoption_public_launchers(str(self.old), self.new)
+            self.assertEqual(self.before(), before)
+
+    def test_journal_precedes_mutation_and_survives_failure(self):
+        journal = self.root / "selectors.json"
+        before = self.before()
+        def fail(path, target):
+            saved = json.loads(journal.read_bytes())
+            self.assertEqual({row["name"]: row["before"] for row in saved["links"]}, before)
+            raise OSError("injected before first write")
+        with mock.patch.object(runtime, "adoption_replace_launcher", side_effect=fail):
+            with self.assertRaisesRegex(OSError, "before first write"):
+                runtime.adoption_public_launchers(str(self.old), self.new, journal=journal)
+        self.assertEqual(self.before(), before)
+        self.assertTrue(journal.is_file())
+        with self.assertRaisesRegex(runtime.AdoptionError, "already exists"):
+            runtime.adoption_public_launchers(str(self.old), self.new, journal=journal)
+        self.assertEqual(self.before(), before)
+
+    def test_rollback_retains_foreign_successor_and_authenticates_predecessor(self):
+        selection = runtime.adoption_public_launchers(str(self.old), self.new)
+        yy = self.bin / "yy"
+        yy.unlink()
+        yy.symlink_to(self.old_bins["yy"])
+        self.assertFalse(runtime.adoption_restore_public_launchers(selection))
+        self.assertEqual(os.readlink(yy), self.old_bins["yy"])
+        selection = runtime.adoption_public_launchers(str(self.old), self.new)
+        (self.old.parent / "ypl.sh").write_bytes(b"changed predecessor")
+        before = self.before()
+        with self.assertRaisesRegex(runtime.AdoptionError, "differs from artifact"):
+            runtime.adoption_restore_public_launchers(selection)
+        self.assertEqual(self.before(), before)
+
+    def test_nonexecutable_hardlink_bad_evidence_and_unsafe_bin_refuse(self):
+        path = self.new.parent / "ypl.sh"
+        path.chmod(0o644)
+        with self.assertRaisesRegex(runtime.AdoptionError, "nonexecutable"):
+            runtime.adoption_package_bins(self.new)
+        path.chmod(0o755)
+        hardlink = self.root / "hardlink"
+        os.link(path, hardlink)
+        with self.assertRaisesRegex(runtime.AdoptionError, "unsafe launcher package file"):
+            runtime.adoption_package_bins(self.new)
+        hardlink.unlink()
+        evidence = self.new.parents[2] / ".yylo-generation-evidence.json"
+        value = json.loads(evidence.read_bytes())
+        value["sha256"] = "0" * 64
+        evidence.write_text(json.dumps(value))
+        with self.assertRaisesRegex(runtime.AdoptionError, "digest mismatch"):
+            runtime.adoption_package_bins(self.new)
+        unsafe = launcher_package(self.root / "unsafe", "unsafe", {
+            "yy": "./dist/bin/yylo.sh", "yylo": "./dist/bin/yylo.sh",
+            "../foreign": "./dist/bin/ypl.sh"})
+        with self.assertRaisesRegex(runtime.AdoptionError, "unsafe package bin name"):
+            runtime.adoption_package_bins(unsafe)
+
+    def test_authentication_tampering_bytecode_and_symlink_refuse(self):
+        target = self.new.parent / "ypl.sh"
+        original = target.read_bytes()
+        target.write_bytes(original + b"# changed\n")
+        with self.assertRaisesRegex(runtime.AdoptionError, "differs from artifact"):
+            runtime.adoption_package_bins(self.new)
+        target.write_bytes(original)
+        foreign = self.new.parent / "foreign.pyc"
+        foreign.write_bytes(b"bytecode")
+        with self.assertRaisesRegex(runtime.AdoptionError, "unverified launcher execution"):
+            runtime.adoption_package_bins(self.new)
+        foreign.unlink()
+        target.unlink()
+        target.symlink_to(self.old.parent / "ypl.sh")
+        with self.assertRaisesRegex(runtime.AdoptionError, "unsafe launcher package path"):
+            runtime.adoption_package_bins(self.new)
+
+    def test_nonregular_evidence_refuses_without_blocking(self):
+        fifo = self.root / "fifo"
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(runtime.AdoptionError, "unsafe launcher package file"):
+            runtime.adoption_launcher_bytes(fifo)
+
+    def test_receipt_binds_both_artifact_evidence_identities(self):
+        selection = runtime.adoption_public_launchers(str(self.old), self.new)
+        for executable, key, action in (
+                (self.new, "artifact identity drifted", runtime.adoption_verify_public_dispatch),
+                (self.old, "predecessor artifact identity changed", runtime.adoption_restore_public_launchers)):
+            evidence = executable.parents[2] / ".yylo-generation-evidence.json"
+            original = evidence.read_bytes()
+            evidence.write_bytes(original + b"\n")
+            with self.assertRaisesRegex(runtime.AdoptionError, key):
+                action(selection)
+            evidence.write_bytes(original)
+
+    def test_legacy_and_incomplete_receipts_do_not_claim_complete_activation(self):
+        with self.assertRaisesRegex(runtime.AdoptionError, "legacy launcher receipt"):
+            runtime.adoption_verify_public_dispatch({"executable": str(self.new), "links": []})
+        selection = runtime.adoption_public_launchers(str(self.old), self.new)
+        selection["links"] = [row for row in selection["links"] if row["name"] != "ypl"]
+        with self.assertRaisesRegex(runtime.AdoptionError, "selector drifted"):
+            runtime.adoption_verify_public_dispatch(selection)
 
 
 class GenerationAssessmentTests(unittest.TestCase):
@@ -311,21 +529,12 @@ class IntegrationWorkspaceTests(unittest.TestCase):
 
     def test_source_adoption_public_selector_is_fresh_process_visible_and_owned(self) -> None:
         bin_dir = self.root / "bin"
-        old_bin = self.root / "old-runtime"
-        new_bin = self.root / "new-runtime"
-        for directory in (bin_dir, old_bin, new_bin):
-            directory.mkdir()
-        old_executable = old_bin / "cli.mjs"
-        new_executable = new_bin / "cli.mjs"
-        old_executable.write_text("old\n")
-        new_executable.write_text("new\n")
-        (old_bin / "yylo.sh").write_text("#!/bin/sh\nexit 91\n")
-        (new_bin / "yylo.sh").write_text(
-            "#!/bin/sh\nprintf 'Commands:\\n  status read\\n  land one\\n  project retry\\n'\n")
-        (old_bin / "yylo.sh").chmod(0o755)
-        (new_bin / "yylo.sh").chmod(0o755)
-        (bin_dir / "yy").symlink_to(old_bin / "yylo.sh")
-        (bin_dir / "yylo").symlink_to(old_bin / "yylo.sh")
+        bin_dir.mkdir()
+        old_executable = launcher_package(self.root / "old-runtime", "old")
+        new_executable = launcher_package(self.root / "new-runtime", "new")
+        old_bin = old_executable.parent
+        for name, target in runtime.adoption_package_bins(old_executable).items():
+            (bin_dir / name).symlink_to(target)
         with mock.patch.dict(os.environ, {"PATH": str(bin_dir)}):
             selection = runtime.adoption_public_launchers(
                 str(old_executable), new_executable)

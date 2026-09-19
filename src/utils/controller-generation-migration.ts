@@ -112,37 +112,105 @@ export async function withControllerGenerationMutation<T>(projectDir: string, op
   } finally { await fs.remove(temporary); }
 }
 
+/** Invocation-local reader guard. A release callback alone is not proof that
+ * the lock child still owns its reader lock at the next admission boundary. */
+export type ControllerGenerationReadLease = (() => Promise<void>) & {
+  assertHeld(): void;
+  assessActive(): Promise<ActiveControllerGeneration>;
+  recheckActive(): Promise<boolean>;
+};
+
 /** Shared lease spans execution, so no updater can replace scripts mid-command.
  * Nested commands take shared leases too; an updater must obtain the exclusive lock.
  */
-export async function acquireControllerGenerationReadLease(projectDir: string): Promise<() => Promise<void>> {
-  const child = spawn('python3', ['-E', '-B', packagedEngine(), 'hold-read', '--controller', path.resolve(projectDir)],
+export async function acquireControllerGenerationReadLease(projectDir: string): Promise<ControllerGenerationReadLease> {
+  // -B prevents writes, not reads of poisoned sibling bytecode. Use the same
+  // private cache-prefix isolation as all other authenticated engine entries.
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'yylo-generation-reader-'));
+  const child = spawn('python3', ['-E', '-B', '-X', `pycache_prefix=${path.join(temporary, 'bytecode')}`,
+    packagedEngine(), 'hold-read', '--controller', path.resolve(projectDir)],
     { cwd: projectDir, stdio: ['pipe', 'pipe', 'pipe'] });
   let output = ''; let errors = '';
-  child.stdin.on('error', () => undefined);
+  let held = false;
+  let released = false;
+  let pending: { resolve(value: any): void; reject(error: Error): void } | undefined;
+  const fail = (error: Error) => { const request = pending; pending = undefined; request?.reject(error); };
+  child.stdin.on('error', fail);
   child.stderr.on('data', chunk => { errors = (errors + String(chunk)).slice(-4000); });
-  const closed = new Promise<void>(resolve => { child.once('close', () => resolve()); });
+  child.stdout.on('data', chunk => {
+    output += String(chunk);
+    if (output.length > 64 * 1024) {
+      fail(new Error('generation_reader_response_invalid: response exceeds bounds')); child.stdin.end(); return;
+    }
+    while (output.includes('\n')) {
+      const end = output.indexOf('\n'); const line = output.slice(0, end); output = output.slice(end + 1);
+      const request = pending; pending = undefined;
+      if (!request) { held = false; child.stdin.end(); return; }
+      try {
+        const response = JSON.parse(line);
+        if (response.error) request.reject(new Error(response.error));
+        else request.resolve(response);
+      } catch (error) { request.reject(error instanceof Error ? error : new Error(String(error))); }
+    }
+  });
+  const closed = new Promise<void>(resolve => { child.once('close', async () => {
+    held = false; fail(new Error(errors || 'generation_read_lock_lost: reader exited'));
+    // Only invocation-owned scratch; cleanup never replaces the primary error.
+    await fs.remove(temporary).catch(() => undefined);
+    resolve();
+  }); });
+  child.once('error', fail);
+  child.once('exit', () => { held = false; });
+  const assertHeld = () => {
+    if (!held || released || child.exitCode !== null || child.signalCode !== null || child.killed) {
+      throw new Error('generation_read_lock_lost: reader guard is no longer held; retry ordinary admission');
+    }
+  };
   const exitRelease = () => child.stdin.end();
   process.once('exit', exitRelease);
   try {
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => { child.kill(); reject(new Error('generation_read_lock_timeout')); }, 15000);
-      child.once('error', error => { clearTimeout(timeout); reject(error); });
-      child.once('close', () => { clearTimeout(timeout); reject(new Error(output || errors || 'generation reader exited')); });
-      child.stdout.on('data', chunk => {
-        output = (output + String(chunk)).slice(-4000);
-        if (!output.includes('\n')) return;
-        clearTimeout(timeout);
-        try {
-          if (JSON.parse(output.split('\n')[0]!).locked === true) resolve();
-          else reject(new Error(output));
-        } catch (error) { reject(error); }
-      });
-    });
+    const timeout = setTimeout(() => {
+      fail(new Error('generation_read_lock_timeout')); child.kill();
+    }, 15000);
+    try {
+      const response = await new Promise<any>((resolve, reject) => { pending = { resolve, reject }; });
+      if (response.locked !== true) {
+        throw new Error(response.code && response.detail ? `${response.code}: ${response.detail}`
+          : 'generation_reader_response_invalid: lock not acquired');
+      }
+      held = true;
+      assertHeld();
+    } finally { clearTimeout(timeout); }
   } catch (error) {
     process.removeListener('exit', exitRelease); child.stdin.end(); await closed; throw error;
   }
-  return async () => { process.removeListener('exit', exitRelease); child.stdin.end(); await closed; };
+  const request = async (operation: 'assess-active' | 'recheck-active'): Promise<any> => {
+    assertHeld();
+    if (pending) throw new Error('generation_reader_busy: concurrent admission requests');
+    const response = new Promise<any>((resolve, reject) => { pending = { resolve, reject }; });
+    child.stdin.write(`${operation}\n`, error => { if (error) fail(error); });
+    const result = await response;
+    assertHeld();
+    return result;
+  };
+  const release = async () => {
+    released = true;
+    held = false;
+    process.removeListener('exit', exitRelease);
+    child.stdin.end();
+    await closed;
+  };
+  return Object.assign(release, {
+    assertHeld,
+    assessActive: async (): Promise<ActiveControllerGeneration> => {
+      const response = await request('assess-active');
+      if (response.assessment?.schema_version !== 'yylo_controller_generation_admission.v1') {
+        throw new Error('generation_reader_response_invalid: missing active assessment');
+      }
+      return response.assessment;
+    },
+    recheckActive: async (): Promise<boolean> => (await request('recheck-active')).unchanged === true,
+  });
 }
 
 async function maintenance<T>(projectDir: string, operation: string, request?: unknown, transactionId?: string): Promise<T> {
@@ -171,6 +239,24 @@ async function maintenance<T>(projectDir: string, operation: string, request?: u
   } finally {
     await fs.remove(temporary);
   }
+}
+
+/** Read-only active-generation observation. Callers retain their reader lease;
+ * this value alone is not engine admission or a cross-process authority proof.
+ */
+export interface ActiveControllerGeneration {
+  schema_version: 'yylo_controller_generation_admission.v1';
+  controller: string;
+  projection: string;
+  runtime_sha256: string;
+  executable: string;
+  /** Exact-byte authenticated alias observed by this assessment, not a caller proof. */
+  equivalent_executable?: string;
+  package: { name: string; version: string };
+}
+
+export function checkActiveControllerGeneration(projectDir: string): Promise<ActiveControllerGeneration> {
+  return maintenance(projectDir, 'active-ready');
 }
 
 export function retainInstalledGeneration(projectDir: string, evidence: InstalledGenerationEvidence,

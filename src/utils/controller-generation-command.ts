@@ -3,10 +3,11 @@ import fs from 'fs-extra';
 import path from 'node:path';
 import { constants } from 'node:os';
 import { Command } from 'commander';
+import { withWaitingProgress } from './terminal-progress-writer.js';
 import { resolveController } from './controller-resolver.js';
 import { ScriptInstaller } from './script-installer.js';
-import { applyControllerGeneration, packagedGenerationRoot, recoverControllerGeneration, acquireControllerGenerationReadLease, GENERATION_MIGRATION_ROOT } from './controller-generation-migration.js';
-import { assessControllerGeneration, ensureControllerGeneration, prepareInstalledControllerRepair } from './controller-generation-startup.js';
+import { applyControllerGeneration, packagedGenerationRoot, recoverControllerGeneration, GENERATION_MIGRATION_ROOT } from './controller-generation-migration.js';
+import { assessControllerGeneration, admitControllerCommand, upgradeControllerGeneration, prepareInstalledControllerRepair } from './controller-generation-startup.js';
 
 export const YYLO_CONTROLLER_GENERATION_DISPATCH_V1 = true;
 let releaseDispatch: (() => Promise<void>) | undefined;
@@ -43,7 +44,7 @@ export async function assertExternalGenerationPlan(file: string): Promise<void> 
 const AGENT_COMMANDS = ['pi', 'claude', 'cursor', 'codex', 'gemini', 'start', 'continue', 'contiue', 'cn', 'cc', 'clone', 'loop'];
 
 /** Use the registered CLI option grammar, not a scan through prompt/file values. */
-export function generationInvocationContext(program: Command, argv: string[], cwd: string): { cwd: string; version: boolean; commandArgs: string[] } {
+export function generationInvocationContext(program: Command, argv: string[], cwd: string): { cwd: string; version: boolean; commandArgs: string[]; quiet?: boolean } {
   const parserFor = (commands: Command[]) => {
     const parser = new Command().allowUnknownOption().exitOverride().configureOutput({ writeErr: () => {} });
     const flags = new Set<string>();
@@ -55,6 +56,8 @@ export function generationInvocationContext(program: Command, argv: string[], cw
     }
     return parser;
   };
+  const isQuiet = (options: Record<string, unknown>): boolean => options.quiet === true || options.silent === true
+    || ['0', 'false', 'no'].includes(String(options.verbose ?? process.env.YYLO_VERBOSE ?? '').toLowerCase());
   // Stop at a real registered command, consuming root option values first.
   // In particular, `-s pi -p hello` is the default agent, not command `pi`.
   const root = parserFor([program]).enablePositionalOptions();
@@ -63,7 +66,7 @@ export function generationInvocationContext(program: Command, argv: string[], cw
   const selected = program.commands.find(command => command.name() === parsed.operands[0] || command.aliases().includes(parsed.operands[0] ?? ''));
   const commandArgs = selected ? [...parsed.operands, ...parsed.unknown] : [];
   if (selected && selected.name() !== 'scripts' && !AGENT_COMMANDS.includes(commandArgs[0]!)) {
-    return { cwd, version: root.opts().version === true, commandArgs };
+    return { cwd, version: root.opts().version === true, commandArgs, ...(isQuiet(root.opts()) ? { quiet: true } : {}) };
   }
   const chain = [program];
   for (const token of commandArgs) {
@@ -75,8 +78,9 @@ export function generationInvocationContext(program: Command, argv: string[], cw
   const parser = parserFor(chain);
   parser.parseOptions(argv);
   const options = parser.opts();
+  const quiet = isQuiet(options);
   return { cwd: typeof options.cwd === 'string' ? path.resolve(cwd, options.cwd) : cwd,
-    version: options.version === true, commandArgs };
+    version: options.version === true, commandArgs, ...(quiet ? { quiet: true } : {}) };
 }
 
 export function generationCommandKind(args: string[]): 'read' | 'execute' | 'maintenance' | 'skip' {
@@ -92,7 +96,7 @@ export function generationCommandKind(args: string[]): 'read' | 'execute' | 'mai
 }
 
 /** Runs before any installer or local runtime selection. Discovery never migrates. */
-export async function prepareControllerCommand(cwd: string, commandArgs: string[], rawArgs: string[], invocationCwd = cwd): Promise<boolean> {
+export async function prepareControllerCommand(cwd: string, commandArgs: string[], rawArgs: string[], invocationCwd = cwd, progressEnabled = true): Promise<boolean> {
   const kind = generationCommandKind(commandArgs);
   if (kind === 'skip') return false;
   // Presence only; routing/authority comes exclusively from the installed resolver.
@@ -124,6 +128,9 @@ export async function prepareControllerCommand(cwd: string, commandArgs: string[
         activeTasks: Object.keys(assessment.plan.active_pins),
       } : assessment));
       if (assessment.disposition === 'refused' || assessment.disposition === 'transition_incomplete') process.exitCode = 2;
+    } else if (operation === 'upgrade') {
+      console.log(JSON.stringify(await withWaitingProgress('Authenticating explicit controller upgrade…',
+        () => upgradeControllerGeneration(controller, packageRoot), progressEnabled)));
     } else if (operation === 'repair-plan' || operation === 'repair-apply') {
       const file = commandArgs[3];
       if (!file) throw new Error('Absolute external repair plan path required');
@@ -147,7 +154,7 @@ export async function prepareControllerCommand(cwd: string, commandArgs: string[
       const id = commandArgs[3] ?? '';
       if (!/^[a-f0-9]{64}$/.test(id ?? '')) throw new Error('Exact generation transaction ID required');
       console.log(JSON.stringify(await recoverControllerGeneration(controller, id, operation === 'rollback')));
-    } else throw new Error('Use yy scripts generation doctor|repair-plan|repair-apply|resume|rollback');
+    } else throw new Error('Use yy scripts generation doctor|upgrade|repair-plan|repair-apply|resume|rollback');
     return true;
   }
   if (kind === 'read') {
@@ -169,21 +176,24 @@ export async function prepareControllerCommand(cwd: string, commandArgs: string[
     }
     return false;
   }
-  const assessment = await ensureControllerGeneration(controller, packageRoot);
-  releaseDispatch = await acquireControllerGenerationReadLease(controller);
-  const readback = await assessControllerGeneration(controller, packageRoot);
-  if (readback.disposition !== assessment.disposition
-      || (assessment.disposition === 'retained' && readback.disposition === 'retained'
-          && assessment.executable !== readback.executable)) {
-    await releaseControllerCommand();
-    throw new Error('generation_changed_before_dispatch: retry the unchanged command');
+  // Authenticate after acquiring the reader lease: no pre-lock assessment to
+  // race, and no writer acquisition or upgrade while holding a reader lease.
+  const admission = await withWaitingProgress('Authenticating active controller runtime…',
+    () => admitControllerCommand(controller, packageRoot), progressEnabled);
+  releaseDispatch = admission.release;
+  const assessment = admission.assessment;
+  if (assessment.disposition !== 'retained') {
+    // The hop ends only after this runtime passes admission and the locked
+    // readback. Do not leak its loop guard into providers/hooks and their new
+    // CLI invocations. This marker grants no runtime or controller authority.
+    if (assessment.disposition === 'ready') delete process.env.YYLO_GENERATION_REDISPATCH;
+    return false;
   }
-  if (assessment.disposition !== 'retained') return false;
   if (process.env.YYLO_GENERATION_REDISPATCH) {
     await releaseControllerCommand();
     throw new Error('generation_dispatch_cycle: YYLO_CONTROLLER_GENERATION_DISPATCH_V1 permits only one retained-runtime hop');
   }
-  console.error(`Using retained controller runtime: ${assessment.reason}`);
+  if (progressEnabled) console.error(`Using retained controller runtime: ${assessment.reason}`);
   const exit = await new Promise<number>((resolve, reject) => {
     const child = spawn(process.execPath, [assessment.executable, ...rawArgs], {
       cwd: invocationCwd, stdio: 'inherit', env: { ...process.env, YYLO_GENERATION_REDISPATCH: assessment.executable },
