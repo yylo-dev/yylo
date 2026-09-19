@@ -1664,7 +1664,7 @@ class IntegrationWorkspaceTests(unittest.TestCase):
         self.assertEqual(value.get("schemaVersion"), 2)
         self.assertEqual(value.get("instructionBundle"), {
             "schemaVersion": "juno_instruction_bundle_declaration.v1",
-            "semanticVersion": "1.1.0"})
+            "semanticVersion": "1.2.0"})
         outputs = {entry["destination"]: entry for entry in value["controllerOutputs"]}
         aliases = {
             ".juno_task/wiki/controller/git_worktree_lifecycle.md": ".juno_task/wiki/git_worktree_lifecycle.md",
