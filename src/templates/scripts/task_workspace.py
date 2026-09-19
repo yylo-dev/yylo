@@ -5466,38 +5466,18 @@ _handoff_phase = decisions.handoff_phase
 
 def _task_resume_projection(controller: Path, task_id: str,
                             record: dict[str, Any]) -> dict[str, Any]:
-    """Observe only enough durable evidence to route resume to task-run."""
-    root = controller / ".juno_task/runtime/lifecycle-runs/task" / task_id
-    latest = root / "latest.json"
-    ambiguous = False
-    launch_observed = latest.is_file()
-    exact_terminal = record.get("state") == "QUEUED"
-    stage = "ADMIT" if not launch_observed else "IMPLEMENTING"
-    if launch_observed:
-        try:
-            pointer = json.loads(latest.read_text())
-            exact_terminal = exact_terminal or pointer.get("terminal") is True
-            run_id = pointer.get("run_id")
-            if not isinstance(run_id, str):
-                ambiguous = True
-            else:
-                journal = json.loads((root / run_id / "journal.json").read_text())
-                stage = str(journal.get("state") or stage)
-                ambiguous = journal.get("run_id") != run_id
-        except (OSError, json.JSONDecodeError):
-            ambiguous = True
-    lease = _lease_view(record)
-    observation = (_observe_producer(lease.get("producer"))
-                   if isinstance(lease, dict) and lease.get("state") == decisions.LEASE_ACTIVE
-                   else decisions.LeaseObservation("inactive", "no active task producer"))
-    resume = decisions.plan_resume(decisions.ResumeFacts(
-        owner="task", producer_status=observation.status,
-        launch_observed=launch_observed, exact_terminal=exact_terminal,
-        resumable_stage=stage, ambiguous=ambiguous))
-    return {"classification": resume.classification, "admitted": resume.admitted,
-            "owner_command": f"{resume.owner_command} {task_id}",
-            "restart_stage": resume.restart_stage,
-            "reason_code": resume.reason_code}
+    """Retirement is unconditional; historical readiness never authorizes replay.
+
+    Keep the projection key for readers, but do not reinterpret or rewrite old
+    journals. Current deliverable state and ownership are reported by status.
+    """
+    return {"classification": "retired", "admitted": False,
+            "owner_command": f"yy task lease-status {task_id}",
+            "restart_stage": None,
+            "reason_code": "managed_task_execution_retired",
+            "safe_next_action": "Preserve the existing worktree and historical runs. "
+            "Verify current ownership before explicit agent continuation; do not "
+            "restart, reset attempts, or infer completion from a worker exit."}
 
 
 def status(controller: Path, task_id: str) -> dict[str, Any]:
@@ -8977,6 +8957,12 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.operation in {"run", "resume", "recover-predispatch", "recover-wall-budget"}:
+            raise TaskWorkspaceError(
+                "managed_task_execution_retired: agents implement outside the delivery CLI. "
+                "Inspect task status and lease-status; preserve existing worktrees and "
+                "historical runs. Verify authority before explicit continuation. "
+                "For new work use task start; after implementation/tests/commit use task finish.")
         controller = exact_root(args.controller, "controller", physical_identity=False)
         generation_fence = controller / ".juno_task/runtime/generation-migration/fence.json"
         if (generation_fence.exists() or generation_fence.is_symlink()) and args.operation not in {
