@@ -1409,7 +1409,7 @@ ${chalk.gray('This updates scripts from the currently installed yylo package/tem
 
   const generationCommand = scriptsCommand.command('generation')
     .description('Inspect, explicitly upgrade or recover an authenticated controller generation');
-  for (const operation of ['doctor', 'upgrade', 'resume', 'rollback', 'repair-plan', 'repair-apply']) {
+  for (const operation of ['readiness', 'doctor', 'upgrade', 'resume', 'rollback', 'repair-plan', 'repair-apply']) {
     const command = generationCommand.command(operation);
     if (operation.startsWith('repair-')) command.argument('<plan-file>');
     else if (operation === 'resume' || operation === 'rollback') command.argument('<transaction-id>');

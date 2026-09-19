@@ -115,6 +115,28 @@ print(json.dumps({'selection': 'passed', 'stale_ypl': 'rejected', 'rollback': 'p
         assert check.returncode == 0, check.stdout + check.stderr
         rows = [json.loads(line) for line in check.stdout.splitlines() if line.startswith('{')]
         assert rows[-1]['disposition'] == 'ready', rows
+    if not historical:
+        def readiness(expected_exit):
+            check = subprocess.run([str(selected_bin / 'yy'), '-q', 'scripts', 'generation', 'readiness'],
+                cwd=controller, env=probe_env, capture_output=True, text=True, timeout=120)
+            assert check.returncode == expected_exit, check.stdout + check.stderr
+            return [json.loads(line) for line in check.stdout.splitlines() if line.startswith('{')][-1]
+        report = readiness(0)
+        assert report['disposition'] == 'ready', report
+        assert report['checks']['source']['sha'] == git(controller, 'rev-parse', 'product')
+        assert report['checks']['source']['remote_verified'] is False
+        assert len(report['checks']['launchers']['commands']) == len(bins)
+        ypl = selected_bin / 'ypl'
+        before = os.readlink(ypl)
+        try:
+            ypl.unlink(); ypl.symlink_to(old_root / bins['ypl'].removeprefix('./'))
+            report = readiness(2)
+            assert report['checks']['active']['status'] == 'pass', report
+            assert report['checks']['launchers']['status'] == 'action_required', report
+            assert os.readlink(ypl) == str(old_root / bins['ypl'].removeprefix('./'))
+        finally:
+            ypl.unlink(); ypl.symlink_to(before)
+        assert readiness(0)['disposition'] == 'ready'
     tools = root / 'launcher-probe-tools'
     tools.mkdir()
     marker = root / 'launcher-provider-called'
