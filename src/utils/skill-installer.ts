@@ -40,7 +40,7 @@ export interface SkillGuidanceReport {
   version: string | null;
   findings: Array<{
     destination: string;
-    reason: 'legacy-skill' | 'retired-lifecycle' | 'receipt-drift' | 'unverified' | 'unsafe-or-unreadable' | 'incompatible-version';
+    reason: 'legacy-skill' | 'retired-lifecycle' | 'receipt-drift' | 'unverified' | 'unsafe-or-unreadable' | 'incompatible-version' | 'missing';
   }>;
 }
 
@@ -279,6 +279,11 @@ export class SkillInstaller {
         const skillRoot = path.join(root, skill);
         const files = await this.walkFiles(skillRoot);
         if (!files.includes('SKILL.md')) throw new Error(`Staged skill is missing SKILL.md: ${skill}`);
+        const text = await fs.readFile(path.join(skillRoot, 'SKILL.md'), 'utf8');
+        const frontmatter = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1];
+        if (!frontmatter?.split(/\r?\n/).includes(`name: ${skill}`)) {
+          throw new Error(`Staged skill frontmatter identity mismatch: ${skill}`);
+        }
         digests.set(skill, await this.directoryDigest(skillRoot));
       }
       if (!canonical) canonical = digests;
@@ -329,7 +334,7 @@ export class SkillInstaller {
         const owned = current !== undefined
           && current === this.recordedDigest(previousRecord, group.name, skill);
         if (exists && !same && !owned && !force) {
-          throw new Error(`Skill conflict at ${path.relative(projectDir, destination)}; rerun with --force to replace YYLO skill files`);
+          throw new Error(`Skill conflict at ${path.relative(projectDir, destination)}; preserve customized or unrecorded bytes for owner review. Do not use --force without explicit replacement authority`);
         }
         if (!exists || !same || force) {
           replacements.push({
@@ -536,7 +541,9 @@ export class SkillInstaller {
         try {
           await assertSafeManagedWritePath(projectDir, root);
           if (!(await lstatIfPresent(root))) {
-            if (record?.skills.includes(skill)) findings.push({ destination, reason: 'receipt-drift' });
+            if ((this.SKILLS as readonly string[]).includes(skill)) {
+              findings.push({ destination, reason: record?.skills.includes(skill) ? 'receipt-drift' : 'missing' });
+            }
             continue;
           }
           const legacy = (this.LEGACY_SKILLS as readonly string[]).includes(skill);

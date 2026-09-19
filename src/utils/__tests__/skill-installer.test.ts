@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { SkillInstaller } from '../skill-installer.js';
 import { createSkillsCommand } from '../../cli/commands/skills.js';
+import { findSkillFile, expandSkillInvocation } from '../../templates/extensions/pi/juno-skill-preprocessor.js';
 
 const GROUPS = ['.agents/skills', '.claude/skills', '.pi/skills'];
 const GROUP_NAMES = ['codex', 'claude', 'pi'];
@@ -169,7 +170,11 @@ describe('SkillInstaller remote acquisition', () => {
   it('does not reinterpret historical evidence or unrelated project skills as current policy', async () => {
     await fs.outputFile(path.join(project, '.juno_task/wiki/history.md'), 'yy merge arbiter run TASK_ID');
     await fs.outputFile(path.join(project, '.pi/skills/project-owned/SKILL.md'), 'yy merge drive TASK_ID');
-    expect(await SkillInstaller.inspectGuidance(project)).toEqual({ coherent: true, version: null, findings: [] });
+    const report = await SkillInstaller.inspectGuidance(project);
+    expect(report.coherent).toBe(false);
+    expect(report.findings).toHaveLength(21);
+    expect(report.findings.every((finding) => finding.reason === 'missing')).toBe(true);
+    expect(report.findings.some((finding) => finding.destination.includes('project-owned'))).toBe(false);
     expect(runner).not.toHaveBeenCalled();
   });
 
@@ -242,6 +247,34 @@ describe('SkillInstaller remote acquisition', () => {
     });
     await expect(SkillInstaller.installRemote(project, { version: '2.0.2' }))
       .rejects.toThrow('symbolic link');
+  });
+
+  it('rejects staged skill identity mismatches before any installation', async () => {
+    runner.mockImplementation(async (command, args, cwd) => {
+      if (command === 'npx') {
+        await populateNpxStage(cwd!);
+        for (const group of GROUPS) {
+          await fs.writeFile(path.join(cwd!, group, 'wiki-yylo/SKILL.md'), '---\nname: obsolete-name\n---\n');
+        }
+        return { stdout: '', stderr: '' };
+      }
+      return defaultRunner(command, args, cwd);
+    });
+    await expect(SkillInstaller.installRemote(project)).rejects.toThrow('frontmatter identity mismatch');
+    expect(await fs.pathExists(path.join(project, '.pi'))).toBe(false);
+    expect(await SkillInstaller.getInstallRecord(project)).toBeUndefined();
+  });
+
+  it('distinguishes missing, unrecorded and modified installations offline', async () => {
+    expect((await SkillInstaller.inspectGuidance(project)).findings).toHaveLength(21);
+    await SkillInstaller.installRemote(project);
+    await fs.remove(path.join(project, '.juno_task/runtime/skills-install.json'));
+    runner.mockClear();
+    const unrecorded = await SkillInstaller.inspectGuidance(project);
+    expect(unrecorded.findings).toHaveLength(21);
+    expect(unrecorded.findings.every((finding) => finding.reason === 'unverified')).toBe(true);
+    expect(await SkillInstaller.needsUpdate(project)).toBe(true);
+    expect(runner).not.toHaveBeenCalled();
   });
 
   it('preflights every conflict before writing or retiring anything', async () => {
@@ -368,6 +401,21 @@ describe('SkillInstaller remote acquisition', () => {
       expect(await fs.readFile(path.join(project, group, 'ralph-loop-yylo/references/implement.md'))).toEqual(canonical);
     }
     expect(await SkillInstaller.inspectGuidance(project)).toMatchObject({ coherent: true, version: 'v2.0.2' });
+    const raw = 'Record ##{actual-slug} literal $(touch /tmp/not-executed) $1';
+    for (const skill of SKILLS) {
+      const discovered = findSkillFile(skill, project);
+      expect(discovered).not.toBeNull();
+      expect(await fs.readFile(discovered!, 'utf8')).toEqual(
+        await fs.readFile(path.join(source, 'skills', skill, 'SKILL.md'), 'utf8'));
+      const expanded = expandSkillInvocation(`/skill:${skill} ${raw}`, project);
+      expect(expanded).toContain(raw);
+      expect(expanded).toContain('actual immutable Record ID');
+      expect(expanded).toContain('actual Ledger slug');
+      expect(expanded).toContain('Record kind/profile');
+    }
+    // The actual Pi destination remains discoverable without Claude's copy.
+    await fs.remove(path.join(project, '.claude/skills'));
+    expect(findSkillFile('wiki-yylo', project)).toBe(path.join(project, '.pi/skills/wiki-yylo/SKILL.md'));
   });
 
   it('requires the release declared by the CLI and rejects old or incompatible exact versions offline', async () => {
