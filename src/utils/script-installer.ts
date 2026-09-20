@@ -361,10 +361,21 @@ export class ScriptInstaller {
       const manifest = await fs.readJson(
         path.join(projectDir, '.juno_task/managed-assets.json'),
       ) as Record<string, any>;
+      // The Ledger binding is generated from authenticated publication, not a
+      // static target template. inspectGeneration above verifies it with Ledger.
+      const bindingDestination = '.juno_task/config/package-wiki.json';
+      const expectedDestinations = new Set([...recovery.assets.keys(), bindingDestination]);
+      const recordedDestinations = Object.keys(manifest.assets ?? {});
+      const bindingRecord = manifest.assets?.[bindingDestination];
       if (manifest.schemaVersion !== 2 || manifest.packageName !== '@yylo/cli' ||
           manifest.packageVersion !== recovery.packageVersion ||
-          Object.keys(manifest.assets ?? {}).length !== recovery.assets.size) {
-        throw new Error('Recovered target-bound managed inventory is incomplete');
+          recordedDestinations.length !== expectedDestinations.size ||
+          recordedDestinations.some((destination) => !expectedDestinations.has(destination)) ||
+          !bindingRecord || bindingRecord.sourceSha256 !== bindingRecord.installedSha256) {
+        throw new Error('Recovered target-bound managed inventory is incomplete: ' + JSON.stringify({
+          missing: [...expectedDestinations].filter((destination) => !recordedDestinations.includes(destination)),
+          unexpected: recordedDestinations.filter((destination) => !expectedDestinations.has(destination)),
+        }));
       }
       for (const [relative, expected] of recovery.assets) {
         const persistedExpected = persistedRecovery.assets.get(relative);

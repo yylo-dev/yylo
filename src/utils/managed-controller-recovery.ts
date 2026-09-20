@@ -79,8 +79,9 @@ async function targetBytes(projectDir: string, targetSha: string, relative: stri
 
 function controllerDefinitions(manifest: typeof managedAssetManifest): ManagedDefinition[] {
   const definitions = [
-    ...(manifest.assets as ManagedDefinition[]).filter((asset) => asset.type !== 'config'),
-    ...manifest.controllerOutputs.map((asset) => ({
+    ...(manifest.assets as ManagedDefinition[]).filter((asset) =>
+      asset.type !== 'config' && asset.type !== 'wiki'),
+    ...manifest.controllerOutputs.filter((asset) => asset.type !== 'wiki').map((asset) => ({
       ...asset,
       installClass: 'controller' as const,
     })),

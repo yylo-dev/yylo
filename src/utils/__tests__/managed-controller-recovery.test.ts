@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import fs from 'fs-extra';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { version as packageVersion } from '../../version.js';
 import {
   createTargetBoundMetadataController,
@@ -26,6 +26,14 @@ describe('target-bound managed controller recovery', {
 }, () => {
   useSharedHeavyWorkloadLock('target-bound metadata-controller recovery fixtures');
   let root = '';
+
+  beforeEach(() => {
+    // These synthetic packages exercise filesystem recovery. Real authenticated
+    // Ledger publication is covered by test_package_wiki_generation.py.
+    vi.spyOn(ManagedProjectAssets, 'stagePackageWiki').mockReturnValue(
+      JSON.stringify({ schema_version: 'yylo_package_wiki_binding.v1', records: [] }) + '\n');
+    vi.spyOn(ManagedProjectAssets, 'verifyPackageWiki').mockReturnValue(true);
+  });
 
   afterEach(async () => {
     vi.restoreAllMocks();
@@ -101,9 +109,13 @@ describe('target-bound managed controller recovery', {
       instructionBundle: {
         schemaVersion: 'juno_instruction_bundle.v1',
         packageVersion,
-        assetCount: retry?.assets.size,
+        assetCount: (retry?.assets.size ?? 0) + 1,
       },
     });
+    expect(manifest.assets['.juno_task/config/package-wiki.json']).toMatchObject({
+      sourceSha256: manifest.assets['.juno_task/config/package-wiki.json'].installedSha256,
+    });
+    expect(ManagedProjectAssets.verifyPackageWiki).toHaveBeenCalled();
     for (const [destination, expected] of retry?.assets ?? []) {
       const actual = await fs.readFile(path.join(root, destination));
       expect(actual, destination).toEqual(expected);
