@@ -33,7 +33,7 @@ mkdir yylo-demo
 cd yylo-demo
 git init
 yy init --task "Document the onboarding path" --subagent pi
-yy watch exec pwd
+pwd # execute explicitly; watch is an optional read-only observer
 ```
 
 A successful run prints the installed YYLO version, initializes `.juno_task/`, then emits a watch receipt with `"state":"COMPLETED"`, `"exit_code":0`, and nonzero `log_bytes`. This canary does not contact a model provider. In an empty, unborn Git repository, `yy init` creates the initial workspace commit, keeps the original branch as the product target, and creates a detached protected integration-owner worktree under the user state directory. Existing or dirty repositories are never committed or rearranged by this bootstrap.
@@ -113,7 +113,7 @@ shipping a CLI that requires it; publication remains separately authorized.
 | --- | --- | --- |
 | Agent run | `yy pi`, `yy start`, and the agent aliases listed by `yy --help` | Provider credentials and model availability remain external. |
 | Session continuity | `continue`, `clone`, `branches`, `switch`, `continuity` | Scope state is isolated and explicit; cleanup is planned and reversible. |
-| Observable commands | `watch exec|status|await` | Bounded logs and terminal machine truth; no hidden background ownership. |
+| Optional observation | `watch status|await|follow` | Read existing execution evidence; never launch, retry, cancel, or complete tasks. |
 | Validation evidence | `evidence run|status|await` | Content-addressed task evidence tied to exact inputs. |
 | Repository topology | `info`, `where`, `doctor workspace`, `integration` | Read-only discovery is separate from guarded sync/repair/push. |
 | Feature lifecycle | `task start|run|status|checkpoint|preflight|finish` | Implementation belongs in the returned exact-base task worktree. |
@@ -252,16 +252,17 @@ Project shortcuts are scoped to the selected subagent and can reference shipped 
 
 ## Observable local commands
 
-`watch` owns bounded execution evidence for an ordinary local command:
+`watch` optionally observes existing run evidence without owning execution:
 
 ```bash
-yy watch exec npm test
-# Use the run ID printed above:
+npm test # execute explicitly in the authorized workspace
+# If an existing producer has published a watch-compatible run:
 yy watch status RUN_ID
+yy watch follow RUN_ID
 yy watch await RUN_ID
 ```
 
-`RUN_ID` is a placeholder. Status is observation; it does not acquire task, merge, or release authority. Watch evidence includes terminal state and bounded logs rather than requiring terminal-scrollback reconstruction.
+`RUN_ID` is an existing run identity, not one created by `npm test`. `watch exec` is retired. All watch operations are read-only, and interruption stops only the observer. Missing or malformed terminal evidence is not success. Process exit, semantic outcome, cleanup, and task completion are distinct; `task finish` verifies delivery. Historical run directories are preserved.
 
 ## Managed workflows and evidence
 
