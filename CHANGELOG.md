@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Breaking: external implementation, deterministic delivery.** Autonomous task
+  run/resume and implementation budget recovery refuse without dispatch. Agents
+  implement/test/commit in the task workspace; finish and native merge retain
+  admission, validation, ownership and conflict protection. Historical attempts
+  are preserved and never automatically replayed.
+- **Watch is optional and read-only.** The former execution/producer machinery is
+  removed. Status, await and follow observe existing evidence without launching,
+  cancelling, retrying, or completing tasks. Process exit is distinct from task
+  completion, semantic outcome and cleanup. Missing evidence is not success.
+- Shipped controller instructions, generated implementation references, lifecycle
+  guidance and README describe this boundary. Independent skill source is updated
+  separately; CLI delivery does not publish or install a skills release.
+
 - Standalone `yy task preflight` is optional in managed agent guidance and the
   lifecycle prompt (v1 revision 9). The ordinary path is clean commit then
   `yy task finish`; finish retains all admission and validation enforcement.

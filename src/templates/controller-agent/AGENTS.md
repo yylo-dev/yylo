@@ -4,6 +4,15 @@ This folder is the default entry point for Juno agents. It owns Kanban, task
 state, merge orchestration, and compact controller metadata; it does not contain
 product code.
 
+## Execution boundary
+
+External agents implement, test and commit; the CLI prepares workspaces and
+verifies delivery. Autonomous task run/resume and implementation budget recovery
+are retired. Optional `yy watch status|await|follow RUN_ID` observes existing
+execution evidence without launching, retrying, cancelling or completing work.
+A worker exit is not task completion. Preserve interrupted work and verify
+current ownership before explicit continuation; never reset or replay attempts.
+
 ## Working contract
 
 1. Use the controller-local Juno skills for Kanban, planning, project discovery,
