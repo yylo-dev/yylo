@@ -1239,10 +1239,11 @@ def pinned_task_runtime(root: Path, task_id: str) -> dict[str, Any]:
     if source_repository:
         target_runtime = compatibility.target_blob(root, target, ".juno_task/scripts/task_workspace.py")
         if target_runtime != retained["files"]["dist/templates/scripts/task_workspace.py"]:
-            # The original attempt/pin remains immutable. An old reader cannot
-            # admit a moved Juno source runtime. The fully admitted current
-            # reader may continue the SAME attempt only across the shared schema
-            # already checked above and by plan's complete current admission.
+            # Preserve the original attempt/pin. Historical readers may still
+            # enforce source-copy equality, so route to the authenticated active
+            # reader, which admits its installed generation independently of
+            # product bytes. This selects a reader, not an upgrade or a source
+            # equality gate; shared-state checks above remain mandatory.
             return {"pinned": False, "retained_pin": True, "attempt": pin["attempt"],
                     "dispatch": "current-compatible-source-reader", "retained_executable": retained["executable"]}
     return {"pinned": True, "attempt": pin["attempt"], "executable": retained["executable"],
