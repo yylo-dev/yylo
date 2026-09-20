@@ -294,6 +294,7 @@ class WatchProgressTests(unittest.TestCase):
         (run_dir / "run.json").write_text(json.dumps({
             "schema_version": "juno.watch-run.v1", "run_id": run_id, "state": "RUNNING"
         }))
+        (run_dir / "pid").write_text(str(os.getpid()) + "\n")
         return run_dir
 
     def follow_command(self, run_id="run-1"):
@@ -371,7 +372,7 @@ class WatchProgressTests(unittest.TestCase):
         self.assertEqual(stdout, b"waiting\n")
         self.assertIsNone(producer.poll())
 
-    def test_exec_then_follow_deterministic_multiline_semantic_fixture(self):
+    def test_external_fixture_follow_preserves_multiline_semantics(self):
         fixture = (
             '[THINKING] {"id":1,"time":"12:00:00"}\n  plan\n[/THINKING : 0.10s]\n\n'
             '[TOOL] {"id":2,"tool":"bash","status":"done","duration":"0.08s"}\n'
@@ -379,15 +380,85 @@ class WatchProgressTests(unittest.TestCase):
             '[TOOL_RESPONSE]\n  a\n  b\n[/TOOL_RESPONSE]\n[/TOOL]\n\n'
             '[ANSWER] {"id":3,"time":"12:00:01"}\n  done\n[/ANSWER]\n'
         )
-        executed = subprocess.run([
-            sys.executable, str(SCRIPT), "exec", "--root", str(self.root), "--",
-            sys.executable, "-c", f"import sys;sys.stdout.write({fixture!r})",
-        ], capture_output=True, text=True, timeout=3)
-        self.assertEqual(executed.returncode, 0, executed.stderr)
-        record = json.loads(executed.stdout)
-        followed = subprocess.run(self.follow_command(record["run_id"]), capture_output=True, text=True, timeout=2)
+        run_dir = self.write_run()
+        (run_dir / "combined.log").write_text(fixture)
+        (run_dir / "footer").write_bytes(VALID_FOOTER.replace(b"exit_code=7", b"exit_code=0"))
+        followed = subprocess.run(self.follow_command(), capture_output=True, text=True, timeout=2)
         self.assertEqual(followed.returncode, 0, followed.stderr)
         self.assertEqual(followed.stdout, fixture)
+
+    def test_follow_large_log_preserves_utf8_across_bounded_chunks(self):
+        run_dir = self.write_run()
+        content = ("x" * (65536 - 1) + "é" + "y" * 70000 + "\n").encode()
+        (run_dir / "combined.log").write_bytes(content)
+        (run_dir / "footer").write_bytes(VALID_FOOTER)
+        result = subprocess.run(self.follow_command(), capture_output=True, timeout=3)
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(result.stdout, content)
+
+    def test_retired_execution_refuses_without_creating_or_launching(self):
+        absent = self.root / "absent"
+        marker = self.root / "launched"
+        for operation in ("exec", "_produce"):
+            result = subprocess.run([sys.executable, str(SCRIPT), operation,
+                "--root", str(absent), "--", sys.executable, "-c",
+                f"from pathlib import Path; Path({str(marker)!r}).touch()"],
+                capture_output=True, timeout=2)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(b"execution is retired", result.stderr)
+            self.assertFalse(absent.exists())
+            self.assertFalse(marker.exists())
+
+    def test_missing_observation_does_not_create_root(self):
+        absent = self.root / "absent"
+        for operation in ("status", "await", "follow"):
+            result = subprocess.run([sys.executable, str(SCRIPT), operation,
+                "--root", str(absent), "run-1"], capture_output=True, timeout=2)
+            self.assertEqual(result.returncode, 2)
+            self.assertFalse(absent.exists())
+
+    def test_observation_preserves_bytes_and_never_claims_task_completion(self):
+        run_dir = self.write_run()
+        metadata = run_dir / "run.json"
+        record = json.loads(metadata.read_text())
+        metadata.write_text(json.dumps({**record, "state": "COMPLETED", "exit_code": 0}))
+        before = {p.name: p.read_bytes() for p in run_dir.iterdir()}
+        command = [sys.executable, str(SCRIPT), "status", "--root", str(self.root), "run-1"]
+        result = subprocess.run(command, capture_output=True, timeout=2)
+        observed = json.loads(result.stdout)
+        self.assertEqual(observed["state"], "UNKNOWN")
+        self.assertIsNone(observed["exit_code"])
+        self.assertEqual(observed["task_completion"], "not_evaluated")
+        self.assertEqual(before, {p.name: p.read_bytes() for p in run_dir.iterdir()})
+        (run_dir / "footer").write_bytes(VALID_FOOTER)
+        observed = json.loads(subprocess.check_output(command))
+        self.assertEqual(observed["exit_code"], 7)
+        self.assertEqual(observed["task_completion"], "not_evaluated")
+        self.assertEqual(observed["semantic_outcome"], "not_evaluated")
+        result = subprocess.run([sys.executable, str(SCRIPT), "await", "--root", str(self.root), "run-1"],
+                                capture_output=True, timeout=2)
+        self.assertEqual(result.returncode, 7)
+
+    def test_follow_dead_producer_fails_instead_of_hanging(self):
+        run_dir = self.write_run()
+        (run_dir / "pid").write_text("999999999\n")
+        result = subprocess.run(self.follow_command(), capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(b"execution outcome unknown", result.stderr)
+
+    def test_await_interrupt_does_not_signal_producer_or_mutate_evidence(self):
+        run_dir = self.write_run()
+        producer = self.producer()
+        (run_dir / "pid").write_text(str(producer.pid) + "\n")
+        before = {p.name: p.read_bytes() for p in run_dir.iterdir()}
+        observer = subprocess.Popen([sys.executable, str(SCRIPT), "await", "--root", str(self.root), "run-1"],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        time.sleep(0.15)
+        observer.send_signal(signal.SIGINT)
+        observer.communicate(timeout=2)
+        self.assertEqual(observer.returncode, 130)
+        self.assertIsNone(producer.poll())
+        self.assertEqual(before, {p.name: p.read_bytes() for p in run_dir.iterdir()})
 
     def test_documented_private_run_directories_are_concurrently_isolated(self):
         command = 'mktemp -d "${TMPDIR:-/tmp}/yy-TASK_ID-run.XXXXXX"'
