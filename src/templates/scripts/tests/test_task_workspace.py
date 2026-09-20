@@ -5283,6 +5283,34 @@ steps:
         git(self.controller, "commit", "-m", "hydrated managed task")
         return fake_runtime
 
+    def test_scoped_hydration_start_and_finish_bind_exact_admission(self) -> None:
+        fake_runtime = self._install_managed_hydration_fixture()
+        workflow = self.repository / ".juno_task/config/worktree-hydration.yaml"
+        workflow.write_text(workflow.read_text().replace(
+            "workflow_class: task_hydration\n", "workflow_class: task_hydration\nhydration_selection: admitted_scope_v1\n"
+        ).replace("  - id: ready\n", "  - id: ready\n    dependency_root: src\n"))
+        git(self.repository, "add", str(workflow.relative_to(self.repository)))
+        git(self.repository, "commit", "-m", "opt into scoped preparation")
+        with mock.patch.object(task_runtime, "__file__", str(fake_runtime)):
+            started = task_runtime.start(self.controller.resolve(), "X", requested_paths=["src/package.json"])
+            selection = started["hydration"]["selection"]
+            self.assertEqual(selection["admitted_paths"], ["src/package.json"])
+            self.assertEqual(selection["dependency_roots"], ["src"])
+            worktree = Path(started["worktree"])
+            lock = worktree / "src/package-lock.json"
+            original = lock.read_bytes()
+            lock.write_bytes(original + b"\n")
+            with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "locks are missing or stale"):
+                task_runtime.preflight(self.controller.resolve(), "X")
+            lock.write_bytes(original)
+            package = worktree / "src/package.json"
+            package.write_text(json.dumps({**json.loads(package.read_text()), "description": "scoped delivery"}) + "\n")
+            git(worktree, "add", "src/package.json")
+            git(worktree, "commit", "-m", "scoped delivery")
+            queued = task_runtime.finish(self.controller.resolve(), "X")
+            self.assertEqual(queued["state"], "QUEUED")
+            self.assertEqual(queued["hydration"]["selection"], selection)
+
     def test_hydration_resume_restores_persisted_return_state(self) -> None:
         fake_runtime = self._install_managed_hydration_fixture()
         with mock.patch.object(task_runtime, "__file__", str(fake_runtime)):

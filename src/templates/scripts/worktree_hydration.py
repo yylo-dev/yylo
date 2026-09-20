@@ -56,8 +56,12 @@ def node_package(root: Path, value: str) -> Path:
     if relative.is_absolute() or not value or ".." in relative.parts or ".git" in relative.parts:
         raise HydrationError("node package cwd must be a normalized worktree path")
     package = root.joinpath(*relative.parts)
-    if package.is_symlink() or not package.is_dir() or not (package / "package-lock.json").is_file():
-        raise HydrationError("node package cwd or exact lock is missing or symbolic")
+    components = [package, *package.parents]
+    if (not package.is_dir() or not (package / "package-lock.json").is_file()
+            or any(part.is_symlink() for part in components if part != root.parent)
+            or (package / "package-lock.json").is_symlink()
+            or (package / "node_modules").is_symlink()):
+        raise HydrationError("node package cwd, exact lock, or dependency tree is missing or symbolic")
     return package
 
 
@@ -84,6 +88,9 @@ def verify_node_lock(root: Path, cwd: str) -> None:
 
 def hydrate_node(root: Path, cwd: str) -> None:
     package = node_package(root, cwd)
+    stamp = package / "node_modules/.yylo-package-lock.sha256"
+    # A failed explicit retry must not retain a previous successful lock stamp.
+    stamp.unlink(missing_ok=True)
     result = subprocess.run(
         ["npm", "ci", "--no-audit", "--no-fund"], cwd=package,
         stdin=subprocess.DEVNULL, text=True, capture_output=True, check=False,
@@ -91,7 +98,6 @@ def hydrate_node(root: Path, cwd: str) -> None:
     if result.returncode:
         raise HydrationError("npm ci failed for exact-lock hydration")
     npm_check(package)
-    stamp = package / "node_modules/.yylo-package-lock.sha256"
     stamp.parent.mkdir(parents=True, exist_ok=True)
     temporary = stamp.with_name(f".{stamp.name}.{os.getpid()}.tmp")
     temporary.write_text(f"{lock_digest(package)}\n")

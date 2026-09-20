@@ -822,6 +822,12 @@ def validate_workflow(workflow: dict[str, Any], policy: dict[str, Any] | None = 
     if continue_from_step == "summary" and not summary_has_command:
         raise WorkflowError("continue_from_step references summary, but summary.command is not configured")
 
+    selection = workflow.get("hydration_selection")
+    if selection is not None and (
+            selection != "admitted_scope_v1" or workflow.get("workflow_class") != "task_hydration"):
+        raise WorkflowError("hydration_selection requires task_hydration and admitted_scope_v1")
+    if any("dependency_root" in step for step in steps) and selection is None:
+        raise WorkflowError("dependency_root requires an explicit hydration_selection policy")
     if str(workflow.get("workflow_class") or "").strip() == "task_hydration":
         if summary_has_command or workflow.get("continue_from_step"):
             raise WorkflowError("task_hydration workflows cannot launch summary commands or continuation")
@@ -830,6 +836,14 @@ def validate_workflow(workflow: dict[str, Any], policy: dict[str, Any] | None = 
             r"JUNO_TASK_ROOT|\.juno_task/(?:state|tasks|ledger|receipts|runtime/merge)", re.IGNORECASE)
         for hydration_step in steps:
             step_id = str(hydration_step["id"])
+            root = hydration_step.get("dependency_root")
+            if root is not None:
+                if not isinstance(root, str) or not root or "{{" in root:
+                    raise WorkflowError(f"task_hydration step {step_id} dependency_root must be a literal path")
+                candidate = Path(root)
+                if (candidate.is_absolute() or ".." in candidate.parts or ".git" in candidate.parts
+                        or candidate.as_posix() != root or root == "."):
+                    raise WorkflowError(f"task_hydration step {step_id} dependency_root must be worktree-relative")
             command = hydration_step.get("command")
             probe = hydration_step.get("probe")
             if hydration_step.get("managed_agent") is not None:

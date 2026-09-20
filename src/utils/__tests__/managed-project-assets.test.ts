@@ -671,19 +671,20 @@ describe('ManagedProjectAssets', {
     expect(installedWiki).toBe(sourceWiki);
 
     for (const required of [
-      'focused_validation[].cwd',
-      'Do not assume each root is Node',
-      'Never copy or symlink a',
+      'hydration_selection: admitted_scope_v1',
+      'dependency_root: juno-code',
+      'Selection uses **admitted paths**',
+      '(`cwd` and declared `input_paths`)',
+      'historical dependency checks',
+      'Broad',
+      'task-local installers',
       'Node 22',
-      'node_modules` is absent',
-      'identity differs from the current',
-      '["npm", "ci"]',
-      '/tmp") / f"yy-task-{task_id}-npm-ci.log"',
-      'JUNO_DEPENDENCY_TIMEOUT_SECONDS',
-      'footer(f"FAILED npm ci exit={process.returncode}")',
+      'node_modules/.yylo-package-lock.sha256',
+      'hashed selection',
+      'Unselected lock changes and unrelated task metadata',
+      'prior selection is stale until explicit',
       'git status --short',
-      'stop before implementation',
-      'exact command above',
+      'Before editing',
       'yy task hydrate TASK_ID',
     ]) {
       expect(installedWiki).toContain(required);
@@ -722,13 +723,14 @@ describe('ManagedProjectAssets', {
     }
   });
 
-  it('runs the documented YYLO command for fresh, lock-changed, and failed installs', async () => {
+  it('runs the documented hydration helper with workflow probes for fresh, lock-changed, and failed installs', async () => {
     const wiki = await fs.readFile(
       path.join(process.cwd(), 'src/templates/wiki/controller/task_dependency_hydration.md'),
       'utf8',
     );
-    const command = wiki.match(/```bash\n([\s\S]*?)\n```/)?.[1];
-    expect(command).toBeTruthy();
+    expect(wiki).toContain('hydrate-node --cwd ROOT');
+    expect(wiki).toContain('verify-node-lock --cwd ROOT');
+    const helper = path.resolve(process.cwd(), 'src/templates/scripts/worktree_hydration.py');
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'juno-hydration-command-'));
     try {
       const bin = path.join(root, 'bin');
@@ -762,8 +764,8 @@ describe('ManagedProjectAssets', {
         ],
         { cwd: root },
       );
-      const runHydration = (extra: Record<string, string> = {}) =>
-        spawnSync('bash', ['-c', command!.replace('TASK_ID=TASK_ID', 'TASK_ID=HYDRATIONTEST')], {
+      const runHydration = (extra: Record<string, string> = {}) => {
+        const run = (action: string) => spawnSync('python3', [helper, '--project-root', root, action, '--cwd', '.'], {
           cwd: root,
           encoding: 'utf8',
           env: {
@@ -774,10 +776,13 @@ describe('ManagedProjectAssets', {
             ...extra,
           },
         });
+        const probe = run('verify-node-lock');
+        return probe.status === 0 ? probe : run('hydrate-node');
+      };
 
       const fresh = runHydration();
       expect(fresh.status).toBe(0);
-      expect(fresh.stdout).toContain('[dependency-hydration] OK npm ci complete');
+      expect(fresh.stderr).toBe('');
       expect((await fs.readFile(count, 'utf8')).trim().split('\n')).toHaveLength(1);
       expect((await fs.readFile(probeCount, 'utf8')).trim().split('\n')).toHaveLength(1);
       expect(spawnSync('git', ['status', '--short'], { cwd: root, encoding: 'utf8' }).stdout).toBe(
@@ -786,7 +791,7 @@ describe('ManagedProjectAssets', {
 
       const exact = runHydration();
       expect(exact.status).toBe(0);
-      expect(exact.stdout).toContain('OK exact-lock dependencies already present');
+      expect(exact.stderr).toBe('');
       expect((await fs.readFile(count, 'utf8')).trim().split('\n')).toHaveLength(1);
 
       await fs.writeFile(
@@ -798,24 +803,16 @@ describe('ManagedProjectAssets', {
       expect((await fs.readFile(count, 'utf8')).trim().split('\n')).toHaveLength(2);
 
       const failed = runHydration({ FAKE_NPM_FAIL: '17', FAKE_NPM_PROBE_FAIL: '1' });
-      expect(failed.status).toBe(17);
-      expect(failed.stdout).toContain('[dependency-hydration] FAILED npm ci exit=17');
-      expect(await fs.pathExists(path.join(root, 'node_modules/.juno-package-lock.sha256'))).toBe(
-        false,
-      );
-      expect(await fs.readFile('/tmp/yy-task-HYDRATIONTEST-npm-ci.log', 'utf8')).toContain(
-        'FAILED npm ci exit=17',
-      );
+      expect(failed.status).toBe(2);
+      expect(failed.stderr).toContain('npm ci failed');
+      expect(await fs.pathExists(path.join(root, 'node_modules/.yylo-package-lock.sha256'))).toBe(false);
 
       const failedProbe = runHydration({ FAKE_NPM_PROBE_FAIL: '1' });
       expect(failedProbe.status).toBe(2);
-      expect(failedProbe.stdout).toContain('FAILED dependency probe after npm ci');
-      expect(await fs.pathExists(path.join(root, 'node_modules/.juno-package-lock.sha256'))).toBe(
-        false,
-      );
+      expect(failedProbe.stderr).toContain('dependency tree does not satisfy the exact lock');
+      expect(await fs.pathExists(path.join(root, 'node_modules/.yylo-package-lock.sha256'))).toBe(false);
     } finally {
       await fs.remove(root);
-      await fs.remove('/tmp/yy-task-HYDRATIONTEST-npm-ci.log');
     }
   });
 
