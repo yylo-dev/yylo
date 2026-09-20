@@ -273,8 +273,9 @@ describe('Bolt task workspace managed runtime', () => {
     expect(source).toContain('def finish(');
     expect(source).not.toContain('task_lifecycle');
     expect(source).not.toContain('integration_candidate');
-    expect(source).toContain('def managed_task_run(');
-    expect(source.match(/managed_agent_runner/g) ?? []).toHaveLength(1);
+    expect(source).not.toContain('def managed_task_run(');
+    expect(source).not.toContain('managed_agent_runner');
+    expect(source).toContain('managed_task_execution_retired');
     expect(testSource).toContain('test_sparse_metadata_controller_runtime_bootstrap');
     expect(testSource).toContain('test_orphan_metadata_only_controller_runtime_bootstrap_without_sparse_checkout');
     expect(testSource).toContain('test_runtime_bootstrap_refuses_product_bearing_metadata_controller');

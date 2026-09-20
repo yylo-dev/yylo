@@ -9,6 +9,17 @@ An implementation worker owns one explicitly assigned task. It does not select
 other work, mutate the product target, merge, release, deploy, or clean another
 task's workspace.
 
+## Execution boundary
+
+The external agent performs implementation, tests and commits. The CLI owns
+workspace preparation, deterministic finish and safe integration, not model
+implementation or automatic retry/repair. Task run/resume and implementation
+budget recovery are retired. `yy watch status|await|follow RUN_ID` is an optional
+read-only observer of existing evidence; it never launches or cancels producers.
+A process exit or captured answer does not prove task completion. Continue an
+existing admitted workspace only after verifying current ownership; preserve
+historical runs and never replay/reset them automatically.
+
 ## 1. Resolve and preserve admission
 
 1. Read `AGENTS.md` and the complete assigned task from the canonical controller.

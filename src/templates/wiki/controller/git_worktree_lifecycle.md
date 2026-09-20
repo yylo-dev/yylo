@@ -120,15 +120,15 @@ Live or unknown producers require the current token, an exact holder handoff
 (`lease-successor --handoff-receipt <path>`), or separately authorized operator
 revoke. Never infer that authority from an error's suggested command.
 
-For **authorized managed execution**, use `yy task run TASK_ID` or its alias
-`yy task resume TASK_ID` instead. The continuing managed process acquires a
-receipt-bound successor after proven predecessor death and carries the token
-internally; no user-supplied token is needed. This may launch workers, not just
-repair ownership. Existing terminal-run, hydration, dirty-worktree, identity,
-and budget restrictions still apply; neither command resets budgets or repairs
-unrelated blockers. Do not run standalone successor first for managed execution.
+Autonomous task run/resume and implementation budget recovery are retired.
+An external agent implements/tests/commits in the admitted worktree; finish
+verifies deterministic closure. Preserve existing work and verify ownership
+before explicit continuation. Do not replay a historical run or reset its
+budgets. Optional `yy watch status|await|follow RUN_ID` reads existing evidence;
+it never launches, retries, cancels or completes a task. Closing the observer
+leaves producers alone. No watcher or separate readiness state is mandatory.
 
-## Managed worker controller checks
+## Shared runner controller checks (outside task implementation)
 
 Worker acceptance binds relevant inputs, not controller immobility:
 
@@ -164,8 +164,8 @@ file contents. This post-execution check is not a sandbox and does not identify
 which process wrote a changed file.
 
 There is no new command, retry loop, global lock or manual approval for harmless
-checkpoint movement. Existing terminal-run restrictions, budgets, leases,
-validation and native target-update checks are unchanged. Source delivery does
+checkpoint movement. Shared runner containment, task leases,
+validation and native target-update checks remain enforced. Source delivery does
 not activate an installed runtime or replay any historical failed attempt.
 
 ## Runtime and controller recovery

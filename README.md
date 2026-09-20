@@ -316,17 +316,26 @@ These commands plan and retain exact-input validation evidence. They do not fini
 
 This section is for repositories initialized with the current controller/task policy. Run lifecycle commands from the registered metadata controller. Never edit the integration-owner checkout.
 
-### Managed path
+### Deterministic delivery, external implementation
 
 ```bash
-yy task run TASK_ID
+yy task start TASK_ID
+# External agent edits, tests and commits in the returned worktree.
+# Retain the returned token privately for gated commands:
+yy task finish TASK_ID --lease-token <current-token>
 yy merge land TASK_ID
+# Only if automatic Ledger projection needs recovery:
 yy merge project TASK_ID
 ```
 
-`TASK_ID` is a Ledger task ID. `task run` executes the controller-owned workflow
-through `QUEUED`. `merge land` composes and lands exactly that task with native
-Git; `merge project` separately records an already successful Git result.
+`TASK_ID` is a Ledger task ID. Start prepares an isolated workspace; finish
+verifies the clean committed result and queues it. Merge uses native Git and
+automatically records verified integration in Ledger. Tests and semantic review
+remain explicit project checks. Task run/resume and automatic implementation
+budget recovery are retired. No implementation model, retry or repair engine is
+hidden behind watch. Process exit is not completion. For interrupted work,
+preserve the existing workspace and inspect status/lease-status before explicit
+continuation; do not automatically reset or replay historical attempts.
 
 ### Choose Simple or Advanced
 
