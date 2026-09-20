@@ -92,7 +92,7 @@ python3 -c 'import os, kanban; print(kanban.RUNTIME + "|" + os.environ["JUNO_TAS
     const executable = path.join(projectRoot, '.venv_juno/bin/yylo-ledger');
     await fs.writeFile(executable, `#!/usr/bin/env python3
 import json, sys
-if sys.argv[1:] == ['--version']: print('yylo-ledger 0.3.2')
+if sys.argv[1:] == ['--version']: print('yylo-ledger 0.3.3')
 else: print(json.dumps(sys.argv[1:]))
 `);
     await fs.chmod(executable, 0o755);
@@ -239,7 +239,7 @@ else: print(json.dumps(sys.argv[1:]))
       path.join(venvBin, 'yylo-ledger'),
       `#!/usr/bin/env bash
 if [[ "${'$'}{1:-}" == "--version" ]]; then
-  printf 'yylo-ledger 0.3.2\\n'
+  printf 'yylo-ledger 0.3.3\\n'
   exit 0
 fi
 printf 'yylo-ledger-runtime\\n'
