@@ -59,7 +59,7 @@ npm install --global '@yylo/cli@latest'
 # Explicit prerelease
 npm install --global '@yylo/cli@next'
 # Exact version matching this checkout (once published)
-npm install -g @yylo/cli@0.2.7
+npm install -g @yylo/cli@0.2.8
 
 npm view '@yylo/cli' version dist-tags --json
 yy --version
@@ -472,8 +472,8 @@ yy integration sync
 Install canonical packages independently:
 
 ```bash
-python3 -m pip install 'yylo-ledger==0.3.2'
-npm install --global '@yylo/benchmark@0.1.1-rc.2'
+python3 -m pip install 'yylo-ledger==0.3.3'
+npm install --global '@yylo/benchmark@0.1.2'
 
 yylo-ledger --help
 yy ledger --help
@@ -506,7 +506,7 @@ juno-kanban-juno-002 --version
 ./juno-code/scripts/juno-002-source-toolchain.sh status
 ```
 
-`yy ledger` and its labelled `yy kanban` compatibility alias use the exact Ledger compatibility policy `0.3.2`. The isolated source aliases also enforce the legacy controller package compatibility range `juno-kanban >=2.0.5,<3.0.0`. Source selection, controller registration, and data history are separate boundaries:
+`yy ledger` and its labelled `yy kanban` compatibility alias use the exact Ledger compatibility policy `0.3.3`. The isolated source aliases also enforce the legacy controller package compatibility range `juno-kanban >=2.0.5,<3.0.0`. Source selection, controller registration, and data history are separate boundaries:
 
 ```bash
 ./juno-code/scripts/juno-002-source-toolchain.sh register-controller /path/to/controller controller-branch
