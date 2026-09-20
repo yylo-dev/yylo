@@ -151,7 +151,9 @@ os.utime(source, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
 
   it('passes registered real-Git historical/provenance/crash/rollback fixtures', () => {
     const script = path.resolve('src/templates/maintenance/tests/test_controller_generation_migration.py');
-    const output = execFileSync('python3', [script], { encoding: 'utf8', timeout: 600_000, maxBuffer: 1024 * 1024 });
+    // Source fixtures now authenticate the full readback closure like consumers;
+    // all 56 real-Git cases exceeded the former aggregate 600s subprocess budget.
+    const output = execFileSync('python3', [script], { encoding: 'utf8', timeout: 1_000_000, maxBuffer: 1024 * 1024 });
     expect(output).not.toContain('FAILED');
-  }, 610_000);
+  }, 1_010_000);
 });
