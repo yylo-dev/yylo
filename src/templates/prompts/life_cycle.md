@@ -1,7 +1,7 @@
 ---
 juno_prompt_schema: juno.life_cycle.v1
 public_macro: "@@life_cycle"
-revision: 9
+revision: 10
 ---
 
 # Observable Juno task lifecycle
@@ -27,13 +27,12 @@ Use the installed Juno control plane; do not create another workflow engine.
 3. **Hydrate locally.** In each admitted task worktree use exact-lock dependency
    installation (`npm ci` where applicable). Never symlink dependencies. Keep
    controller metadata and product bytes on their declared surfaces.
-4. **Make execution observable.** Own new long-running commands with bounded
-   `yy watch exec -- COMMAND...`; use `--detach` only when necessary and then
-   observe the returned run ID with `yy watch status|await`. Use `yy evidence
-   await TASK_ID` for standing task evidence. Never construct PID/log/footer
-   plumbing, use `sleep; tail`, or make a model poll. The managed watcher owns
-   the process group and strict terminal truth described by
-   `$(yy wiki --path)/watching_progress.md`.
+4. **Keep observation optional.** Execute authorized commands explicitly in
+   the task workspace. Use `yy watch status|await|follow RUN_ID` only to observe
+   existing evidence; watch never launches, retries, cancels, or completes work.
+   Its interruption leaves the producer alone. Process exit is not task success;
+   deterministic finish checks decide closure. Do not replay historical attempts
+   or reset their budgets. Discover current watching guidance through `yy wiki`.
 5. **Implement narrowly.** Give the agent bounded task requirements, exclusions,
    exact paths, and proportional focused tests. Commit one logical task at a
    time. Before shared heavy real-Git suites, inspect active workloads and avoid
