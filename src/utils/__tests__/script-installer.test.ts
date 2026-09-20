@@ -918,7 +918,7 @@ describe('ScriptInstaller', {
       expect(updated).toBe(true);
       expect(
         await fs.pathExists(path.join(testDir, '.juno_task/wiki/git_worktree_lifecycle.md')),
-      ).toBe(true);
+      ).toBe(false); // Package wiki publication replaces filesystem installation.
       expect(
         await fs.pathExists(path.join(testDir, '.juno_task/scripts/task_workspace.py')),
       ).toBe(true);
@@ -1144,7 +1144,7 @@ describe('ScriptInstaller', {
     it('does not mix a new lifecycle script generation with customized guidance', async () => {
       await fs.ensureDir(path.join(testDir, '.juno_task'));
       await ManagedProjectAssets.update(testDir, { silent: true });
-      const wikiPath = path.join(testDir, '.juno_task/wiki/git_worktree_lifecycle.md');
+      const wikiPath = path.join(testDir, '.juno_task/prompts/new_task_workflow.md');
       const scriptPath = path.join(testDir, '.juno_task/scripts/task_workspace.py');
       await fs.writeFile(wikiPath, '# owner-specific lifecycle policy\n');
       await fs.ensureDir(path.dirname(scriptPath));
@@ -1163,7 +1163,7 @@ describe('ScriptInstaller', {
             testDir,
             '.juno_task/managed-conflicts',
             managedManifest.packageVersion,
-            '.juno_task/wiki/git_worktree_lifecycle.md.candidate',
+            '.juno_task/prompts/new_task_workflow.md.candidate',
           ),
         ),
       ).toBe(true);
@@ -1172,7 +1172,7 @@ describe('ScriptInstaller', {
     it('force-updates lifecycle guidance before replacing lifecycle scripts', async () => {
       await fs.ensureDir(path.join(testDir, '.juno_task'));
       await ManagedProjectAssets.update(testDir, { silent: true });
-      const wikiPath = path.join(testDir, '.juno_task/wiki/git_worktree_lifecycle.md');
+      const wikiPath = path.join(testDir, '.juno_task/prompts/new_task_workflow.md');
       const scriptPath = path.join(testDir, '.juno_task/scripts/task_workspace.py');
       await fs.writeFile(wikiPath, '# owner-specific lifecycle policy\n');
       await fs.ensureDir(path.dirname(scriptPath));
@@ -1182,7 +1182,7 @@ describe('ScriptInstaller', {
 
       expect(updated).toBe(true);
       expect(await fs.readFile(wikiPath, 'utf8')).toContain(
-        '# Task worktrees and native Git delivery',
+        '# Start a feature task',
       );
       expect(await fs.readFile(scriptPath, 'utf8')).toContain('def main(');
       const backupRoot = path.join(testDir, '.juno_task/managed-conflicts');
@@ -1190,7 +1190,7 @@ describe('ScriptInstaller', {
       const backupChecks = await Promise.all(
         backupDirectories.map((directory) =>
           fs.pathExists(
-            path.join(backupRoot, directory, '.juno_task/wiki/git_worktree_lifecycle.md.backup'),
+            path.join(backupRoot, directory, '.juno_task/prompts/new_task_workflow.md.backup'),
           ),
         ),
       );

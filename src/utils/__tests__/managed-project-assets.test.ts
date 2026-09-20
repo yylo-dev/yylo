@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import fs from 'fs-extra';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfigLoader, getPromptMacroDictionary } from '../../core/config.js';
 import { ScriptInstaller } from '../script-installer.js';
 import {
@@ -33,6 +33,11 @@ describe('ManagedProjectAssets', {
   let projectDir: string;
 
   beforeEach(async () => {
+    // Transport is covered with authenticated artifacts and a real Ledger by
+    // maintenance/tests/test_package_wiki_generation.py; isolate installer writes here.
+    vi.spyOn(ManagedProjectAssets, 'stagePackageWiki').mockReturnValue(
+      JSON.stringify({ schema_version: 'yylo_package_wiki_binding.v1', records: [] }) + '\n');
+    vi.spyOn(ManagedProjectAssets, 'verifyPackageWiki').mockReturnValue(true);
     projectDir = await fs.mkdtemp(path.join(os.tmpdir(), 'juno-managed-assets-'));
     await fs.ensureDir(path.join(projectDir, '.juno_task'));
     await fs.writeJson(path.join(projectDir, '.juno_task', 'config.json'), {
@@ -44,6 +49,7 @@ describe('ManagedProjectAssets', {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await fs.remove(projectDir);
   });
 
@@ -228,6 +234,9 @@ describe('ManagedProjectAssets', {
       );
     }
     expect(Object.keys(manifest.assets).some((entry) => entry.includes('/skills/'))).toBe(false);
+    expect(Object.keys(manifest.assets).some((entry) => entry.startsWith('.juno_task/wiki/'))).toBe(false);
+    expect(manifest.assets['.juno_task/config/package-wiki.json']).toBeDefined();
+    expect(await fs.pathExists(path.join(projectDir, '.juno_task/wiki'))).toBe(false);
     expect(manifest.instructionBundle.assetCount).toBe(Object.keys(manifest.assets).length);
     expect((await ManagedProjectAssets.inspectGeneration(projectDir)).coherent).toBe(true);
 
@@ -250,6 +259,19 @@ describe('ManagedProjectAssets', {
       destination: '.juno_task/workflows/yy-task-run.yaml',
     }));
     expect(await fs.readFile(workflow, 'utf8')).toBe('{"owner":"customized"}\n');
+  });
+
+  it('refuses incompatible Ledger bootstrap before changing installed controller bytes', async () => {
+    const configPath = path.join(projectDir, '.juno_task/config.json');
+    const config = await fs.readJson(configPath);
+    config.controllerWorkspace = { mode: 'metadata-only', policy: '.juno_task/config/metadata-controller.json' };
+    await fs.writeJson(configPath, config);
+    vi.mocked(ManagedProjectAssets.stagePackageWiki).mockImplementation(() => {
+      throw new Error('package_wiki_bootstrap_refused');
+    });
+    await expect(ManagedProjectAssets.update(projectDir, { silent: true })).rejects.toThrow('package_wiki_bootstrap_refused');
+    expect(await fs.pathExists(path.join(projectDir, 'AGENTS.md'))).toBe(false);
+    expect(await fs.pathExists(path.join(projectDir, '.juno_task/managed-assets.json'))).toBe(false);
   });
 
   it('rolls back an interrupted metadata-controller bundle and converges on retry', async () => {
@@ -294,13 +316,13 @@ describe('ManagedProjectAssets', {
     await ManagedProjectAssets.update(projectDir, { silent: true });
     const destinations = [
       'AGENTS.md',
-      '.juno_task/wiki/controller/git_worktree_lifecycle.md',
-      '.juno_task/wiki/controller/yy_pi_progress.md',
+      'CLAUDE.md',
+      '.juno_task/prompts/lifecycle/task-implementation.md',
     ];
     const receiptPath = path.join(projectDir, '.juno_task/managed-assets.json');
     const receipt = await fs.readJson(receiptPath);
     // Reproduce a same-version old receipt: source-generation/version agreement
-    // must not conceal content drift in root instructions or a wiki alias.
+    // must not conceal content drift in root instructions or a nested prompt.
     receipt.schemaVersion = 1;
     delete receipt.instructionBundle;
     for (const destination of destinations) {
@@ -332,16 +354,20 @@ describe('ManagedProjectAssets', {
     expect(Object.keys((await fs.readJson(receiptPath)).assets).some((entry) => entry.includes('/skills/'))).toBe(false);
   });
 
-  it('refuses ambiguous nested guidance ownership without replacing any instruction', async () => {
+  it('preserves unowned legacy wiki bytes without adopting them as runtime guidance', async () => {
     await fs.writeJson(path.join(projectDir, '.juno_task/config.json'), {
       controllerWorkspace: { mode: 'metadata-only', policy: '.juno_task/config/metadata-controller.json' },
     });
     const destination = '.juno_task/wiki/controller/git_worktree_lifecycle.md';
     await fs.outputFile(path.join(projectDir, destination), 'user-owned old guidance');
     const result = await ManagedProjectAssets.update(projectDir, { silent: true });
-    expect(result.conflicts).toContainEqual(expect.objectContaining({ destination }));
+    expect(result.conflicts).toEqual([]);
     expect(await fs.readFile(path.join(projectDir, destination), 'utf8')).toBe('user-owned old guidance');
-    expect(await fs.pathExists(path.join(projectDir, 'AGENTS.md'))).toBe(false);
+    expect(await fs.pathExists(path.join(projectDir, 'AGENTS.md'))).toBe(true);
+    const receipt = await fs.readJson(path.join(projectDir, '.juno_task/managed-assets.json'));
+    expect(receipt.assets[destination]).toBeUndefined();
+    expect((await ManagedProjectAssets.inspectGeneration(projectDir)).coherent).toBe(true);
+    vi.mocked(ManagedProjectAssets.verifyPackageWiki).mockReturnValue(false);
     expect((await ManagedProjectAssets.inspectGeneration(projectDir)).coherent).toBe(false);
   });
 
@@ -364,7 +390,7 @@ describe('ManagedProjectAssets', {
     expect(manifest.schemaVersion).toBe(2);
     expect(manifest.instructionBundle).toEqual(expect.objectContaining({
       schemaVersion: 'juno_instruction_bundle.v1',
-      semanticVersion: '1.1.0',
+      semanticVersion: '1.2.0',
       packageVersion: manifest.packageVersion,
       assetCount: Object.keys(manifest.assets).length,
       assetsSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
@@ -426,11 +452,11 @@ describe('ManagedProjectAssets', {
       expect(dictionary[name], name).toContain('yy task finish TASK_ID');
       expect(dictionary[name], name).not.toMatch(/preflighted (?:tip|closure)|^yy task preflight TASK_ID$/m);
     }
-    expect(dictionary.life_cycle).toContain('revision: 9');
+    expect(dictionary.life_cycle).toContain('revision: 10');
     expect(dictionary.life_cycle).toContain('juno.life_cycle.v1');
-    expect(dictionary.life_cycle).toContain('yy watch exec -- COMMAND');
-    expect(dictionary.life_cycle).toContain('yy watch status|await');
-    expect(dictionary.life_cycle).toContain('Never construct PID/log/footer');
+    expect(dictionary.life_cycle).not.toContain('yy watch exec');
+    expect(dictionary.life_cycle).toContain('yy watch status|await|follow RUN_ID');
+    expect(dictionary.life_cycle).toContain('watch never launches, retries, cancels, or completes work');
     expect(dictionary.life_cycle).toContain('yy task preflight TASK_ID');
     expect(dictionary.life_cycle).toContain('Merge launches\n   zero models');
     expect(dictionary.life_cycle).not.toContain('launch a fresh read-only independent `yy pi` review');
@@ -527,7 +553,7 @@ describe('ManagedProjectAssets', {
     });
     expect(
       await fs.readFile(
-        path.join(projectDir, '.juno_task/wiki/metadata_controller_boundary.md'),
+        path.join(process.cwd(), 'src/templates/wiki/controller/metadata_controller_boundary.md'),
         'utf8',
       ),
     ).toContain('Controller commits never merge or synchronize into a product target');
@@ -543,12 +569,12 @@ describe('ManagedProjectAssets', {
     expect(reviewPrompt).not.toContain('then resolve it');
     expect(
       await fs.readFile(
-        path.join(projectDir, '.juno_task/wiki/parallel_runner_and_spec_review.md'),
+        path.join(process.cwd(), 'src/templates/wiki/controller/parallel_runner_and_spec_review.md'),
         'utf8',
       ),
     ).toContain('Reviewer launcher identity');
     expect(
-      await fs.readFile(path.join(projectDir, '.juno_task/wiki/git_worktree_lifecycle.md'), 'utf8'),
+      await fs.readFile(path.join(process.cwd(), 'src/templates/wiki/controller/git_worktree_lifecycle.md'), 'utf8'),
     ).toContain('yy task finish TASK_ID');
     for (const relative of ['AGENTS.md', 'CLAUDE.md']) {
       const controllerInstruction = await fs.readFile(
@@ -565,8 +591,9 @@ describe('ManagedProjectAssets', {
     const installedWatcher = await fs.readFile(
       path.join(projectDir, '.juno_task/scripts/watch_progress.py'),
     );
+    expect(await fs.pathExists(path.join(projectDir, '.juno_task/wiki/watching_progress.md'))).toBe(false);
     const installedWatchingWiki = await fs.readFile(
-      path.join(projectDir, '.juno_task/wiki/watching_progress.md'),
+      path.join(process.cwd(), 'src/templates/wiki/controller/yy_pi_progress.md'),
     );
     expect(installedWatcher).toEqual(
       await fs.readFile(path.join(process.cwd(), 'src/templates/scripts/watch_progress.py')),
@@ -576,8 +603,8 @@ describe('ManagedProjectAssets', {
     );
     expect(installedWatchingWiki.toString()).toContain('juno.watch-footer.v1');
     expect(installedWatchingWiki.toString()).toContain('juno.watch-run.v1');
-    expect(installedWatchingWiki.toString()).toContain('yy watch exec');
-    expect(installedWatchingWiki.toString()).toContain('yy task checkpoint TASK_ID');
+    expect(installedWatchingWiki.toString()).toContain('`watch exec` is retired');
+    expect(installedWatchingWiki.toString()).toContain('yy task finish TASK_ID');
 
     const canonicalImplementationReference = await fs.readFile(
       path.join(process.cwd(), 'src/templates/skills/canonical/ralph-loop/references/implement.md'),
@@ -632,8 +659,9 @@ describe('ManagedProjectAssets', {
 
   it('distributes the canonical pre-implementation dependency hydration contract', async () => {
     await ManagedProjectAssets.update(projectDir, { silent: true });
+    expect(await fs.pathExists(path.join(projectDir, '.juno_task/wiki/task_dependency_hydration.md'))).toBe(false);
     const installedWiki = await fs.readFile(
-      path.join(projectDir, '.juno_task/wiki/task_dependency_hydration.md'),
+      path.join(process.cwd(), 'src/templates/wiki/controller/task_dependency_hydration.md'),
       'utf8',
     );
     const sourceWiki = await fs.readFile(
@@ -643,19 +671,20 @@ describe('ManagedProjectAssets', {
     expect(installedWiki).toBe(sourceWiki);
 
     for (const required of [
-      'focused_validation[].cwd',
-      'Do not assume each root is Node',
-      'Never copy or symlink a',
+      'hydration_selection: admitted_scope_v1',
+      'dependency_root: juno-code',
+      'Selection uses **admitted paths**',
+      '(`cwd` and declared `input_paths`)',
+      'historical dependency checks',
+      'Broad',
+      'task-local installers',
       'Node 22',
-      'node_modules` is absent',
-      'identity differs from the current',
-      '["npm", "ci"]',
-      '/tmp") / f"yy-task-{task_id}-npm-ci.log"',
-      'JUNO_DEPENDENCY_TIMEOUT_SECONDS',
-      'footer(f"FAILED npm ci exit={process.returncode}")',
+      'node_modules/.yylo-package-lock.sha256',
+      'hashed selection',
+      'Unselected lock changes and unrelated task metadata',
+      'prior selection is stale until explicit',
       'git status --short',
-      'stop before implementation',
-      'exact command above',
+      'Before editing',
       'yy task hydrate TASK_ID',
     ]) {
       expect(installedWiki).toContain(required);
@@ -694,13 +723,14 @@ describe('ManagedProjectAssets', {
     }
   });
 
-  it('runs the documented YYLO command for fresh, lock-changed, and failed installs', async () => {
+  it('runs the documented hydration helper with workflow probes for fresh, lock-changed, and failed installs', async () => {
     const wiki = await fs.readFile(
       path.join(process.cwd(), 'src/templates/wiki/controller/task_dependency_hydration.md'),
       'utf8',
     );
-    const command = wiki.match(/```bash\n([\s\S]*?)\n```/)?.[1];
-    expect(command).toBeTruthy();
+    expect(wiki).toContain('hydrate-node --cwd ROOT');
+    expect(wiki).toContain('verify-node-lock --cwd ROOT');
+    const helper = path.resolve(process.cwd(), 'src/templates/scripts/worktree_hydration.py');
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'juno-hydration-command-'));
     try {
       const bin = path.join(root, 'bin');
@@ -734,8 +764,8 @@ describe('ManagedProjectAssets', {
         ],
         { cwd: root },
       );
-      const runHydration = (extra: Record<string, string> = {}) =>
-        spawnSync('bash', ['-c', command!.replace('TASK_ID=TASK_ID', 'TASK_ID=HYDRATIONTEST')], {
+      const runHydration = (extra: Record<string, string> = {}) => {
+        const run = (action: string) => spawnSync('python3', [helper, '--project-root', root, action, '--cwd', '.'], {
           cwd: root,
           encoding: 'utf8',
           env: {
@@ -746,10 +776,13 @@ describe('ManagedProjectAssets', {
             ...extra,
           },
         });
+        const probe = run('verify-node-lock');
+        return probe.status === 0 ? probe : run('hydrate-node');
+      };
 
       const fresh = runHydration();
       expect(fresh.status).toBe(0);
-      expect(fresh.stdout).toContain('[dependency-hydration] OK npm ci complete');
+      expect(fresh.stderr).toBe('');
       expect((await fs.readFile(count, 'utf8')).trim().split('\n')).toHaveLength(1);
       expect((await fs.readFile(probeCount, 'utf8')).trim().split('\n')).toHaveLength(1);
       expect(spawnSync('git', ['status', '--short'], { cwd: root, encoding: 'utf8' }).stdout).toBe(
@@ -758,7 +791,7 @@ describe('ManagedProjectAssets', {
 
       const exact = runHydration();
       expect(exact.status).toBe(0);
-      expect(exact.stdout).toContain('OK exact-lock dependencies already present');
+      expect(exact.stderr).toBe('');
       expect((await fs.readFile(count, 'utf8')).trim().split('\n')).toHaveLength(1);
 
       await fs.writeFile(
@@ -770,28 +803,20 @@ describe('ManagedProjectAssets', {
       expect((await fs.readFile(count, 'utf8')).trim().split('\n')).toHaveLength(2);
 
       const failed = runHydration({ FAKE_NPM_FAIL: '17', FAKE_NPM_PROBE_FAIL: '1' });
-      expect(failed.status).toBe(17);
-      expect(failed.stdout).toContain('[dependency-hydration] FAILED npm ci exit=17');
-      expect(await fs.pathExists(path.join(root, 'node_modules/.juno-package-lock.sha256'))).toBe(
-        false,
-      );
-      expect(await fs.readFile('/tmp/yy-task-HYDRATIONTEST-npm-ci.log', 'utf8')).toContain(
-        'FAILED npm ci exit=17',
-      );
+      expect(failed.status).toBe(2);
+      expect(failed.stderr).toContain('npm ci failed');
+      expect(await fs.pathExists(path.join(root, 'node_modules/.yylo-package-lock.sha256'))).toBe(false);
 
       const failedProbe = runHydration({ FAKE_NPM_PROBE_FAIL: '1' });
       expect(failedProbe.status).toBe(2);
-      expect(failedProbe.stdout).toContain('FAILED dependency probe after npm ci');
-      expect(await fs.pathExists(path.join(root, 'node_modules/.juno-package-lock.sha256'))).toBe(
-        false,
-      );
+      expect(failedProbe.stderr).toContain('dependency tree does not satisfy the exact lock');
+      expect(await fs.pathExists(path.join(root, 'node_modules/.yylo-package-lock.sha256'))).toBe(false);
     } finally {
       await fs.remove(root);
-      await fs.remove('/tmp/yy-task-HYDRATIONTEST-npm-ci.log');
     }
   });
 
-  it('installs an operationally closed managed wiki generation', async () => {
+  it('ships closed wiki release inputs without installing a second runtime wiki store', async () => {
     const templatesDir = ManagedProjectAssets.getTemplatesDirectory();
     expect(templatesDir).not.toBeNull();
     const definitions = (await fs.readJson(path.join(templatesDir!, 'managed-assets.json')))
@@ -834,7 +859,7 @@ describe('ManagedProjectAssets', {
       'runtime_migration_and_replacement_contract.md',
     ]) {
       const lifecycleWiki = await fs.readFile(
-        path.join(projectDir, '.juno_task/wiki', name),
+        path.join(templatesDir!, 'wiki/controller', name),
         'utf8',
       );
       expect(lifecycleWiki).toContain('wiki_root=$(yy wiki --path 2>/dev/null || true)');
@@ -844,12 +869,13 @@ describe('ManagedProjectAssets', {
     const managedWikis = definitions.filter((asset) => asset.type === 'wiki');
     const relativeLink = /\[[^\]]+\]\((?![a-z]+:|#)([^)#]+)(?:#[^)]*)?\)/gi;
     for (const wiki of managedWikis) {
-      const wikiPath = path.join(projectDir, wiki.destination);
+      const wikiPath = path.join(templatesDir!, wiki.source);
+      expect(await fs.pathExists(path.join(projectDir, wiki.destination))).toBe(false);
       const content = await fs.readFile(wikiPath, 'utf8');
       for (const match of content.matchAll(relativeLink)) {
         expect(
           await fs.pathExists(path.resolve(path.dirname(wikiPath), match[1])),
-          `${wiki.destination} has an unresolved installed link: ${match[1]}`,
+          `${wiki.source} has an unresolved release-input link: ${match[1]}`,
         ).toBe(true);
       }
     }
@@ -869,8 +895,6 @@ describe('ManagedProjectAssets', {
       '.juno_task/scripts/tests/test_release_gate.py',
       '.juno_task/config/metadata-controller.json',
       '.juno_task/config/risk-policy.json',
-      '.juno_task/wiki/metadata_controller_boundary.md',
-      '.juno_task/wiki/runtime_migration_and_replacement_contract.md',
     ]) {
       expect(await fs.pathExists(path.join(projectDir, requiredPath)), requiredPath).toBe(true);
     }
@@ -881,8 +905,8 @@ describe('ManagedProjectAssets', {
     }
 
     for (const command of [
-      './.juno_task/scripts/wiki_lint.sh --file .juno_task/wiki/parallel_runner_and_spec_review.md',
-      './.juno_task/scripts/wiki_lint.sh --file .juno_task/wiki/runtime_migration_and_replacement_contract.md',
+      `./.juno_task/scripts/wiki_lint.sh --file '${path.join(templatesDir!, 'wiki/controller/parallel_runner_and_spec_review.md')}'`,
+      `./.juno_task/scripts/wiki_lint.sh --file '${path.join(templatesDir!, 'wiki/controller/runtime_migration_and_replacement_contract.md')}'`,
       // Keep the fast suite bounded: this proves the installed lifecycle modules load;
       // the exact installed concurrency gate is exercised by the package acceptance loop.
       'python3 -m py_compile .juno_task/scripts/task_workspace.py .juno_task/scripts/merge_queue.py .juno_task/scripts/risk_policy.py',
@@ -915,18 +939,18 @@ describe('ManagedProjectAssets', {
     await ScriptInstaller.autoUpdate(projectDir, true);
     expect((await ManagedProjectAssets.inspectGeneration(projectDir)).status).toBe('coherent');
 
-    const wikiPath = path.join(projectDir, '.juno_task/wiki/git_worktree_lifecycle.md');
-    await fs.writeFile(wikiPath, '# stale lifecycle guidance\n');
+    const guidancePath = path.join(projectDir, '.juno_task/prompts/reflect.md');
+    await fs.writeFile(guidancePath, '# stale lifecycle guidance\n');
     const report = await ManagedProjectAssets.inspectGeneration(projectDir);
 
     expect(report.status).toBe('mixed');
     expect(report.coherent).toBe(false);
     expect(
       report.entries.find(
-        (entry) => entry.destination === '.juno_task/wiki/git_worktree_lifecycle.md',
+        (entry) => entry.destination === '.juno_task/prompts/reflect.md',
       )?.state,
     ).toBe('customized');
-    expect(await fs.readFile(wikiPath, 'utf8')).toBe('# stale lifecycle guidance\n');
+    expect(await fs.readFile(guidancePath, 'utf8')).toBe('# stale lifecycle guidance\n');
   });
 
   it('updates a stale unmodified managed file and reinstalls a missing file', async () => {

@@ -334,8 +334,13 @@ describe('operation-specific first-use generation dispatch', () => {
   });
 
   it('keeps diagnostics read-only and explicit maintenance separate', () => {
-    for (const args of [['task', 'status'], ['scripts', 'doctor'], ['integration', 'runtime-doctor'], ['doctor', 'workspace']]) {
+    for (const args of [['task', 'status'], ['task', 'admission'], ['task', 'preflight'],
+      ['task', 'lease-status'], ['task', 'evidence-status'], ['integration', 'status'],
+      ['info'], ['where'], ['capabilities']]) {
       expect(generationCommandKind(args)).toBe('read');
+    }
+    for (const args of [['scripts', 'doctor'], ['integration', 'runtime-doctor'], ['doctor', 'workspace'], ['task', 'doctor']]) {
+      expect(generationCommandKind(args)).toBe('diagnostic');
     }
     expect(generationCommandKind(['task', 'start'])).toBe('execute');
     for (const args of [[], ['pi'], ['claude'], ['cursor'], ['codex'], ['gemini'], ['cn']]) {

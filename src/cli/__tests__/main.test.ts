@@ -17,7 +17,7 @@ import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
 import * as fs from 'fs-extra';
 
-import { mainCommandHandler } from '../commands/main.js';
+import { mainCommandHandler, expandKanbanTaskReferencesInPrompt } from '../commands/main.js';
 import { logger, LogLevel } from '../utils/advanced-logger.js';
 
 import type { MainCommandOptions } from '../types.js';
@@ -524,6 +524,10 @@ describe('Main Command', () => {
       });
 
       it('should preserve a multiline heredoc payload while rewriting a Pi shortcut', async () => {
+        vi.mocked(childProcess.execFile as any).mockImplementation(
+          (_file: string, _args: string[], _options: any, cb: any) => {
+            cb(new Error('RECORD_NOT_FOUND'), '', 'RECORD_NOT_FOUND'); return {} as any;
+          });
         const payload = '## oD5g4o\nWhat is the root cause of 504\n@@no_code';
         const options: MainCommandOptions = {
           subagent: 'pi',
@@ -710,7 +714,7 @@ describe('Main Command', () => {
 
         expect(childProcess.execFile).toHaveBeenCalledWith(
           path.join('/test/dir', '.juno_task', 'scripts', 'kanban.sh'),
-          ['get', 'c7Lj80'],
+          ['record', 'get', 'c7Lj80', '-f', 'json'],
           expect.objectContaining({ cwd: '/test/dir' }),
           expect.any(Function),
         );
@@ -732,31 +736,14 @@ describe('Main Command', () => {
         );
       });
 
-      it('should expand multiple ##task-id references from a single kanban lookup', async () => {
+      it('should expand multiple references through native single-identity lookups', async () => {
         vi.mocked(fs.pathExists)
           .mockResolvedValueOnce(false as any)
           .mockResolvedValueOnce(true as any);
 
-        vi.mocked(childProcess.execFile as any).mockImplementationOnce(
-          (_file: string, _args?: any, _options?: any, callback?: any) => {
-            const cb =
-              typeof _args === 'function' ? _args : typeof _options === 'function' ? _options : callback;
-            cb?.(
-              null,
-              JSON.stringify([
-                {
-                  id: 'c7Lj80',
-                  status: 'done',
-                  body: 'First task',
-                },
-                {
-                  id: '29MVVA',
-                  status: 'backlog',
-                  body: 'Second task',
-                },
-              ]),
-              '',
-            );
+        vi.mocked(childProcess.execFile as any).mockImplementation(
+          (_file: string, args: string[], _options: any, callback: any) => {
+            callback(null, JSON.stringify({ id: args[2], kind: 'task', body: 'Task' }), '');
             return {} as any;
           },
         );
@@ -777,7 +764,7 @@ describe('Main Command', () => {
 
         expect(childProcess.execFile).toHaveBeenCalledWith(
           path.join('/test/dir', '.juno_task', 'scripts', 'kanban.sh'),
-          ['get', 'c7Lj80', '29MVVA'],
+          ['record', 'get', '29MVVA', '-f', 'json'],
           expect.objectContaining({ cwd: '/test/dir' }),
           expect.any(Function),
         );
@@ -795,7 +782,7 @@ describe('Main Command', () => {
         );
       });
 
-      it('should expand resolvable ##task-id references even when batch kanban lookup fails', async () => {
+      it('should expand resolvable references even when another native lookup fails', async () => {
         vi.mocked(fs.pathExists)
           .mockResolvedValueOnce(false as any)
           .mockResolvedValueOnce(true as any);
@@ -805,12 +792,7 @@ describe('Main Command', () => {
             const cb =
               typeof _args === 'function' ? _args : typeof _options === 'function' ? _options : callback;
             const args = Array.isArray(_args) ? _args : [];
-            const ids = args.slice(1);
-
-            if (ids.length > 1) {
-              cb?.(new Error('batch lookup failed'), '', 'missing task');
-              return {} as any;
-            }
+            const ids = args.slice(2, 3);
 
             if (ids[0] === 'c7Lj80') {
               cb?.(
@@ -848,14 +830,14 @@ describe('Main Command', () => {
 
         expect(childProcess.execFile).toHaveBeenCalledWith(
           path.join('/test/dir', '.juno_task', 'scripts', 'kanban.sh'),
-          ['get', 'c7Lj80', 'BAD111'],
+          ['record', 'get', 'BAD111', '-f', 'json'],
           expect.objectContaining({ cwd: '/test/dir' }),
           expect.any(Function),
         );
 
         expect(childProcess.execFile).toHaveBeenCalledWith(
           path.join('/test/dir', '.juno_task', 'scripts', 'kanban.sh'),
-          ['get', 'c7Lj80'],
+          ['record', 'get', 'c7Lj80', '-f', 'json'],
           expect.objectContaining({ cwd: '/test/dir' }),
           expect.any(Function),
         );
@@ -905,15 +887,15 @@ describe('Main Command', () => {
         const call = vi.mocked(createExecutionRequest).mock.calls.at(-1)?.[0] as {
           instruction?: string;
         };
-        expect(call.instruction).toContain('[kanban_task_hydration_warning:c7Lj80]');
-        expect(call.instruction).toContain('./.juno_task/scripts/kanban.sh get c7Lj80');
+        expect(call.instruction).toContain('[ledger_record_hydration_warning:c7Lj80]');
+        expect(call.instruction).toContain("./.juno_task/scripts/kanban.sh record get 'c7Lj80' -f json");
         expect(call.instruction).toContain('## c7Lj80');
         expect(console.error).toHaveBeenCalledWith(
-          expect.stringContaining('Kanban task hydration timed out for c7Lj80'),
+          expect.stringContaining('Ledger Record hydration timed out for c7Lj80'),
         );
         expect(childProcess.execFile).toHaveBeenCalledWith(
           path.join('/test/dir', '.juno_task', 'scripts', 'kanban.sh'),
-          ['get', 'c7Lj80'],
+          ['record', 'get', 'c7Lj80', '-f', 'json'],
           expect.objectContaining({ timeout: 10000 }),
           expect.any(Function),
         );
@@ -954,7 +936,95 @@ describe('Main Command', () => {
         const { createExecutionRequest } = await import('../../core/engine.js');
         const request = vi.mocked(createExecutionRequest).mock.calls.at(-1)?.[0] as { instruction?: string };
         expect(request.instruction).toBe('Please analyze ## abc123 before coding');
-        expect(console.error).not.toHaveBeenCalledWith(expect.stringContaining('Kanban task hydration'));
+        expect(console.error).not.toHaveBeenCalledWith(expect.stringContaining('Ledger Record hydration'));
+      });
+
+      it.each([
+        ['task', null], ['document', 'wiki'], ['document', 'pdr'],
+        ['document', 'workflow'], ['artifact', 'report'],
+      ])('hydrates %s/%s by exact slug and alias with canonical identity', async (kind, profile) => {
+        vi.mocked(fs.pathExists).mockResolvedValue(true);
+        const record = { id: 'ABC123', slug: 'ABC123-readable.slug', aliases: ['old-name'], kind, profile,
+          payload: { backend: 'inline', text: 'document text', data: 'BINARY_BASE64' } };
+        vi.mocked(childProcess.execFile as any).mockImplementation(
+          (_file: string, _args: string[], _options: any, cb: any) => {
+            cb(null, JSON.stringify(record), ''); return {} as any;
+          });
+        const output = await expandKanbanTaskReferencesInPrompt(
+          'Read ##ABC123-readable.slug and ##{old-name} and ##ABC123-readable.slug', '/test/dir');
+        expect(childProcess.execFile).toHaveBeenCalledTimes(2);
+        expect(childProcess.execFile).toHaveBeenCalledWith(expect.any(String),
+          ['record', 'get', 'ABC123-readable.slug', '-f', 'json'], expect.any(Object), expect.any(Function));
+        expect(output).toContain('"slug": "ABC123-readable.slug"');
+        expect(output).toContain(kind === 'task' ? '[kanban_task:ABC123]' : '[ledger_record:ABC123]');
+        if (kind === 'artifact') {
+          expect(output).not.toContain('BINARY_BASE64');
+          expect(output).not.toContain('document text');
+          expect(output).toContain('yy ledger artifact get ABC123');
+        }
+      });
+
+      it.each(['##{ABC123', '##ABC123}', '##{ABC123}}', '###ABC123', '##ABC123/path', '##\nABC123'])
+        ('does not partially parse malformed reference %s', async (prompt) => {
+          expect(await expandKanbanTaskReferencesInPrompt(prompt, '/test/dir')).toBe(prompt);
+          expect(childProcess.execFile).not.toHaveBeenCalled();
+        });
+
+      it('preserves missing headings and exposes ambiguity without task fallback', async () => {
+        vi.mocked(fs.pathExists).mockResolvedValue(true);
+        vi.mocked(childProcess.execFile as any).mockImplementation(
+          (_file: string, args: string[], _options: any, cb: any) => {
+            cb(new Error('lookup rejected'), '', JSON.stringify({ error: { code:
+              args[2] === 'Heading' ? 'RECORD_NOT_FOUND' : 'RECORD_IDENTITY_AMBIGUOUS' } }));
+            return {} as any;
+          });
+        const output = await expandKanbanTaskReferencesInPrompt('## Heading\nRead ##abcdef', '/test/dir');
+        expect(output).toContain('## Heading');
+        expect(output).toContain('do not guess on ambiguity');
+        expect(childProcess.execFile).toHaveBeenCalledTimes(2);
+        expect(vi.mocked(childProcess.execFile).mock.calls.every(call => call[1]?.[0] === 'record')).toBe(true);
+      });
+
+      it('bounds repeated content and never follows artifact URIs', async () => {
+        vi.mocked(fs.pathExists).mockResolvedValue(true);
+        vi.mocked(childProcess.execFile as any).mockImplementation(
+          (_file: string, args: string[], _options: any, cb: any) => {
+            cb(null, JSON.stringify({ id: args[2], kind: 'artifact', slug: 'report',
+              payload: { backend: 'external', uri: 'https://example.invalid/evidence', size: 999999 } }), '');
+            return {} as any;
+          });
+        const output = await expandKanbanTaskReferencesInPrompt(Array(1000).fill('##ABC123').join(' '), '/test/dir');
+        expect(childProcess.execFile).toHaveBeenCalledTimes(1);
+        expect(Buffer.byteLength(output)).toBeLessThan(120000);
+        expect(output).toContain('yy ledger artifact get ABC123');
+      });
+
+      it.each(['text/plain', 'application/octet-stream'])('only embeds verified inline text, not %s binary', async media_type => {
+        vi.mocked(fs.pathExists).mockResolvedValue(true);
+        const bytes = Buffer.from('small evidence');
+        vi.mocked(childProcess.execFile as any).mockImplementation(
+          (_file: string, _args: string[], _options: any, cb: any) => {
+            cb(null, JSON.stringify({ id: 'ABC123', kind: 'artifact', media_type,
+              payload: { backend: 'inline', encoding: 'base64', data: bytes.toString('base64'),
+                size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') } }), '');
+            return {} as any;
+          });
+        const output = await expandKanbanTaskReferencesInPrompt('##ABC123', '/test/dir');
+        expect(output.includes('small evidence')).toBe(media_type === 'text/plain');
+        expect(output).not.toContain(bytes.toString('base64'));
+      });
+
+      it('does not inject oversized document content or recurse into references', async () => {
+        vi.mocked(fs.pathExists).mockResolvedValue(true);
+        vi.mocked(childProcess.execFile as any).mockImplementation(
+          (_file: string, _args: string[], _options: any, cb: any) => {
+            cb(null, JSON.stringify({ id: 'ABC123', kind: 'document', slug: 'large-doc',
+              payload: { text: '##OTHER1' + 'x'.repeat(20000) } }), ''); return {} as any;
+          });
+        const output = await expandKanbanTaskReferencesInPrompt('##ABC123', '/test/dir');
+        expect(output).toContain('content_omitted');
+        expect(output).not.toContain('##OTHER1');
+        expect(childProcess.execFile).toHaveBeenCalledTimes(1);
       });
 
       it('should handle file prompt', async () => {

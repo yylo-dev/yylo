@@ -43,6 +43,20 @@ export type TaskWorkspaceOperation =
   | 'state-archive-verify'
   | 'state-archive-get'
   | 'state-archive-rollback';
+export const RETIRED_TASK_EXECUTION = new Set<TaskWorkspaceOperation>([
+  'run', 'resume', 'recover-predispatch', 'recover-wall-budget',
+]);
+
+export function assertTaskExecutionSupported(operation: TaskWorkspaceOperation): void {
+  if (RETIRED_TASK_EXECUTION.has(operation)) {
+    throw new Error(`task ${operation} is retired: agents implement outside the delivery CLI. ` +
+      'Inspect yy task status TASK_ID and yy task lease-status TASK_ID; preserve any existing ' +
+      'worktree and verify authority before continuing. For new work use yy task start TASK_ID; ' +
+      'after explicit implementation, tests and commit use yy task finish TASK_ID. ' +
+      'Historical runs are not replayed or reset.');
+  }
+}
+
 export type TaskWorkspaceInvoker = (
   operation: TaskWorkspaceOperation,
   taskId: string,
@@ -173,6 +187,8 @@ export async function invokeTaskWorkspace(
   requiredPaths: string[] = [],
   admissionArgs: string[] = [],
 ): Promise<void> {
+  // Refuse before routing, generation migration, retained-runtime selection or spawning.
+  assertTaskExecutionSupported(operation);
   const route = routeControlPlane(process.cwd(), taskWorkspaceControlOperation(operation));
   const controllerRoot = route.controllerRoot;
   await assertControllerGenerationReady(controllerRoot);
@@ -232,41 +248,29 @@ export function configureTaskWorkspaceCommand(
     });
   task
     .command('run')
-    .description('Execute the managed workflow through QUEUED; acquires its own fence without --lease-token')
+    .description('Retired: implement with an external agent, then finish explicitly')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
-    .action((taskId: string) => invoke('run', taskId, []));
+    .action(() => assertTaskExecutionSupported('run'));
   task
     .command('resume')
-    .description('Resume managed task run with its own fence; existing blockers and budgets still apply')
+    .description('Retired: inspect task status and continue the preserved workspace explicitly')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
-    .action((taskId: string) => invoke('resume', taskId, []));
+    .action(() => assertTaskExecutionSupported('resume'));
   task
     .command('recover-predispatch')
-    .description('Release one receipt-proven no-provider task-run attempt without spending model budget')
+    .description('Retired: historical implementation attempts are never replayed or reset')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
     .requiredOption('--run-id <run-id>', 'Exact active task-run identity')
-    .action((taskId: string, options: { runId: string }) => invoke(
-      'recover-predispatch', taskId, [], ['--run-id', options.runId],
-    ));
+    .action(() => assertTaskExecutionSupported('recover-predispatch'));
   task
     .command('recover-wall-budget')
-    .description('Recover once the wall interval proven by an integrated no-provider receipt')
+    .description('Retired: historical implementation budgets are preserved')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
     .requiredOption('--run-id <run-id>', 'Exact active task-run identity')
     .requiredOption('--attempt <index>', 'Exact worker attempt index')
     .requiredOption('--predispatch-receipt-sha256 <sha256>', 'Exact controller pre-dispatch receipt digest')
     .requiredOption('--original-deadline-unix-ns <unix-ns>', 'Immutable original task-run deadline')
-    .action((taskId: string, options: {
-      runId: string;
-      attempt: string;
-      predispatchReceiptSha256: string;
-      originalDeadlineUnixNs: string;
-    }) => invoke('recover-wall-budget', taskId, [], [
-      '--run-id', options.runId,
-      '--attempt', options.attempt,
-      '--predispatch-receipt-sha256', options.predispatchReceiptSha256,
-      '--original-deadline-unix-ns', options.originalDeadlineUnixNs,
-    ]));
+    .action(() => assertTaskExecutionSupported('recover-wall-budget'));
   task
     .command('start')
     .description('Start a hydrated worktree; retain the returned token for later manual gated commands')
@@ -357,7 +361,7 @@ export function configureTaskWorkspaceCommand(
   task.command('lease-successor')
     .description('Issue one successor token; retry manual gated commands with --lease-token <returned-token>')
     .argument('<task-id>', 'Canonical YYLO Ledger task ID')
-    .addHelpText('after', '\nThe returned token remains valid after this helper exits until superseded or terminated.\nAt the unchanged clean base: yy task start TASK_ID --lease-token <returned-token>\nUse that token for later manual gated commands, including finish; do not repeat successor.\nFor authorized managed execution instead: yy task run TASK_ID (or resume).\nManaged execution is not read-only recovery; lifecycle blockers and budgets still apply.\nKeep tokens private; never include them in logs or task evidence.\n')
+    .addHelpText('after', '\nThe returned token remains valid after this helper exits until superseded or terminated.\nAt the unchanged clean base: yy task start TASK_ID --lease-token <returned-token>\nUse that token for later manual gated commands, including finish; do not repeat successor.\nContinue implementation with an external agent in the existing admitted worktree.\nManaged implementation and automatic replay are retired; ownership and finish checks still apply.\nKeep tokens private; never include them in logs or task evidence.\n')
     .option('--handoff-receipt <file>', 'Exact handoff receipt consumed by this successor')
     .action((taskId: string, options: { handoffReceipt?: string }) => invoke(
       'lease-successor', taskId, [],

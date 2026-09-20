@@ -5,6 +5,79 @@ controller. A package generation owns scripts, instruction identity, managed
 inventory, controller policy and executable selection together. Updating just one
 of these is not recovery.
 
+## Release-bound Ledger guidance
+
+Packages declaring `ledgerWiki: yylo_package_wiki_sources.v1` publish their explicit
+wiki source list through the compatible native Ledger API. Old `type: wiki` rows
+are legacy path mappings only; installers no longer write those destinations.
+Existing filesystem wikis remain preserved, but are not a runtime fallback.
+The authenticated archive owns the release-input templates; Ledger owns runtime
+Document revisions. Project Records are never adopted by the package publisher.
+
+```text
+authenticated package + exact Ledger preimages
+                    |
+             read-only generation plan
+                    |
+          durable intent + activation fence
+                    |
+       Ledger publication (resumable staging)
+                    |
+         complete publication receipt
+                    |
+       binding + inventory + runtime selector
+                    |
+        operational Ledger readback -> unfence
+
+rollback -> previous binding/selector; retain staged Records and receipts
+```
+
+The generation-owned `.juno_task/config/package-wiki.json` binds package/version,
+archive and manifest digests, and exact Record revisions/payload digests. It is
+part of the managed inventory and authenticated generation transaction. Admission
+compares the binding with authenticated release inputs and asks Ledger to verify
+all pins. Reader-guard reuse includes the pinned revision bytes in its invalidation
+inputs. No `latest` substitution is permitted.
+
+Use `yy ledger wiki get-package controller/task_dependency_hydration.md --source`
+(or the transparent `yy wiki` alias) to read active guidance. Staged revisions may
+be inspected explicitly by ID/revision but do not activate themselves. Ordinary
+commands never publish or repair Records. An incompatible/missing Ledger refuses
+preparation before activation; an interrupted publication retains the fence and
+requires exact resume or rollback. A completed generation is rolled back only via
+a new reviewed transition, not by deleting its Records.
+
+Fresh metadata-controller bootstrap requires an authenticated retained package
+root and a Ledger providing `plan-package`, `bind-package`, `publish-package`,
+and `verify-package`. It stages before managed-file installation and receipts the
+binding with the complete instruction bundle. Unauthenticated source/npm roots,
+foreign runtime identities and existing different bindings refuse. Existing
+active controllers must use the generation transaction rather than bootstrap.
+Legacy evacuation can prepare an inactive controller without filesystem runbooks;
+active verification requires the Ledger binding. Release/install authority remains
+separate from source merge.
+
+### Preservation-first legacy mapping reuse
+
+Do not re-import the controller corpus already mapped by task `3jBAJA`. Its immutable
+plan is retained at the external migration directory recorded on that task. For a
+new reviewed inventory, use native `yy ledger migration plan --source-root ROOT
+--inventory INVENTORY --reuse-plan PRIOR_PLAN --output NEW_PLAN`. This imports only
+mapping identities, not old execution policy or runtime authority. Source and
+destination identities, source hashes, classifications and existing Record bytes
+must agree; conflicts refuse rather than allocate duplicates. Old plan/status
+files and all legacy source bytes remain untouched. Prior failed workflows and
+secret-rejected artifacts stay blocked; this feature grants no schema bypass,
+secret-import, deletion or cleanup authority. Explicit `kind: pdr` is available
+for newly classified revisable requirements; changing an existing wiki to PDR is
+not implicit adoption or conversion.
+
+Focused cross-surface check (with the selected Ledger source hydrated):
+`python3 src/templates/maintenance/tests/test_package_wiki_generation.py`.
+Run this plus the Ledger package-wiki/migration tests and the standard controller
+upgrade gate before finish. Instruction/skill wording alignment is separately
+tracked from this publication and generation-binding change.
+
 ## Harness-handoff diagnostics
 
 The standalone Python service regression suites can use a task-local Python 3.12
@@ -36,9 +109,15 @@ the five-second end-to-end acceptance budget.
 
 ## Ordinary execution and explicit upgrade
 
-Normal task/merge execution and agent startup authenticate the selected active
-runtime under a reader lease. They never discover candidate artifacts, plan an
-upgrade, migrate, repair or recover an interrupted transaction. Installing a new
+Normal task/merge execution, agent startup, and ordinary observation authenticate
+only the selected active runtime under a reader lease. Ordinary observation includes
+`task status|admission|preflight|lease-status|evidence-status`, `integration status`,
+and `info`, `where`, and `capabilities`. These reads use the same authenticated
+retained-executable dispatch, exact argument/signal/exit forwarding, and one-hop
+cycle protection as execution. Missing global candidate artifact evidence does not
+invalidate a healthy active runtime; unsupported or tampered active state refuses.
+Ordinary reads never discover candidate artifacts, plan an upgrade, migrate,
+repair or recover an interrupted transaction. Installing a new
 global package does not activate it: ordinary execution uses the authenticated
 retained active executable unless the invoking package is an exact-byte authenticated
 copy of that active artifact. This comparison uses the already authenticated active
@@ -56,7 +135,8 @@ installation:
 yy scripts generation upgrade
 ```
 
-Read-only diagnostics may assess a prospective candidate but do not migrate:
+Explicit doctors (including `doctor` and `task doctor`) remain maintenance
+assessments: they may assess a prospective candidate but do not migrate:
 
 ```sh
 yy scripts generation doctor
@@ -64,8 +144,9 @@ yy scripts doctor
 yy integration runtime-doctor
 ```
 
-After activation these doctors use the same package-generation assessment as
-startup. When the invoked package root is already the selected active generation,
+After activation these doctors retain prospective package-generation assessment,
+separate from ordinary observation's active-only admission. When the invoked
+package root is already the selected active generation,
 assessment validates the active package, managed inventory, runtime selectors and
 applicable attempt/ACTIVE-lease pins directly, without discovering a candidate or
 building a hypothetical migration plan. Authentication and schema facts are reused
@@ -128,8 +209,10 @@ sufficient evidence. Unknown or customized state is preserved, not overwritten.
 
 Shared execution leases exclude generation writers. Active task pins bind the
 original attempt to its authenticated retained runtime. If a Juno source target
-advances beyond that old reader, the fully admitted current source reader may
-continue the same attempt only with shared-state compatibility; the retained pin,
+advances beyond a historical reader's source copy, routing may select the fully
+admitted active reader so an older exact-copy policy does not block continuation.
+The active reader admits its installed generation independently of product bytes,
+only with shared-state compatibility; the retained pin,
 lease, hydration and creation receipt are not rewritten. Agent first-use routing
 uses the registered CLI option grammar and actual `--cwd`, not a launcher's
 scratch directory or an option-like prompt/file value. Neutral reviewers receive
@@ -266,13 +349,22 @@ separate explicit-only startup policy.
 
 ## Source controllers versus consumer projects
 
-Juno source targets still require exact source-runtime agreement and full
-supported declaration admission. Their separate source-adoption transaction is
-not replaced by a speculative package overwrite.
+Activated source and consumer controllers admit their complete authenticated
+controller-local generation independently of product script copies. A comment or
+compatible functional change to Juno source does not require runtime adoption to
+start or finish a task. Supported configuration/declaration and shared-state
+checks remain mandatory; byte differences are not compatibility evidence in either
+direction. This does not rewrite historical tracked scripts/inventory or advance
+the product ref. Unactivated controllers retain the legacy source/provenance
+checks and explicit recovery route; a missing or invalid activated generation
+never falls back to trusting matching product bytes.
 
-An activated consumer controller can instead admit its complete authenticated
-controller-local generation. This does not rewrite the consumer's historical
-tracked script/inventory or advance its product ref. The task reader bootstraps
+Genuine runtime upgrades remain explicit maintenance. Close reader sessions when
+needed rather than bypass reader/writer exclusion. Within already-authorized
+work, bounded non-destructive task-local repair and relevant revalidation need no
+repeated approval. Ambiguous ownership/requirements, destructive actions and
+shared-runtime activation still require an owner decision; this is agent guidance,
+not an automatic repair engine. The task reader bootstraps
 only a tarball-authenticated captured maintenance/import closure; the shared
 engine verifies registration, policy, full managed inventory, runtime identity,
 state schemas and attempt-bound pins. Without an activated generation, legacy

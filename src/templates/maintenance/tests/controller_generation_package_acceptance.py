@@ -241,6 +241,7 @@ def scenario(artifact, historical=False, handoff_report=None):
         definition = json.loads(declaration.read_text())
         definition['schemaVersion'] = 1
         definition.pop('instructionBundle', None)
+        definition.pop('ledgerWiki', None)  # Representative filesystem-wiki predecessor.
         write(declaration, definition)
         instructions = old_root / 'dist/templates/controller-agent/AGENTS.md'
         instructions.write_bytes(instructions.read_bytes() + b'\nRepresentative predecessor guidance.\n')
@@ -271,8 +272,18 @@ def scenario(artifact, historical=False, handoff_report=None):
         ledger_version = re.search(r"YYLO_LEDGER_COMPAT_RANGE='([^']+)'", version_policy)[1]
         subprocess.run([sys.executable, '-m', 'venv', '--without-pip', str(controller / '.venv_juno')], check=True, env=env)
         ledger = controller / '.venv_juno/bin/yylo-ledger'
-        write(ledger, FAKE_KANBAN_SOURCE.replace('@BOARD@', repr(str(fixture.board)))
-              .replace('yylo-ledger 2.0.5', 'yylo-ledger ' + ledger_version).encode())
+        ledger_source = Path(__file__).resolve().parents[5] / 'juno_kanban/src'
+        if not ledger_source.is_dir():
+            raise RuntimeError('controller-upgrade requires the selected, hydrated Ledger source for publication checks')
+        # Keep deterministic task-board transport, but exercise the REAL native
+        # Document engine for publication; a task-only stub cannot certify cutover.
+        wiki_dispatch = (f'#!{sys.executable}\nimport sys\n'
+                        'if sys.argv[1:2] == ["wiki"]:\n'
+                        f'    sys.path.insert(0, {str(ledger_source)!r})\n'
+                        '    from yylo_ledger.cli import main\n'
+                        '    raise SystemExit(main())\n')
+        write(ledger, (wiki_dispatch + FAKE_KANBAN_SOURCE.replace('@BOARD@', repr(str(fixture.board)))
+              .replace('yylo-ledger 2.0.5', 'yylo-ledger ' + ledger_version)).encode())
         ledger.chmod(0o755)
         env['VIRTUAL_ENV'] = str(controller / '.venv_juno')
         env['PATH'] = str(ledger.parent) + os.pathsep + env['PATH']
@@ -361,8 +372,29 @@ def scenario(artifact, historical=False, handoff_report=None):
         assert invoke('scripts', 'generation', 'upgrade')['disposition'] == 'ready'
         # Same-artifact explicit repeat must be safe and leave coherent selectors.
         assert invoke('scripts', 'generation', 'upgrade')['disposition'] == 'ready'
+        def advance_source(suffix):
+            # Product source is not the installed controller. Exercise real
+            # source movement without activation or rewriting generation pins.
+            nonlocal target
+            if historical:
+                return
+            active = (controller / migration.CURRENT).read_bytes()
+            git(fixture.repository, 'checkout', 'product')
+            for relative in ('.juno_task/scripts/task_workspace.py',
+                             'juno-code/src/templates/scripts/task_workspace.py'):
+                file = fixture.repository / relative
+                file.write_text(file.read_text() + suffix)
+                git(fixture.repository, 'add', relative)
+            git(fixture.repository, 'commit', '-m', 'independent product runtime movement')
+            target = git(fixture.repository, 'rev-parse', 'product')
+            git(fixture.repository, 'checkout', '--detach')
+            assert (controller / migration.CURRENT).read_bytes() == active
+
+        advance_source('\n# Source-only change must not require activation.\n')
         task = invoke('task', 'start', 'X')
         assert task['state'] == 'WORKING' and task['hydration']['status'] == 'passed'
+        if not historical:
+            assert task['creation_receipt']['runtime_generation']['target_copy_current'] is False
         assert git(Path(task['worktree']), 'status', '--porcelain') == ''
         assert invoke('scripts', 'generation', 'doctor')['disposition'] == 'ready'
         assert invoke('scripts', 'doctor')['disposition'] == 'ready'
@@ -378,6 +410,7 @@ def scenario(artifact, historical=False, handoff_report=None):
         migration.authenticate(json.loads((controller / migration.CURRENT).read_bytes())['candidate'])
         assert git(controller, 'rev-parse', 'product') == target
         fixture.commit_task('X')
+        advance_source('\ndef independent_product_helper():\n    return "new product behavior"\n')
         finished = invoke('task', 'finish', 'X', '--lease-token', task['lease_token'])
         assert finished['state'] == 'QUEUED'
         landed = invoke('merge', 'land', 'X')

@@ -63,6 +63,7 @@
     ".gitignore",
     ".juno_task/config.json",
     ".juno_task/cutover.json",
+    ".juno_task/config/package-wiki.json",
     ".juno_task/config/metadata-controller.json",
     ".juno_task/config/task-workspace.json",
     ".juno_task/config/integration-workspace.json",

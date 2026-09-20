@@ -1,10 +1,10 @@
 ---
 wiki_contract:
   line_limit: 140
-  purpose: "Hydrate each task worktree through its frozen project workflow before implementation."
-  failure_mode_prevented: "Fresh task worktrees reach validation without task-local tools, borrow dependencies from another checkout, or begin implementation after provisioning failed."
-  runtime_contract_enforced: "Task start runs bounded exact-base hydration; preflight and finish verify its clean, lock-bound evidence without provisioning."
-  validation_gate: "npm test -- src/utils/__tests__/managed-project-assets.test.ts && npm run test:implementation-contract"
+  purpose: "Hydrate required task and validation roots through a frozen project workflow."
+  failure_mode_prevented: "Unrelated installers block narrow work, or required task-local dependencies are absent or stale."
+  runtime_contract_enforced: "Task start records scoped exact-lock preparation; preflight and finish verify without provisioning."
+  validation_gate: "npm test -- src/utils/__tests__/worktree-hydration.test.ts src/utils/__tests__/managed-project-assets.test.ts"
   related_sots:
     - "git_worktree_lifecycle.md"
   owns:
@@ -15,157 +15,85 @@ wiki_contract:
 
 # Task-worktree dependency hydration
 
-## Workflow-driven task start
+## Frozen preparation before implementation
 
-New task targets own `.juno_task/config/worktree-hydration.yaml`. `yy task start`
+Task targets own `.juno_task/config/worktree-hydration.yaml`. `yy task start`
 freezes its exact path and bytes, lints `workflow_class: task_hydration`, and runs
-the canonical Workflow Runner with the new task worktree as project/run root.
-The worktree is reported `WORKING` only after the workflow succeeds, its declared
-dependency locks are present, and Git proves all outputs are ignored or admitted.
+Workflow Runner with the task worktree as project/run root. Before editing, read
+the controller workspace policy and inspect the returned hydration result. Stop
+if preparation is missing, failed, stale, or leaves tracked/unignored changes.
 
-Each hydration step is an argv list with a bounded timeout, an idempotency probe,
-workflow-fatal/non-interactive flags, explicit network/sensitive declarations,
-and declared output paths. Use deterministic exact-lock installers. Env files use
-only owner-approved source/destination pairs through `worktree_hydration.py`; the
-helper copies without echoing content and enforces mode `0600`.
+Every step retains bounded argv execution, an idempotency probe, workflow-fatal
+and non-interactive flags, explicit network/sensitive declarations, and declared
+outputs. Use reviewed exact-lock, task-local installers. Env files require
+owner-approved source/destination pairs through `worktree_hydration.py`, which
+copies without echoing content and enforces mode `0600`.
 
-On failure the worktree and bounded Workflow Runner artifacts are preserved in a
-non-agent-ready `HYDRATION_FAILED` state. Repair the stated prerequisite and rerun
-`yy task hydrate TASK_ID`; successful probes skip already satisfied steps. This public
-recovery command uses the package-bound, protocol-checked hydration engine even when
-the controller's selected runtime predates `hydrate`; controller routing, creation
-receipt, and worktree authority remain mandatory. Preflight and finish never install
-or copy files—they verify frozen workflow and lock evidence.
+## Explicit scope-selection policy
 
-Immediately after `yy task start TASK_ID` and entering its returned worktree,
-before the first edit or test, read `.juno_task/config/task-workspace.json` from
-the canonical controller. Inspect every selected `focused_validation[].cwd` (and
-any task-required full-suite cwd), then provision only the roots those commands
-need. Do not assume each root is Node: identify its checked-in exact lockfile and
-use that ecosystem's deterministic, task-local install. Never copy or symlink a
-dependency directory from another worktree and never substitute arbitrary global
-packages.
+Existing workflows without `hydration_selection` retain **all steps** and their
+historical dependency checks. They are not silently narrowed. To opt in:
 
-For a YYLO validation root, `cd` to that configured cwd, activate Node 22
-(for example, `source ~/.nvm/nvm.sh && nvm use 22`), and verify its major version.
-Run task-local `npm ci` when `node_modules` is absent or when its recorded lock
-identity differs from the current `package-lock.json`. The following is the
-canonical command; it streams combined stdout/stderr to both the terminal and a
-task-ID-named `/tmp` log, enforces a real timeout, and writes its terminal footer
-immediately. Set `TASK_ID` and run it from the configured YYLO validation
-cwd:
-
-```bash
-TASK_ID=TASK_ID python3 - <<'PY'
-import hashlib, os, selectors, signal, subprocess, sys, time
-from pathlib import Path
-
-task_id = os.environ["TASK_ID"]
-timeout = int(os.environ.get("JUNO_DEPENDENCY_TIMEOUT_SECONDS", "900"))
-root = Path.cwd()
-lock = root / "package-lock.json"
-stamp = root / "node_modules" / ".juno-package-lock.sha256"
-log = Path("/tmp") / f"yy-task-{task_id}-npm-ci.log"
-started = time.monotonic()
-
-def footer(message):
-    line = f"[dependency-hydration] {message}; duration={time.monotonic() - started:.1f}s; log={log}\n"
-    sys.stdout.write(line); sys.stdout.flush()
-    with log.open("a", encoding="utf-8") as stream:
-        stream.write(line); stream.flush()
-
-if not lock.is_file():
-    footer("FAILED missing package-lock.json")
-    raise SystemExit(2)
-identity = hashlib.sha256(lock.read_bytes()).hexdigest()
-try:
-    node = subprocess.run(["node", "-p", "process.versions.node"], text=True,
-                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-except OSError as exc:
-    footer(f"FAILED cannot run Node 22: {exc}")
-    raise SystemExit(2)
-if node.returncode or node.stdout.strip().split(".", 1)[0] != "22":
-    with log.open("a", encoding="utf-8") as stream:
-        stream.write(node.stdout); stream.flush()
-    footer("FAILED Node 22 is required")
-    raise SystemExit(2)
-
-def dependency_probe():
-    remaining = max(1, timeout - int(time.monotonic() - started))
-    try:
-        probe = subprocess.run(["npm", "ls", "--all", "--json"], text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=remaining)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        with log.open("a", encoding="utf-8") as stream:
-            stream.write(f"dependency probe failed: {exc}\n"); stream.flush()
-        return False
-    with log.open("a", encoding="utf-8") as stream:
-        stream.write(probe.stdout); stream.flush()
-    return probe.returncode == 0
-
-if ((root / "node_modules").is_dir() and stamp.is_file()
-        and stamp.read_text().strip() == identity and dependency_probe()):
-    footer("OK exact-lock dependencies already present")
-    raise SystemExit(0)
-try:
-    stamp.unlink(missing_ok=True)
-except OSError as exc:
-    footer(f"FAILED cannot invalidate stale lock stamp: {exc}")
-    raise SystemExit(2)
-with log.open("wb") as stream:
-    try:
-        process = subprocess.Popen(["npm", "ci"], stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, bufsize=0, start_new_session=True)
-    except OSError as exc:
-        footer(f"FAILED cannot run npm ci: {exc}")
-        raise SystemExit(2)
-    ready = selectors.DefaultSelector(); ready.register(process.stdout, selectors.EVENT_READ)
-    while True:
-        if time.monotonic() - started > timeout:
-            os.killpg(process.pid, signal.SIGTERM)
-            try: process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL); process.wait()
-            footer(f"FAILED npm ci timed out after {timeout}s")
-            raise SystemExit(124)
-        events = ready.select(0.1)
-        if events:
-            chunk = os.read(process.stdout.fileno(), 65536)
-            if chunk:
-                sys.stdout.buffer.write(chunk); sys.stdout.buffer.flush()
-                stream.write(chunk); stream.flush()
-            elif process.poll() is not None:
-                break
-        elif process.poll() is not None:
-            chunk = os.read(process.stdout.fileno(), 65536)
-            if chunk:
-                sys.stdout.buffer.write(chunk); sys.stdout.buffer.flush()
-                stream.write(chunk); stream.flush()
-            else:
-                break
-if process.returncode:
-    footer(f"FAILED npm ci exit={process.returncode}")
-    raise SystemExit(process.returncode)
-if not dependency_probe():
-    footer("FAILED dependency probe after npm ci")
-    raise SystemExit(2)
-temporary_stamp = stamp.with_name(f".{stamp.name}.{os.getpid()}.tmp")
-try:
-    temporary_stamp.write_text(identity + "\n")
-    os.replace(temporary_stamp, stamp)
-finally:
-    temporary_stamp.unlink(missing_ok=True)
-footer("OK npm ci complete")
-PY
+```yaml
+workflow_class: task_hydration
+hydration_selection: admitted_scope_v1
+steps:
+  - id: node_dependencies
+    dependency_root: juno-code
+    # Keep the complete command/probe/timeout/network/output declarations.
 ```
 
-After every provisioning attempt, run `git status --short` from the task
-worktree root and verify it is unchanged: dependency trees and the lock stamp
-must be ignored. On any missing tool/lock, timeout, nonzero install, or dirty
-status, stop before implementation. Report the configured validation cwd, exact
-lockfile, `/tmp` log, terminal footer, and the exact command above (including the
-required `cd` and `TASK_ID`) as the recovery command. Do not continue with a
-partial dependency tree.
+Mark only independently omittable preparation steps with a literal, normalized
+worktree-relative `dependency_root`. Untagged steps always run; retain a final
+untagged clean-tree check. This is selection, not a dependency scheduler: steps
+remain in workflow order, with no inferred dependency graph or shared cache.
 
-For configured projects, `yy task start` runs the frozen hydration workflow before
-`WORKING`; preflight and finish verify its receipt and exact-lock evidence without rerunning provisioning.
+Selection uses **admitted paths**, never task prose or the currently small diff.
+It includes roots touched by scope and roots needed by applicable focused,
+profile, and possible full-suite validation (`cwd` and declared `input_paths`).
+A scope wholly inside one validation profile uses that profile's requirements;
+mixed, parent, or uncovered scope also keeps the default requirements. Broad
+admission remains broad even when the agent intends to edit just one package.
+Validation commands using another dependency root must declare that input.
+
+The shipped monorepo workflow labels CLI and benchmark installers separately.
+CLI-only admission avoids benchmark installation; benchmark-only admission uses
+its package-local checks. Multi-root/default broad admission keeps both. A failed
+unselected installer is not executed; a selected failure still blocks readiness.
+Consumer workflows retain their existing project-owned preparation policy.
+
+The attempt stores selected/omitted step IDs, admitted paths, required validation
+rows, selected dependency roots, the projected workflow, and a hashed selection
+receipt alongside runner evidence. Exact Node locks, install stamps, dependency
+probes, and installed-content manifests bind required roots to task-local bytes.
+The controller does not borrow another worktree's `node_modules`, silently use
+global tools, grant network authority, or claim an omitted check passed.
+
+## Retry and relevant-input invalidation
+
+Failures preserve the worktree, ownership, and bounded artifacts in
+`HYDRATION_FAILED`. Repair the stated prerequisite and explicitly run
+`yy task hydrate TASK_ID` with the current task authority. Existing successful
+probes skip satisfied steps; no autonomous retry or takeover occurs.
+
+Scoped readiness refuses missing/stale selected locks, missing or altered
+installed dependencies, missing selection evidence, and changed relevant
+validation requirements. Unselected lock changes and unrelated task metadata
+are not readiness inputs. Preflight and finish verify evidence; neither installs.
+
+After an authorized scope expansion, prior selection is stale until explicit
+hydration prepares the expanded scope on the clean task branch. Hydration does
+not grant broader edit authority. A changed relevant lock likewise requires
+explicit exact-lock preparation. A changed frozen workflow invalidates scoped
+readiness and cannot be silently re-frozen by retry: use a separately admitted
+workflow identity (normally a new task based on the revised target), preserving
+existing work and receipts. Never bypass a frozen workflow's authority to run
+new network or sensitive commands.
+
+For Node roots, use Node 22 and the checked-in `package-lock.json`. The canonical
+helper's `hydrate-node --cwd ROOT` runs the task-local installer and records
+`node_modules/.yylo-package-lock.sha256`; `verify-node-lock --cwd ROOT` checks it.
+For other ecosystems, declare their reviewed exact-lock preparation explicitly.
+Keep generated outputs ignored, record attempt logs and honest timings, and
+verify `git status --short` after preparation. Do not report readiness from a
+partial dependency tree or equate source merge with installed-runtime activation.

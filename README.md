@@ -33,7 +33,7 @@ mkdir yylo-demo
 cd yylo-demo
 git init
 yy init --task "Document the onboarding path" --subagent pi
-yy watch exec pwd
+pwd # execute explicitly; watch is an optional read-only observer
 ```
 
 A successful run prints the installed YYLO version, initializes `.juno_task/`, then emits a watch receipt with `"state":"COMPLETED"`, `"exit_code":0`, and nonzero `log_bytes`. This canary does not contact a model provider. In an empty, unborn Git repository, `yy init` creates the initial workspace commit, keeps the original branch as the product target, and creates a detached protected integration-owner worktree under the user state directory. Existing or dirty repositories are never committed or rearranged by this bootstrap.
@@ -74,13 +74,14 @@ Next: [run an agent](#beginner-agent-workflow), [manage a typed task](#typed-tas
 
 YYLO skill content is versioned independently in the public
 [`yylo-dev/yylo-skills`](https://github.com/yylo-dev/yylo-skills) repository and
-is not bundled in `@yylo/cli`. Install the latest stable release, or pin an exact
-stable version:
+is not bundled in `@yylo/cli`. This CLI requires stable skills `^2.0.2`, declared
+in `package.json` as `yyloSkills.version`. Install the latest compatible stable
+release, or pin an exact compatible version:
 
 ```bash
 yy skills install
-yy skills install --version 2.0.0
-yy skills update --force
+yy skills install --version 2.0.2
+yy skills update
 yy skills status
 ```
 
@@ -89,11 +90,22 @@ staged through `npx skills add` first and falls back to a shallow exact-tag Git
 clone. The seven user-intent-first skills (`artifact-yylo`, `ledger-tasks-yylo`,
 `plan-ledger-tasks-yylo`, `ralph-loop-yylo`, `understand-project-yylo`,
 `wiki-yylo`, and `workflow-yylo`) are copied to `.agents/skills`,
-`.claude/skills`, and `.pi/skills`. Differing canonical directories are refused
-unless `--force` is supplied. An explicit install/update retires a legacy YYLO
-skill only when its local install record and current digest prove it unchanged;
-customized legacy and unrelated skills are preserved with a warning. `skills
-list` and `skills status` use only the local install record.
+`.claude/skills`, and `.pi/skills`. During install/update, unchanged receipt-owned
+copies upgrade automatically without `--force`. Customized or unrecorded differing
+canonical directories refuse before mutation; review before explicitly forcing
+replacement. An explicit install/update retires a legacy YYLO skill only when its
+local install record and current digest prove it unchanged; customized/unrecorded
+legacy and unrelated skills remain preserved. Status flags these legacy copies
+because they can still inject obsolete instructions; review them separately,
+never infer cleanup authority from successful installation.
+
+`skills list` and `skills status` inspect local bytes and receipts offline. Status
+reports the required range and outdated releases even when their hashes match.
+No compatible published release means installation fails without changing skills;
+it never falls back to an old release or an unsupported future major. Installing
+the CLI alone does not install/update skills, and `scripts update` does not own
+skills. Maintainers must publish the reviewed immutable skill release before
+shipping a CLI that requires it; publication remains separately authorized.
 
 ## What YYLO owns
 
@@ -101,7 +113,7 @@ list` and `skills status` use only the local install record.
 | --- | --- | --- |
 | Agent run | `yy pi`, `yy start`, and the agent aliases listed by `yy --help` | Provider credentials and model availability remain external. |
 | Session continuity | `continue`, `clone`, `branches`, `switch`, `continuity` | Scope state is isolated and explicit; cleanup is planned and reversible. |
-| Observable commands | `watch exec|status|await` | Bounded logs and terminal machine truth; no hidden background ownership. |
+| Optional observation | `watch status|await|follow` | Read existing execution evidence; never launch, retry, cancel, or complete tasks. |
 | Validation evidence | `evidence run|status|await` | Content-addressed task evidence tied to exact inputs. |
 | Repository topology | `info`, `where`, `doctor workspace`, `integration` | Read-only discovery is separate from guarded sync/repair/push. |
 | Feature lifecycle | `task start|run|status|checkpoint|preflight|finish` | Implementation belongs in the returned exact-base task worktree. |
@@ -184,6 +196,24 @@ yylo loop --workflow flow.yaml
 Every step receives one-based loop metadata through `YYLO_LOOP_ID`,
 `YYLO_ITERATION`, `YYLO_ITERATION_COUNT`, `YYLO_STEP`, and `YYLO_STEP_COUNT`.
 
+### Ledger references in prompts
+
+Use `##ABC123`, `##readable-slug`, or `##{readable-slug}` to include a Ledger
+Record by exact ID, slug, or retained alias. Existing `## ABC123` spacing works.
+Tasks, Wiki/PDR/workflow documents, and artifacts share native Record lookup;
+ambiguous identities are never resolved by guessing. Brace references next to
+punctuation that could be part of a slug (for example `##{design.v2}.`).
+Missing references remain unchanged. Lookup errors produce a manual-resolution
+warning; references do not execute workflows or recursively expand Record text.
+
+Hydration is bounded to 32 distinct identities, a shared 30-second lookup budget,
+and 64 KiB of inserted context (16 KiB per Record). Oversized Records carry a
+retrieval command instead. Artifacts include metadata; only verified inline UTF-8
+text up to 4 KiB is included. Binary, local, and external artifact bytes are not
+automatically read or downloaded. Use `yy ledger record get ID_OR_SLUG` for
+explicit retrieval. Immutable IDs remain authoritative for task lifecycle and
+Record relations.
+
 ## Models and project shortcuts
 
 `yy pi --help` is the source of truth for shipped aliases. Current Pi shortcuts include:
@@ -222,16 +252,17 @@ Project shortcuts are scoped to the selected subagent and can reference shipped 
 
 ## Observable local commands
 
-`watch` owns bounded execution evidence for an ordinary local command:
+`watch` optionally observes existing run evidence without owning execution:
 
 ```bash
-yy watch exec npm test
-# Use the run ID printed above:
+npm test # execute explicitly in the authorized workspace
+# If an existing producer has published a watch-compatible run:
 yy watch status RUN_ID
+yy watch follow RUN_ID
 yy watch await RUN_ID
 ```
 
-`RUN_ID` is a placeholder. Status is observation; it does not acquire task, merge, or release authority. Watch evidence includes terminal state and bounded logs rather than requiring terminal-scrollback reconstruction.
+`RUN_ID` is an existing run identity, not one created by `npm test`. `watch exec` is retired. All watch operations are read-only, and interruption stops only the observer. Missing or malformed terminal evidence is not success. Process exit, semantic outcome, cleanup, and task completion are distinct; `task finish` verifies delivery. Historical run directories are preserved.
 
 ## Managed workflows and evidence
 
@@ -285,17 +316,26 @@ These commands plan and retain exact-input validation evidence. They do not fini
 
 This section is for repositories initialized with the current controller/task policy. Run lifecycle commands from the registered metadata controller. Never edit the integration-owner checkout.
 
-### Managed path
+### Deterministic delivery, external implementation
 
 ```bash
-yy task run TASK_ID
+yy task start TASK_ID
+# External agent edits, tests and commits in the returned worktree.
+# Retain the returned token privately for gated commands:
+yy task finish TASK_ID --lease-token <current-token>
 yy merge land TASK_ID
+# Only if automatic Ledger projection needs recovery:
 yy merge project TASK_ID
 ```
 
-`TASK_ID` is a Ledger task ID. `task run` executes the controller-owned workflow
-through `QUEUED`. `merge land` composes and lands exactly that task with native
-Git; `merge project` separately records an already successful Git result.
+`TASK_ID` is a Ledger task ID. Start prepares an isolated workspace; finish
+verifies the clean committed result and queues it. Merge uses native Git and
+automatically records verified integration in Ledger. Tests and semantic review
+remain explicit project checks. Task run/resume and automatic implementation
+budget recovery are retired. No implementation model, retry or repair engine is
+hidden behind watch. Process exit is not completion. For interrupted work,
+preserve the existing workspace and inspect status/lease-status before explicit
+continuation; do not automatically reset or replay historical attempts.
 
 ### Choose Simple or Advanced
 

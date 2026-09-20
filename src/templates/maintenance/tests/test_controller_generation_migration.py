@@ -43,6 +43,11 @@ class GenerationTests(unittest.TestCase):
             if incompatible and name == 'task_workspace.py':
                 data = data.replace(b'juno_task_workspace_state.v1', b'future_state.v7')
             write(root / 'dist/templates/scripts' / name, data)
+        # Activated source controllers use the same authenticated readback
+        # closure as consumers; minimal fixtures must ship that real engine too.
+        for name in ('controller_generation_migration.py', 'package_wiki_publication.py'):
+            write(root / 'dist/templates/maintenance' / name,
+                  (Path(migration.__file__).parent / name).read_bytes())
         write(root / 'dist/templates/scripts/fixture.sh', f'#!/bin/sh\necho {label}\n'.encode())
         write(root / 'dist/templates/controller-agent/AGENTS.md', f'{label} instructions\n'.encode())
         definition = {'schemaVersion': 1 if historical else 2, 'assets': [
@@ -733,16 +738,17 @@ class GenerationTests(unittest.TestCase):
         marker = self.root / 'untrusted-executed'
         module = Path(self.candidate['root']) / 'dist/templates/scripts/subprocess.py'
         module.write_text(f'from pathlib import Path\nPath({str(marker)!r}).write_text("unsafe")\n')
-        migration.admission(self.controller, package,
-                            {**{k: v for k, v in value['guards'].items() if v}, **value['after']}, value['authority'])
+        with self.assertRaisesRegex(migration.Refusal, 'proposed_admission_failed'):
+            migration.admission(self.controller, package,
+                                {**{k: v for k, v in value['guards'].items() if v}, **value['after']}, value['authority'])
         self.assertFalse(marker.exists())
 
-    def test_real_runtime_admission_refuses_candidate_target_mismatch_before_activation(self):
+    def test_real_runtime_admission_accepts_authenticated_candidate_independent_of_target(self):
         runtime = Path(self.candidate['root']) / 'dist/templates/scripts/task_workspace.py'
         runtime.write_bytes(runtime.read_bytes() + b'\n# changed candidate lifecycle bytes\n')
         self.candidate = self.pack(Path(self.candidate['root']))
-        with self.assertRaisesRegex(migration.Refusal, 'proposed_admission_failed'):
-            self.plan()
+        value = self.plan()
+        self.assertEqual(value['candidate'], self.candidate)
         self.assertFalse((self.controller / migration.ROOT).exists())
 
     def test_forged_recovery_cannot_expand_or_change_authenticated_write_set(self):
