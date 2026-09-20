@@ -201,8 +201,10 @@ sufficient evidence. Unknown or customized state is preserved, not overwritten.
 
 Shared execution leases exclude generation writers. Active task pins bind the
 original attempt to its authenticated retained runtime. If a Juno source target
-advances beyond that old reader, the fully admitted current source reader may
-continue the same attempt only with shared-state compatibility; the retained pin,
+advances beyond a historical reader's source copy, routing may select the fully
+admitted active reader so an older exact-copy policy does not block continuation.
+The active reader admits its installed generation independently of product bytes,
+only with shared-state compatibility; the retained pin,
 lease, hydration and creation receipt are not rewritten. Agent first-use routing
 uses the registered CLI option grammar and actual `--cwd`, not a launcher's
 scratch directory or an option-like prompt/file value. Neutral reviewers receive
@@ -339,13 +341,22 @@ separate explicit-only startup policy.
 
 ## Source controllers versus consumer projects
 
-Juno source targets still require exact source-runtime agreement and full
-supported declaration admission. Their separate source-adoption transaction is
-not replaced by a speculative package overwrite.
+Activated source and consumer controllers admit their complete authenticated
+controller-local generation independently of product script copies. A comment or
+compatible functional change to Juno source does not require runtime adoption to
+start or finish a task. Supported configuration/declaration and shared-state
+checks remain mandatory; byte differences are not compatibility evidence in either
+direction. This does not rewrite historical tracked scripts/inventory or advance
+the product ref. Unactivated controllers retain the legacy source/provenance
+checks and explicit recovery route; a missing or invalid activated generation
+never falls back to trusting matching product bytes.
 
-An activated consumer controller can instead admit its complete authenticated
-controller-local generation. This does not rewrite the consumer's historical
-tracked script/inventory or advance its product ref. The task reader bootstraps
+Genuine runtime upgrades remain explicit maintenance. Close reader sessions when
+needed rather than bypass reader/writer exclusion. Within already-authorized
+work, bounded non-destructive task-local repair and relevant revalidation need no
+repeated approval. Ambiguous ownership/requirements, destructive actions and
+shared-runtime activation still require an owner decision; this is agent guidance,
+not an automatic repair engine. The task reader bootstraps
 only a tarball-authenticated captured maintenance/import closure; the shared
 engine verifies registration, policy, full managed inventory, runtime identity,
 state schemas and attempt-bound pins. Without an activated generation, legacy

@@ -1827,7 +1827,7 @@ def _provenance_repair_error(controller: Path, target_sha: str) -> TaskWorkspace
 
 
 def controller_generation_admission(controller: Path, repository: Path) -> Optional[dict[str, Any]]:
-    """Consumer projects may use an authenticated controller-local generation.
+    """Activated projects use an authenticated controller-local generation.
 
     Bootstrap only the engine bytes authenticated by the retained tarball, then
     let that one package-owned assessor validate the full generation. Never run
@@ -1910,7 +1910,11 @@ def require_current_runtime(repository: Path, target_sha: str,
         or target_blob(repository, target_sha,
                        "juno-code/src/templates/scripts/task_workspace.py") is not None
     )
-    if not source_repository and controller is not None:
+    # The installed controller is an independent tool, including when its own
+    # sources are the product. Authenticate the complete activated generation;
+    # target-copy drift alone is not a reason to replace the shared runtime.
+    # Legacy/unactivated controllers retain their existing fail-closed path.
+    if controller is not None:
         admitted = controller_generation_admission(controller, repository)
         if admitted is not None:
             return {**generation, "current": True, "target_copy_current": generation["current"],
