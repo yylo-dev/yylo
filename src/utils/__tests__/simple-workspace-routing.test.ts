@@ -147,7 +147,7 @@ describe('Simple shared resolver', () => {
   it('reports installed Simple readiness without provisioning or managed target claims', async () => {
     const bin = path.join(root, 'bin'); await fs.ensureDir(bin);
     const ledger = path.join(bin, 'yylo-ledger');
-    await fs.writeFile(ledger, '#!/bin/sh\necho "yylo-ledger 0.3.2"\n', { mode: 0o755 });
+    await fs.writeFile(ledger, '#!/bin/sh\necho "yylo-ledger 0.3.3"\n', { mode: 0o755 });
     process.env.PATH = `${bin}:${process.env.PATH}`;
     const output = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const program = new Command(); configureWorkspaceCommands(program, 'test-version');
@@ -170,7 +170,7 @@ describe('Simple shared resolver', () => {
     vi.spyOn(process, 'cwd').mockReturnValue(root); const before = snapshot();
     // Resolver still needs python3 and git; a stub Ledger demonstrates bounded forwarding.
     const bin = path.join(root, 'bin'); await fs.ensureDir(bin);
-    await fs.writeFile(path.join(bin, 'yylo-ledger'), '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "yylo-ledger 0.3.2"; exit 0; fi\nprintf "%s\\n" "$@" > "$JUNO_TASK_ROOT/args.txt"\n', { mode: 0o755 });
+    await fs.writeFile(path.join(bin, 'yylo-ledger'), '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "yylo-ledger 0.3.3"; exit 0; fi\nprintf "%s\\n" "$@" > "$JUNO_TASK_ROOT/args.txt"\n', { mode: 0o755 });
     process.env.PATH = `${bin}:${process.env.PATH}`;
     await invokeLocalTaskBookkeeping(['get', 'ABC123']);
     expect(await fs.readFile(path.join(root, 'args.txt'), 'utf8')).toBe(`--config\n${root}/.juno_task/config.json\nget\nABC123\n`);

@@ -31,7 +31,7 @@ process.stdout.write('ledger stdout\\n');process.stderr.write('ledger stderr\\n'
 
 describe('ledger delegate', () => {
   it('binds this YYLO release to the supported stable Ledger', () => {
-    expect(LEDGER_VERSION_RANGE).toBe('0.3.2');
+    expect(LEDGER_VERSION_RANGE).toBe('0.3.3');
   });
 
   it('discovers only yylo-ledger and preserves argv, cwd, environment, and exit', async () => {
