@@ -259,9 +259,11 @@ export async function createTargetBoundMetadataController(
     },
   );
 
-  git(root, 'add', '.gitignore', '.juno_task/config', '.juno_task/config.json',
+  git(root, 'add', ...[
+    '.gitignore', '.juno_task/config', '.juno_task/config.json',
     '.juno_task/ledger', '.juno_task/managed-assets.json', '.juno_task/prompts',
-    '.juno_task/wiki', '.juno_task/workflows');
+    '.juno_task/wiki', '.juno_task/workflows',
+  ].filter((destination) => fs.existsSync(path.join(root, destination))));
   git(root, 'commit', '-qm', 'metadata controller generation');
   return { targetSha, changedScripts, packageScriptsDir: installedPackage.scriptsDir };
 }
