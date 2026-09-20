@@ -2,8 +2,11 @@
 schema_version: v1
 workflow_id: worktree-hydration
 workflow_class: task_hydration
+# Select from admitted paths and all possible finish commands, not the current diff.
+hydration_selection: admitted_scope_v1
 steps:
   - id: node_dependencies
+    dependency_root: juno-code
     name: Hydrate exact Node lock
     probe: ["python3", ".juno_task/scripts/worktree_hydration.py", "--project-root", ".", "verify-node-lock", "--cwd", "juno-code"]
     command: ["python3", ".juno_task/scripts/worktree_hydration.py", "--project-root", ".", "hydrate-node", "--cwd", "juno-code"]
@@ -14,6 +17,7 @@ steps:
     sensitive: false
     outputs: ["juno-code/node_modules"]
   - id: benchmark_dependencies
+    dependency_root: juno-benchmark
     name: Hydrate exact Benchmark Node lock
     probe: ["python3", ".juno_task/scripts/worktree_hydration.py", "--project-root", ".", "verify-node-lock", "--cwd", "juno-benchmark"]
     command: ["python3", ".juno_task/scripts/worktree_hydration.py", "--project-root", ".", "hydrate-node", "--cwd", "juno-benchmark"]

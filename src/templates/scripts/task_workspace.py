@@ -16,6 +16,7 @@ import fcntl
 import gzip
 import hashlib
 import importlib.util
+from importlib.machinery import SourceFileLoader
 import io
 import json
 import os
@@ -2678,23 +2679,109 @@ def hydration_identity(repository: Path, target_sha: str, config: dict[str, Any]
     if data is None:
         return {"configured": False, "path": relative, "sha256": None,
                 "reason": "legacy_target_has_no_hydration_workflow"}
+    try:
+        parsed = _hydration_workflow(data, validate=False)
+    except TaskWorkspaceError:
+        # Preserve ordinary lint diagnostics, failed state, and explicit retry
+        # for malformed workflows; no selection can run before lint passes.
+        parsed = {}
+    policy = parsed.get("hydration_selection")
+    if policy not in (None, "admitted_scope_v1"):
+        raise TaskWorkspaceError("unsupported hydration selection policy")
     return {"configured": True, "path": relative,
-            "sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data)}
+            "sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data),
+            **({"selection_policy": policy} if policy is not None else {})}
 
 
-def validation_dependency_evidence(worktree: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
+def _hydration_workflow(path: Path | bytes, *, validate: bool = True) -> dict[str, Any]:
+    """Use the runner's parser, including its dependency-free YAML fallback."""
+    loader = SourceFileLoader("_task_hydration_runner", str(Path(lifecycle_runtime.__file__).with_name("workflow_runner.sh")))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    try:
+        workflow = module.parse_yaml_like(path.decode() if isinstance(path, bytes) else path.read_text())
+        if validate and workflow.get("hydration_selection") is not None:
+            module.validate_workflow(workflow)
+    except (OSError, ValueError, module.WorkflowError) as exc:
+        raise TaskWorkspaceError(f"invalid hydration workflow: {exc}") from exc
+    return workflow
+
+
+def _paths_overlap(left: str, right: str) -> bool:
+    return left == "." or right == "." or path_within(left, [right]) or path_within(right, [left])
+
+
+def hydration_selection(workflow: dict[str, Any], config: dict[str, Any],
+                        admitted_paths: list[str]) -> Optional[dict[str, Any]]:
+    """Select from authority, never from a task title or its current small diff.
+
+    A parent scope may touch several validation profiles. Only a scope wholly
+    within one profile can omit the default finish commands. Untagged workflow
+    steps always run; absent policy preserves the historical all-steps default.
+    """
+    policy = workflow.get("hydration_selection")
+    if policy is None:
+        return None
+    if policy != "admitted_scope_v1" or not admitted_paths:
+        raise TaskWorkspaceError("unsupported hydration selection policy or empty admitted scope")
+    scope = sorted(set(normalized_relative(path, "hydration scope") for path in admitted_paths))
+    profiles = [profile for profile in config.get("validation_profiles") or []
+                if any(_paths_overlap(path, root) for path in scope for root in profile["path_roots"])]
+    profile_only = (len(profiles) == 1 and
+                    all(path_within(path, profiles[0]["path_roots"]) for path in scope))
+    rows = [row for profile in profiles for row in profile["commands"]]
+    if profile_only:
+        rows += [row for row in config["focused_validation"]
+                 if path_within(row["cwd"], profiles[0]["path_roots"])]
+    else:
+        rows += [*config["focused_validation"], config["full_suite_validation"]]
+    required_paths = [*scope, *(row["cwd"] for row in rows),
+                      *(path for row in rows for path in row.get("input_paths", []))]
+    roots: set[str] = set()
+    selected: list[str] = []
+    omitted: list[str] = []
+    for step in workflow["steps"]:
+        root = step.get("dependency_root")
+        if root is not None:
+            root = normalized_relative(root, "hydration dependency_root")
+        if root is None or any(_paths_overlap(root, path) for path in required_paths):
+            selected.append(step["id"])
+            if root is not None:
+                roots.add(root)
+        else:
+            omitted.append(step["id"])
+    if not selected:
+        raise TaskWorkspaceError("hydration selection must retain at least one step (for example verify-clean)")
+    return {"schema_version": "juno_task_hydration_selection.v1", "admitted_paths": scope,
+            "dependency_roots": sorted(roots), "step_ids": selected, "omitted_step_ids": omitted,
+            "validation_rows": json.loads(json.dumps(sorted(rows, key=lambda row: row["id"])))}
+
+
+def _dependency_rows(config: dict[str, Any], selection: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
+    if selection is not None:
+        return [*selection["validation_rows"],
+                *({"cwd": root} for root in selection["dependency_roots"])]
+    return [*config["focused_validation"], config["full_suite_validation"],
+            *(row for profile in config.get("validation_profiles") or [] for row in profile["commands"])]
+
+
+def validation_dependency_evidence(worktree: Path, config: dict[str, Any],
+                                   selection: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
     seen: set[str] = set()
-    rows = [*config["focused_validation"], config["full_suite_validation"]]
-    for profile in config.get("validation_profiles") or []:
-        rows.extend(profile["commands"])
-    for row in rows:
+    for row in _dependency_rows(config, selection):
         relative = normalized_relative(row["cwd"], "validation cwd")
         if relative in seen:
             continue
         seen.add(relative)
         cwd = worktree / relative
         node_lock = cwd / "package-lock.json"
+        if selection is not None:
+            reject_symlink_components(node_lock, "hydration exact lock")
+            reject_symlink_components(cwd / "node_modules/.package-lock.json", "task-local dependency tree")
+        if selection is not None and (cwd / "package.json").is_file() and not node_lock.is_file():
+            raise TaskWorkspaceError(f"validation_dependencies_missing: {relative}/package-lock.json is absent")
         if node_lock.is_file():
             sentinel = cwd / "node_modules/.package-lock.json"
             if not sentinel.is_file():
@@ -2761,7 +2848,8 @@ def _hydration_manifest_evidence(run_dir: Path) -> dict[str, Optional[str]]:
 MUTABLE_DEPENDENCY_CACHE_PATHS = frozenset({".vite/vitest/results.json"})
 
 
-def _dependency_content_manifest(worktree: Path, config: dict[str, Any]) -> dict[str, str]:
+def _dependency_content_manifest(worktree: Path, config: dict[str, Any],
+                                 selection: Optional[dict[str, Any]] = None) -> dict[str, str]:
     """Content-address every behavior-relevant dependency file per lock cwd.
 
     npm metadata validation cannot detect tampered or corrupted installed
@@ -2771,11 +2859,8 @@ def _dependency_content_manifest(worktree: Path, config: dict[str, Any]) -> dict
     before any worker budget is spent.
     """
     manifest: dict[str, str] = {}
-    rows = [*config["focused_validation"], config["full_suite_validation"]]
-    for profile in config.get("validation_profiles") or []:
-        rows.extend(profile["commands"])
     seen: set[str] = set()
-    for row in rows:
+    for row in _dependency_rows(config, selection):
         relative = normalized_relative(row["cwd"], "validation cwd")
         if relative in seen:
             continue
@@ -2798,7 +2883,8 @@ def _dependency_content_manifest(worktree: Path, config: dict[str, Any]) -> dict
 
 
 def run_task_hydration(controller: Path, worktree: Path, task_id: str,
-                       frozen: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+                       frozen: dict[str, Any], config: dict[str, Any],
+                       admitted_paths: Optional[list[str]] = None) -> dict[str, Any]:
     if not frozen.get("configured"):
         return {"status": "legacy_skipped", "workflow": frozen,
                 "dependency_locks": [], "recovery_command": None}
@@ -2815,6 +2901,7 @@ def run_task_hydration(controller: Path, worktree: Path, task_id: str,
     out_dir.mkdir(parents=True, mode=0o700, exist_ok=False)
     os.chmod(out_dir, 0o700)
     run_dir = out_dir / "run"
+    selection = None
     env = dict(os.environ)
     # Hydration evaluates the already registered task worktree. Controller-side
     # wrapper assertions describe the parent, not this managed child boundary.
@@ -2831,6 +2918,22 @@ def run_task_hydration(controller: Path, worktree: Path, task_id: str,
     started = time.monotonic()
     lint_diagnostic: Optional[dict[str, Any]] = None
     for stage, argv in zip(("lint", "run"), commands):
+        if stage == "run" and frozen.get("selection_policy") is not None:
+            try:
+                parsed = _hydration_workflow(workflow)
+                selection = hydration_selection(parsed, config, admitted_paths or config["allowed_paths"])
+                if selection is None:
+                    raise TaskWorkspaceError("frozen scoped hydration policy is absent")
+                projected = {**parsed, "steps": [step for step in parsed["steps"]
+                                                 if step["id"] in selection["step_ids"]]}
+                selected_workflow = out_dir / "selected-workflow.json"
+                selected_workflow.write_text(json.dumps(projected, sort_keys=True))
+                argv[argv.index("--workflow") + 1] = str(selected_workflow)
+            except TaskWorkspaceError as exc:
+                raise HydrationFailure(str(exc), {
+                    "status": "failed", "workflow": frozen, "failed_stage": "selection",
+                    "artifact_dir": str(out_dir), "recovery_command": f"yy task hydrate {task_id}",
+                }) from exc
         stage_started_at_unix_ns = time.time_ns()
         try:
             completed = subprocess.run(
@@ -2876,7 +2979,7 @@ def run_task_hydration(controller: Path, worktree: Path, task_id: str,
             "artifact_dir": str(out_dir), "recovery_command": f"yy task hydrate {task_id}",
         })
     try:
-        dependencies = validation_dependency_evidence(worktree, config)
+        dependencies = validation_dependency_evidence(worktree, config, selection)
     except TaskWorkspaceError as exc:
         raise HydrationFailure(str(exc), {
             "status": "failed", "workflow": frozen, "failed_stage": "dependency_evidence",
@@ -2885,14 +2988,23 @@ def run_task_hydration(controller: Path, worktree: Path, task_id: str,
         }) from exc
     # Record a content manifest of every installed dependency byte so later
     # gates can detect tampering that npm metadata validation cannot see.
-    content_manifest = _dependency_content_manifest(worktree, config)
+    content_manifest = _dependency_content_manifest(worktree, config, selection)
     manifest_bytes = json.dumps(content_manifest, sort_keys=True,
                                 separators=(",", ":")).encode("utf-8")
     manifest_path = out_dir / "content-manifest.json"
     temporary = manifest_path.with_name(f".{manifest_path.name}.{os.getpid()}.tmp")
     temporary.write_bytes(manifest_bytes)
     os.replace(temporary, manifest_path)
-    return {"status": "passed", "workflow": frozen,
+    selection_receipt = None
+    if selection is not None:
+        selection_path = out_dir / "selection.json"
+        selection_bytes = json.dumps({"workflow": frozen, "selection": selection}, sort_keys=True).encode()
+        selection_path.write_bytes(selection_bytes)
+        selection_receipt = {"path": str(selection_path),
+                             "sha256": hashlib.sha256(selection_bytes).hexdigest()}
+    result = {"status": "passed", "workflow": frozen,
+              **({"selection": selection, "selection_receipt": selection_receipt}
+                 if selection is not None else {}),
             "duration_ms": round((time.monotonic() - started) * 1000),
             "artifact_dir": str(out_dir),
             **_hydration_manifest_evidence(run_dir),
@@ -2903,9 +3015,19 @@ def run_task_hydration(controller: Path, worktree: Path, task_id: str,
                 "file_count": len(content_manifest),
             },
             "recovery_command": f"yy task hydrate {task_id}"}
+    if selection is not None:
+        try:
+            _verify_dependency_tree(worktree, config, result)
+        except TaskWorkspaceError as exc:
+            raise HydrationFailure(str(exc), {**result, "status": "failed",
+                                              "duration_ms": round((time.monotonic() - started) * 1000),
+                                              "failed_stage": "dependency_evidence"}) from exc
+    result["duration_ms"] = round((time.monotonic() - started) * 1000)
+    return result
 
 
-def verify_hydration_evidence(record: dict[str, Any], worktree: Path) -> None:
+def verify_hydration_evidence(record: dict[str, Any], worktree: Path,
+                              config: Optional[dict[str, Any]] = None) -> None:
     frozen = record.get("creation_receipt", {}).get("hydration_workflow")
     evidence = record.get("hydration")
     if not isinstance(frozen, dict) or not isinstance(evidence, dict):
@@ -2913,6 +3035,31 @@ def verify_hydration_evidence(record: dict[str, Any], worktree: Path) -> None:
     allowed = {"passed"} if frozen.get("configured") else {"legacy_skipped"}
     if evidence.get("status") not in allowed or evidence.get("workflow") != frozen:
         raise TaskWorkspaceError("validation_dependencies_missing: hydration evidence is missing or stale")
+    selection = evidence.get("selection")
+    if frozen.get("selection_policy") is not None and not isinstance(selection, dict):
+        raise TaskWorkspaceError("validation_dependencies_missing: frozen hydration selection is absent")
+    if selection is not None:
+        receipt = evidence.get("selection_receipt") or {}
+        try:
+            selection_bytes = Path(receipt["path"]).read_bytes()
+            bound = json.loads(selection_bytes)
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            raise TaskWorkspaceError("validation_dependencies_missing: hydration selection receipt is absent") from exc
+        if (hashlib.sha256(selection_bytes).hexdigest() != receipt.get("sha256")
+                or bound != {"workflow": frozen, "selection": selection}):
+            raise TaskWorkspaceError("validation_dependencies_missing: hydration selection receipt drifted")
+        workflow = worktree / frozen["path"]
+        if not workflow.is_file() or hashlib.sha256(workflow.read_bytes()).hexdigest() != frozen["sha256"]:
+            raise TaskWorkspaceError("validation_dependencies_missing: frozen hydration workflow moved; explicit preparation required")
+        if config is None:
+            raise TaskWorkspaceError("scoped hydration verification requires current workspace policy")
+        scope, _generated, _source = effective_admission(record)
+        expected = hydration_selection(_hydration_workflow(workflow), config, scope)
+        if selection != expected:
+            raise TaskWorkspaceError("validation_dependencies_missing: hydration scope or validation requirements changed; run yy task hydrate")
+        current = validation_dependency_evidence(worktree, config, selection)
+        if current != evidence.get("dependency_locks"):
+            raise TaskWorkspaceError("validation_dependencies_missing: required hydration locks are missing or stale")
     manifest_path = evidence.get("manifest_path")
     manifest_sha256 = evidence.get("manifest_sha256")
     if frozen.get("configured") and (not isinstance(manifest_path, str)
@@ -3250,7 +3397,7 @@ def recover_kanban_sync(controller: Path, task_id: str,
             try:
                 hydration = run_task_hydration(
                     controller, Path(frozen_record["worktree"]), task_id,
-                    frozen_hydration, config)
+                    frozen_hydration, config, effective_admission(frozen_record)[0])
             except HydrationFailure as exc:
                 control_state_lock(True)
                 state = read_state(controller)
@@ -3658,7 +3805,8 @@ def start(controller: Path, task_id: str, requested_paths: Optional[list[str]] =
                 control_state_lock(False)
                 try:
                     hydration = run_task_hydration(
-                        controller, Path(existing["worktree"]), task_id, frozen_hydration, config)
+                        controller, Path(existing["worktree"]), task_id, frozen_hydration, config,
+                        effective_admission(existing)[0])
                 except HydrationFailure as exc:
                     control_state_lock(True)
                     state = read_state(controller)
@@ -3838,7 +3986,7 @@ def start(controller: Path, task_id: str, requested_paths: Optional[list[str]] =
                         f"task start canonical Kanban projection failed: {exc}; "
                         f"recover with: {KANBAN_SYNC_RECOVERY.format(task=task_id)}") from exc
                 hydration = run_task_hydration(
-                    controller, worktree, task_id, frozen_hydration, config)
+                    controller, worktree, task_id, frozen_hydration, config, allowed_paths)
             except HydrationFailure as exc:
                 control_state_lock(True)
                 state = read_state(controller)
@@ -3981,7 +4129,8 @@ def hydrate(controller: Path, task_id: str, lease_token: Optional[str] = None) -
             state["tasks"][task_id] = pending
             write_state(controller, state)
         try:
-            evidence = run_task_hydration(controller, worktree, task_id, frozen, config)
+            evidence = run_task_hydration(controller, worktree, task_id, frozen, config,
+                                          effective_admission(record)[0])
         except HydrationFailure as exc:
             with state_lock(controller):
                 state = read_state(controller)
@@ -4500,7 +4649,7 @@ def task_admission_check(controller: Path, task_id: str) -> dict[str, Any]:
         record = json.loads(json.dumps(read_state(controller)["tasks"].get(task_id)))
     if not isinstance(record, dict):
         raise TaskWorkspaceError("task has not been started")
-    verify_hydration_evidence(record, Path(record["worktree"]))
+    verify_hydration_evidence(record, Path(record["worktree"]), config)
     _repo, _worktree, head, _committed, dirty = observe_task_diff(
         record, repository, config, task_id)
     return _admission_from_observation(
@@ -4529,7 +4678,7 @@ def review_ready_closure(controller: Path, config: dict[str, Any], record: dict[
                          runtime: dict[str, Any]) -> tuple[
                              Path, Path, str, list[str], dict[str, Any]]:
     """Validate the cheap finish boundary and bind it as one immutable closure."""
-    verify_hydration_evidence(record, Path(record["worktree"]))
+    verify_hydration_evidence(record, Path(record["worktree"]), config)
     _verify_dependency_tree(Path(record["worktree"]), config, record.get("hydration"))
     repository, worktree, head, changed = observe_working_task(
         record, configured_repository, config, task_id
@@ -4576,7 +4725,8 @@ def review_ready_closure(controller: Path, config: dict[str, Any], record: dict[
     except OSError as exc:
         raise TaskWorkspaceError("risk policy is missing during task preflight") from exc
     requirements = canonical_requirement_identity(controller, task_id)
-    dependency_evidence = validation_dependency_evidence(worktree, config)
+    dependency_evidence = validation_dependency_evidence(
+        worktree, config, record.get("hydration", {}).get("selection"))
     validation_selection = validation_profile_selection(config, changed)
     validation_rows = selected_standing_rows(config, changed)
     tree_sha = git(repository, "rev-parse", f"{head}^{{tree}}")
@@ -4866,7 +5016,8 @@ def _active_documentation_validation(repository: Path, head: str,
 def _standing_readiness_identity(record: dict[str, Any], worktree: Path,
                                   config: dict[str, Any]) -> str:
     return stable_sha256({"hydration": record.get("hydration"),
-                          "dependencies": validation_dependency_evidence(worktree, config)})
+                          "dependencies": validation_dependency_evidence(
+                              worktree, config, record.get("hydration", {}).get("selection"))})
 
 
 def standing_evidence_run(controller: Path, task_id: str,
@@ -4884,7 +5035,7 @@ def standing_evidence_run(controller: Path, task_id: str,
             task_id, None if not isinstance(record, dict) else record.get("state")))
     if not evidence_gate.admitted:
         raise TaskWorkspaceError(evidence_gate.finding.message)
-    verify_hydration_evidence(record, Path(record["worktree"]))
+    verify_hydration_evidence(record, Path(record["worktree"]), config)
     _repo, worktree, head, changed = observe_working_task(record, repository, config, task_id)
     changed = _admission_from_observation(
         record, repository, config, task_id, head, [])["authored_paths"]
@@ -6712,9 +6863,10 @@ def _verify_dependency_tree(worktree: Path, config: dict[str, Any],
     tampered or corrupted installed files that preserve all manifests are
     still detected before any worker budget is spent.
     """
-    rows = [*config["focused_validation"], config["full_suite_validation"]]
-    for profile in config.get("validation_profiles") or []:
-        rows.extend(profile["commands"])
+    selection = (hydration or {}).get("selection")
+    rows = _dependency_rows(config, selection)
+    # Also refuse a missing lock rather than treating that root as non-Node.
+    validation_dependency_evidence(worktree, config, selection)
     seen: set[str] = set()
     had_locks = False
     for row in rows:
@@ -6761,7 +6913,7 @@ def _verify_dependency_tree(worktree: Path, config: dict[str, Any],
     except json.JSONDecodeError as exc:
         raise TaskWorkspaceError(
             "validation_dependencies_missing: hydration content manifest is malformed") from exc
-    actual = _dependency_content_manifest(worktree, config)
+    actual = _dependency_content_manifest(worktree, config, selection)
     drift = [path for path in sorted(set(expected) | set(actual))
              if expected.get(path) != actual.get(path)][:8]
     if drift:
