@@ -473,7 +473,7 @@ Install canonical packages independently:
 
 ```bash
 python3 -m pip install 'yylo-ledger==0.3.3'
-npm install --global '@yylo/benchmark@0.1.1-rc.2'
+npm install --global '@yylo/benchmark@0.1.2'
 
 yylo-ledger --help
 yy ledger --help
