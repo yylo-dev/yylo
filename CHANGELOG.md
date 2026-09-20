@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### 0.2.7 source baseline
+
+The working package currently declares this version. The changes below are
+unreleased source changes, not evidence of publication or an installed upgrade.
+
 - **Breaking: external implementation, deterministic delivery.** Autonomous task
   run/resume and implementation budget recovery refuse without dispatch. Agents
   implement/test/commit in the task workspace; finish and native merge retain
