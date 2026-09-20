@@ -372,8 +372,29 @@ def scenario(artifact, historical=False, handoff_report=None):
         assert invoke('scripts', 'generation', 'upgrade')['disposition'] == 'ready'
         # Same-artifact explicit repeat must be safe and leave coherent selectors.
         assert invoke('scripts', 'generation', 'upgrade')['disposition'] == 'ready'
+        def advance_source(suffix):
+            # Product source is not the installed controller. Exercise real
+            # source movement without activation or rewriting generation pins.
+            nonlocal target
+            if historical:
+                return
+            active = (controller / migration.CURRENT).read_bytes()
+            git(fixture.repository, 'checkout', 'product')
+            for relative in ('.juno_task/scripts/task_workspace.py',
+                             'juno-code/src/templates/scripts/task_workspace.py'):
+                file = fixture.repository / relative
+                file.write_text(file.read_text() + suffix)
+                git(fixture.repository, 'add', relative)
+            git(fixture.repository, 'commit', '-m', 'independent product runtime movement')
+            target = git(fixture.repository, 'rev-parse', 'product')
+            git(fixture.repository, 'checkout', '--detach')
+            assert (controller / migration.CURRENT).read_bytes() == active
+
+        advance_source('\n# Source-only change must not require activation.\n')
         task = invoke('task', 'start', 'X')
         assert task['state'] == 'WORKING' and task['hydration']['status'] == 'passed'
+        if not historical:
+            assert task['creation_receipt']['runtime_generation']['target_copy_current'] is False
         assert git(Path(task['worktree']), 'status', '--porcelain') == ''
         assert invoke('scripts', 'generation', 'doctor')['disposition'] == 'ready'
         assert invoke('scripts', 'doctor')['disposition'] == 'ready'
@@ -389,6 +410,7 @@ def scenario(artifact, historical=False, handoff_report=None):
         migration.authenticate(json.loads((controller / migration.CURRENT).read_bytes())['candidate'])
         assert git(controller, 'rev-parse', 'product') == target
         fixture.commit_task('X')
+        advance_source('\ndef independent_product_helper():\n    return "new product behavior"\n')
         finished = invoke('task', 'finish', 'X', '--lease-token', task['lease_token'])
         assert finished['state'] == 'QUEUED'
         landed = invoke('merge', 'land', 'X')

@@ -4267,7 +4267,29 @@ raise SystemExit(2)
         self.assertEqual(hashlib.sha256(unrelated.read_bytes()).hexdigest(), unrelated_hash)
         print("PUBLIC_CLI_RUNTIME_PROVENANCE_ACCEPTANCE_COMPLETED")
 
-    def test_stale_runtime_refuses_before_creating_branch_worktree_or_state(self) -> None:
+    def test_activated_source_admission_uses_authenticated_generation_not_target_copy(self) -> None:
+        runtime = self.repository / task_runtime.RUNTIME_PATH
+        runtime.write_text(runtime.read_text() + "\n# independent source change\n")
+        git(self.repository, "add", task_runtime.RUNTIME_PATH)
+        git(self.repository, "commit", "-m", "independent source runtime")
+        target = git(self.repository, "rev-parse", "product")
+        authenticated = {"schema_version": "yylo_controller_generation_admission.v1"}
+        with mock.patch.object(task_runtime, "controller_generation_admission",
+                               return_value=authenticated) as admission:
+            result = task_runtime.require_current_runtime(self.repository, target, self.controller)
+        admission.assert_called_once_with(self.controller, self.repository)
+        self.assertTrue(result["current"])
+        self.assertFalse(result["target_copy_current"])
+        self.assertEqual(result["controller_generation_admission"], authenticated)
+
+    def test_activated_source_authentication_failure_never_falls_back_to_matching_copy(self) -> None:
+        target = git(self.repository, "rev-parse", "product")
+        with mock.patch.object(task_runtime, "controller_generation_admission",
+                               side_effect=task_runtime.TaskWorkspaceError("untrusted generation")):
+            with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "untrusted generation"):
+                task_runtime.require_current_runtime(self.repository, target, self.controller)
+
+    def test_unactivated_stale_runtime_refuses_before_creating_branch_worktree_or_state(self) -> None:
         runtime = self.repository / task_runtime.RUNTIME_PATH
         runtime.write_text(runtime.read_text() + "\n# newer target generation\n")
         git(self.repository, "add", task_runtime.RUNTIME_PATH)
