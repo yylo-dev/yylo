@@ -49,6 +49,73 @@ afterEach(async () => {
   process.env = saved; process.exitCode = exitCode; vi.restoreAllMocks();
 });
 
+describe('ordinary observation', () => {
+  it.each([['task', 'status'], ['task', 'admission'], ['task', 'preflight'],
+    ['task', 'lease-status'], ['integration', 'status'], ['info'], ['where'], ['capabilities']])(
+    'authenticates %s %s without candidate assessment', async (...args) => {
+      mocks.assess.mockRejectedValue(new Error('candidate evidence absent'));
+      expect(await prepareControllerCommand('/controller', args, [...args, 'TASK01'])).toBe(false);
+      expect(mocks.admit).toHaveBeenCalledOnce();
+      expect(mocks.assess).not.toHaveBeenCalled();
+      expect(mocks.release).not.toHaveBeenCalled();
+    });
+
+  it('forwards exact status payload and exit through the retained executable', async () => {
+    mocks.ensure.mockResolvedValue(retained);
+    mocks.spawn.mockImplementation(() => {
+      const child = new EventEmitter(); queueMicrotask(() => child.emit('exit', 23, null)); return child;
+    });
+    const args = ['task', 'status', 'TASK01', '--format', 'json', '--raw'];
+    expect(await prepareControllerCommand('/controller', args, args, '/invocation')).toBe(true);
+    expect(mocks.spawn).toHaveBeenCalledWith(process.execPath, [retained.executable, ...args],
+      expect.objectContaining({ cwd: '/invocation', stdio: 'inherit' }));
+    expect(process.exitCode).toBe(23);
+    expect(mocks.assess).not.toHaveBeenCalled();
+    expect(mocks.release).toHaveBeenCalledOnce();
+  });
+
+  it('forwards observation signals and removes its handlers after exit', async () => {
+    mocks.ensure.mockResolvedValue(retained);
+    const listeners = process.listenerCount('SIGTERM');
+    const kill = vi.fn();
+    mocks.spawn.mockImplementation(() => {
+      const child = Object.assign(new EventEmitter(), { kill });
+      queueMicrotask(() => {
+        process.emit('SIGTERM', 'SIGTERM');
+        child.emit('exit', null, 'SIGTERM');
+      });
+      return child;
+    });
+    expect(await prepareControllerCommand('/controller', ['task', 'status'], [])).toBe(true);
+    expect(kill).toHaveBeenCalledWith('SIGTERM');
+    expect(process.exitCode).toBe(143);
+    expect(process.listenerCount('SIGTERM')).toBe(listeners);
+    expect(mocks.release).toHaveBeenCalledOnce();
+  });
+
+  it('refuses a second observation hop', async () => {
+    process.env.YYLO_GENERATION_REDISPATCH = retained.executable;
+    mocks.ensure.mockResolvedValue(retained);
+    await expect(prepareControllerCommand('/controller', ['task', 'status'], []))
+      .rejects.toThrow('generation_dispatch_cycle');
+    expect(mocks.spawn).not.toHaveBeenCalled();
+  });
+
+  it.each(['unsupported_state', 'package_provenance_invalid', 'mixed_runtime'])('refuses %s before status', async code => {
+    mocks.ensure.mockRejectedValue(new Error(code));
+    await expect(prepareControllerCommand('/controller', ['task', 'status'], [])).rejects.toThrow(code);
+    expect(mocks.assess).not.toHaveBeenCalled();
+    expect(mocks.spawn).not.toHaveBeenCalled();
+  });
+
+  it('keeps explicit doctor on candidate assessment', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(await prepareControllerCommand('/controller', ['scripts', 'doctor'], [])).toBe(true);
+    expect(mocks.assess).toHaveBeenCalledOnce();
+    expect(mocks.admit).not.toHaveBeenCalled();
+  });
+});
+
 describe('optional readiness dispatch', () => {
   it.each(['ready', 'action_required'])('prints structured %s without executing a command', async disposition => {
     const report = { schema_version: 'yylo_controller_readiness.v1', disposition };
