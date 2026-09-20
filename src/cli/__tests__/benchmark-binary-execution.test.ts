@@ -8,8 +8,9 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 const projectRoot = path.resolve(__dirname, '../../..');
 const wrapper = path.join(projectRoot, 'dist/bin/yylo.sh');
 const fixtures: string[] = [];
+const benchmarkVersion = JSON.parse(await readFile(path.join(projectRoot, 'package.json'), 'utf8')).yyloBenchmark.version;
 
-async function makeFixture(version = 'yylo-benchmark 0.1.0'): Promise<{
+async function makeFixture(version = `yylo-benchmark ${benchmarkVersion}`): Promise<{
   root: string; env: NodeJS.ProcessEnv; record: string;
 }> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'yylo-benchmark-built-'));
@@ -120,7 +121,7 @@ describe('built yy/yylo benchmark delegate', () => {
     expect(missing.exitCode).toBe(127);
     expect(missing.stderr).toContain('independently installed');
 
-    const incompatible = await makeFixture('yylo-benchmark 0.1.1');
+    const incompatible = await makeFixture('yylo-benchmark 99.0.0');
     const rejected = await execa(wrapper, ['benchmark', 'plan'], {
       cwd: incompatible.root, env: incompatible.env, reject: false,
     });
