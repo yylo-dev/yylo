@@ -1,28 +1,36 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
-import { configureWatchCommand } from '../commands/watch.js';
+import { configureWatchCommand, invokeWatch } from '../commands/watch.js';
+import { routeControlPlane } from '../../utils/control-plane-router.js';
+
+vi.mock('../../utils/control-plane-router.js', () => ({
+  routeControlPlane: vi.fn(() => { throw new Error('read-only route reached'); }),
+}));
 
 describe('watch command', () => {
-  it('routes exec, status, await, and follow without shell reconstruction', async () => {
+  it.each(['status', 'await', 'follow'] as const)('forwards read-only %s', async (operation) => {
     const invoke = vi.fn().mockResolvedValue(undefined);
-    const execProgram = new Command().exitOverride();
-    configureWatchCommand(execProgram, invoke);
-    await execProgram.parseAsync(['node', 'test', 'watch', 'exec', '--detach', '--timeout', '5', '--', 'printf', 'ready']);
-    expect(invoke).toHaveBeenCalledWith('exec', ['--detach', '--timeout', '5', '--', 'printf', 'ready']);
+    const program = new Command().exitOverride();
+    configureWatchCommand(program, invoke);
+    await program.parseAsync(['node', 'test', 'watch', operation, 'run-1']);
+    expect(invoke).toHaveBeenCalledWith(operation, ['run-1']);
+  });
 
-    const statusProgram = new Command().exitOverride();
-    configureWatchCommand(statusProgram, invoke);
-    await statusProgram.parseAsync(['node', 'test', 'watch', 'status', 'run-1']);
-    expect(invoke).toHaveBeenCalledWith('status', ['run-1']);
+  it.each(['status', 'await', 'follow'] as const)('routes %s through read-only policy', async (operation) => {
+    vi.mocked(routeControlPlane).mockClear();
+    await expect(invokeWatch(operation, ['run-1'])).rejects.toThrow('read-only route reached');
+    expect(routeControlPlane).toHaveBeenCalledWith(process.cwd(), 'kanban');
+  });
 
-    const awaitProgram = new Command().exitOverride();
-    configureWatchCommand(awaitProgram, invoke);
-    await awaitProgram.parseAsync(['node', 'test', 'watch', 'await', 'run-1']);
-    expect(invoke).toHaveBeenCalledWith('await', ['run-1']);
-
-    const followProgram = new Command().exitOverride();
-    configureWatchCommand(followProgram, invoke);
-    await followProgram.parseAsync(['node', 'test', 'watch', 'follow', 'run-1']);
-    expect(invoke).toHaveBeenCalledWith('follow', ['run-1']);
+  it('refuses exec before routing or spawning, including direct invocation', async () => {
+    vi.mocked(routeControlPlane).mockClear();
+    const invoke = vi.fn();
+    const program = new Command().exitOverride();
+    configureWatchCommand(program, invoke);
+    await expect(program.parseAsync(['node', 'test', 'watch', 'exec', '--detach', '--', 'echo', 'hello']))
+      .rejects.toThrow('watch exec is retired');
+    expect(invoke).not.toHaveBeenCalled();
+    await expect(invokeWatch('exec', ['--', 'echo', 'hello'])).rejects.toThrow('watch exec is retired');
+    expect(routeControlPlane).not.toHaveBeenCalled();
   });
 });

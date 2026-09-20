@@ -452,11 +452,11 @@ describe('ManagedProjectAssets', {
       expect(dictionary[name], name).toContain('yy task finish TASK_ID');
       expect(dictionary[name], name).not.toMatch(/preflighted (?:tip|closure)|^yy task preflight TASK_ID$/m);
     }
-    expect(dictionary.life_cycle).toContain('revision: 9');
+    expect(dictionary.life_cycle).toContain('revision: 10');
     expect(dictionary.life_cycle).toContain('juno.life_cycle.v1');
-    expect(dictionary.life_cycle).toContain('yy watch exec -- COMMAND');
-    expect(dictionary.life_cycle).toContain('yy watch status|await');
-    expect(dictionary.life_cycle).toContain('Never construct PID/log/footer');
+    expect(dictionary.life_cycle).not.toContain('yy watch exec');
+    expect(dictionary.life_cycle).toContain('yy watch status|await|follow RUN_ID');
+    expect(dictionary.life_cycle).toContain('watch never launches, retries, cancels, or completes work');
     expect(dictionary.life_cycle).toContain('yy task preflight TASK_ID');
     expect(dictionary.life_cycle).toContain('Merge launches\n   zero models');
     expect(dictionary.life_cycle).not.toContain('launch a fresh read-only independent `yy pi` review');
@@ -603,8 +603,8 @@ describe('ManagedProjectAssets', {
     );
     expect(installedWatchingWiki.toString()).toContain('juno.watch-footer.v1');
     expect(installedWatchingWiki.toString()).toContain('juno.watch-run.v1');
-    expect(installedWatchingWiki.toString()).toContain('yy watch exec');
-    expect(installedWatchingWiki.toString()).toContain('yy task checkpoint TASK_ID');
+    expect(installedWatchingWiki.toString()).toContain('`watch exec` is retired');
+    expect(installedWatchingWiki.toString()).toContain('yy task finish TASK_ID');
 
     const canonicalImplementationReference = await fs.readFile(
       path.join(process.cwd(), 'src/templates/skills/canonical/ralph-loop/references/implement.md'),

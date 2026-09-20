@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import json
 import math
 import os
@@ -12,7 +13,6 @@ import signal
 import subprocess
 import sys
 import time
-import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -155,7 +155,8 @@ def read_pid(pid_file: Path) -> int:
 
 def observe_footer(footer_file: Path) -> FooterObservation:
     try:
-        data = footer_file.read_bytes()
+        with footer_file.open("rb") as handle:
+            data = handle.read(MAX_TAIL_BYTES + 1)
     except FileNotFoundError:
         return FooterObservation(None, None, None, None)
     except OSError as exc:
@@ -353,11 +354,12 @@ class SemanticFollowFormatter:
         self.stream = stream
         self.color = color
         self.pending = ""
+        self.decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self.stack: list[str] = []
         self.tool_errors: list[bool] = []
 
     def feed(self, data: bytes, *, final: bool = False) -> None:
-        self.pending += data.decode("utf-8", errors="replace")
+        self.pending += self.decoder.decode(data, final=final)
         lines = self.pending.splitlines(keepends=True)
         if lines and not lines[-1].endswith(("\n", "\r")) and not final:
             self.pending = lines.pop()
@@ -365,6 +367,10 @@ class SemanticFollowFormatter:
             self.pending = ""
         for line in lines:
             self._line(line)
+        if len(self.pending) > MAX_TAIL_BYTES:
+            # Arbitrary unterminated log lines must not accumulate without bound.
+            self.stream.write(self.pending)
+            self.pending = ""
         if final and self.pending:
             value, self.pending = self.pending, ""
             self._line(value)
@@ -425,18 +431,22 @@ class SemanticFollowFormatter:
 def follow_run(root: Path, run_id: str, *, poll_interval: float = 0.05,
                sleep: Callable[[float], None] = time.sleep,
                stream: Optional[TextIO] = None, color: Optional[bool] = None) -> int:
-    """Read a run log from byte zero and stop only on strict footer truth."""
-    _run_dir, _metadata, _pid, log_file, footer_file = _run_paths(root, run_id)
+    """Read bounded chunks; missing terminal evidence is never successful work."""
+    _run_dir, _metadata, pid_file, log_file, footer_file = _run_paths(root, run_id)
     output = stream or sys.stdout
     use_color = (hasattr(output, "isatty") and output.isatty()
                  and os.environ.get("NO_COLOR") is None) if color is None else color
     formatter = SemanticFollowFormatter(output, bool(use_color))
     offset = 0
+    identity: Optional[ProcessIdentity] = None
+    exit_seen: Optional[float] = None
     while True:
         try:
             with log_file.open("rb") as handle:
+                if os.fstat(handle.fileno()).st_size < offset:
+                    raise WatchError("run log was truncated; preserve producer evidence")
                 handle.seek(offset)
-                chunk = handle.read()
+                chunk = handle.read(MAX_TAIL_BYTES)
         except FileNotFoundError:
             chunk = b""
         except OSError as exc:
@@ -446,28 +456,36 @@ def follow_run(root: Path, run_id: str, *, poll_interval: float = 0.05,
             offset += len(chunk)
         footer = observe_footer(footer_file)
         if footer.valid:
-            # Drain bytes published immediately before the atomic footer rename.
+            # Drain the final snapshot in bounded chunks, not one unbounded read.
             try:
                 with log_file.open("rb") as handle:
-                    handle.seek(offset); final_chunk = handle.read()
+                    end = os.fstat(handle.fileno()).st_size
+                    handle.seek(offset)
+                    while offset < end:
+                        final_chunk = handle.read(min(MAX_TAIL_BYTES, end - offset))
+                        if not final_chunk:
+                            break
+                        formatter.feed(final_chunk)
+                        offset += len(final_chunk)
             except FileNotFoundError:
-                final_chunk = b""
-            if final_chunk:
-                formatter.feed(final_chunk); offset += len(final_chunk)
+                pass
             formatter.feed(b"", final=True)
             assert footer.exit_code is not None
             return footer.exit_code
+        pid = read_pid(pid_file)
+        current = process_identity(pid)
+        if current is not None and pid_exists(pid) and "Z" not in current.state.upper():
+            if ((identity is not None and current.token != identity.token)
+                    or (current.start_epoch is not None
+                        and current.start_epoch > pid_file.stat().st_mtime)):
+                raise WatchError("producer identity changed; refusing PID reuse")
+            identity = current
+        elif exit_seen is None:
+            exit_seen = time.monotonic()
+        if exit_seen is not None and time.monotonic() - exit_seen >= 3.0:
+            formatter.feed(b"", final=True)
+            raise WatchError("producer exited without a valid footer; execution outcome unknown")
         sleep(poll_interval)
-
-
-def _atomic_json(path: Path, value: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    data = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(data); handle.flush(); os.fsync(handle.fileno())
-    os.replace(temporary, path)
 
 
 def _run_root(value: Optional[str]) -> Path:
@@ -475,9 +493,7 @@ def _run_root(value: Optional[str]) -> Path:
     root = (Path(value).expanduser() if value else
             Path(controller).expanduser() / ".juno_task/runtime/watch-runs" if controller else
             Path.cwd() / ".juno_task/runtime/watch-runs")
-    root = root.absolute()
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    return root
+    return root.absolute()
 
 
 def _run_paths(root: Path, run_id: str) -> tuple[Path, Path, Path, Path, Path]:
@@ -487,80 +503,14 @@ def _run_paths(root: Path, run_id: str) -> tuple[Path, Path, Path, Path, Path]:
     return run_dir, run_dir / "run.json", run_dir / "pid", run_dir / "combined.log", run_dir / "footer"
 
 
-def _producer(run_dir: Path, timeout_seconds: float, command: list[str]) -> int:
-    metadata, pid_file, log_file, footer_file = (run_dir / name for name in
-                                                 ("run.json", "pid", "combined.log", "footer"))
-    started = utc_now()
-    run_id = run_dir.name
-    run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
-    command_digest = __import__("hashlib").sha256(
-        json.dumps(command, separators=(",", ":")).encode()).hexdigest()
-    base: dict[str, object] = {
-        "schema_version": RUN_SCHEMA, "run_id": run_id, "state": "STARTING",
-        "cwd": str(Path.cwd().resolve()), "argv_sha256": command_digest,
-        "started_utc": started, "producer_pid": os.getpid(), "timeout_seconds": timeout_seconds,
-    }
-    _atomic_json(metadata, base)
-    timed_out = False
-    received_signal: Optional[int] = None
-    child: Optional[subprocess.Popen[bytes]] = None
-
-    def forward(signum: int, _frame: object) -> None:
-        nonlocal received_signal
-        received_signal = signum
-        if child is not None and child.poll() is None:
-            try: os.killpg(child.pid, signal.SIGTERM)
-            except ProcessLookupError: pass
-
-    signal.signal(signal.SIGTERM, forward)
-    signal.signal(signal.SIGINT, forward)
-    with log_file.open("wb") as log:
-        child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
-                                 stderr=subprocess.STDOUT, start_new_session=True)
-        pid_file.write_text(str(child.pid) + "\n", encoding="ascii")
-        _atomic_json(metadata, {**base, "state": "RUNNING", "child_pid": child.pid,
-                                "process_group": child.pid})
-        deadline = None if timeout_seconds <= 0 else time.monotonic() + timeout_seconds
-        while child.poll() is None:
-            if received_signal is not None:
-                break
-            if deadline is not None and time.monotonic() >= deadline:
-                timed_out = True
-                try: os.killpg(child.pid, signal.SIGTERM)
-                except ProcessLookupError: pass
-                break
-            time.sleep(0.05)
-        if child.poll() is None:
-            try: child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                try: os.killpg(child.pid, signal.SIGKILL)
-                except ProcessLookupError: pass
-                child.wait()
-    exit_code = child.returncode if child.returncode is not None else 1
-    if exit_code < 0:
-        exit_code = 128 + abs(exit_code)
-    if timed_out:
-        exit_code = 124
-    elif received_signal is not None:
-        exit_code = 128 + received_signal
-    exit_code = max(0, min(255, exit_code))
-    completed = utc_now()
-    footer_data = (f"schema_version={FOOTER_SCHEMA}\nexit_code={exit_code}\n"
-                   f"completed_utc={completed}\n").encode()
-    temporary_footer = footer_file.with_name(".footer.tmp")
-    temporary_footer.write_bytes(footer_data); os.replace(temporary_footer, footer_file)
-    _atomic_json(metadata, {**base, "state": "COMPLETED", "child_pid": child.pid,
-                            "process_group": child.pid, "completed_utc": completed,
-                            "exit_code": exit_code, "timed_out": timed_out,
-                            "signal": None if received_signal is None else signal.Signals(received_signal).name,
-                            "log_bytes": log_file.stat().st_size})
-    return exit_code
-
-
 def _run_record(root: Path, run_id: str) -> dict[str, object]:
     _directory, metadata, _pid, _log, _footer = _run_paths(root, run_id)
     try:
-        value = json.loads(metadata.read_text(encoding="utf-8"))
+        with metadata.open("rb") as handle:
+            data = handle.read(MAX_TAIL_BYTES + 1)
+        if len(data) > MAX_TAIL_BYTES:
+            raise WatchError("run metadata exceeds observation limit")
+        value = json.loads(data)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise WatchError(f"run metadata is unavailable for {run_id}: {exc}") from exc
     if not isinstance(value, dict) or value.get("schema_version") != RUN_SCHEMA or value.get("run_id") != run_id:
@@ -568,58 +518,43 @@ def _run_record(root: Path, run_id: str) -> dict[str, object]:
     return value
 
 
+def observed_run(root: Path, run_id: str, record: dict[str, object]) -> dict[str, object]:
+    footer = observe_footer(_run_paths(root, run_id)[4])
+    return {**record, "recorded_state": record.get("state"),
+            "state": "COMPLETED" if footer.valid else "UNKNOWN",
+            "exit_code": footer.exit_code if footer.valid else None,
+            "execution_outcome": "exited" if footer.valid else "unknown",
+            "footer_error": footer.error,
+            "semantic_outcome": "not_evaluated", "cleanup_outcome": "not_evaluated",
+            "task_completion": "not_evaluated", "read_only": True}
+
+
 def run_command_cli(argv: list[str]) -> int:
     command = argv[0]
     parser = argparse.ArgumentParser(prog=f"watch_progress.py {command}")
     parser.add_argument("--root")
-    if command == "exec":
-        parser.add_argument("--detach", action="store_true")
-        parser.add_argument("--timeout", type=float, default=0.0)
-        parser.add_argument("command", nargs=argparse.REMAINDER)
-        args = parser.parse_args(argv[1:])
-        values = list(args.command)
-        if values and values[0] == "--": values.pop(0)
-        if not values: raise WatchError("watch exec requires a command after --")
-        if not math.isfinite(args.timeout) or args.timeout < 0:
-            raise WatchError("--timeout must be finite and nonnegative")
-        root = _run_root(args.root)
-        run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:12]
-        run_dir = root / run_id
-        producer_argv = [sys.executable, str(Path(__file__).resolve()), "_produce",
-                         str(run_dir), str(args.timeout), "--", *values]
-        if args.detach:
-            producer = subprocess.Popen(producer_argv, cwd=Path.cwd(), stdin=subprocess.DEVNULL,
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                        start_new_session=True)
-            deadline = time.monotonic() + 5
-            while not (run_dir / "run.json").exists() and producer.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.02)
-            if not (run_dir / "run.json").exists():
-                raise WatchError("detached producer failed before recording run metadata")
-            print(json.dumps({"schema_version": RUN_SCHEMA, "run_id": run_id,
-                              "state": "STARTED", "root": str(root)}, sort_keys=True))
-            return 0
-        result = subprocess.run(producer_argv, cwd=Path.cwd(), check=False)
-        print(json.dumps(_run_record(root, run_id), sort_keys=True))
-        return result.returncode
+    if command in {"exec", "_produce"}:
+        raise WatchError("watch execution is retired: run commands or agents explicitly "
+                         "outside watch; observe existing runs with status, await or follow. "
+                         "Only task finish verifies delivery.")
     parser.add_argument("run_id")
     args = parser.parse_args(argv[1:])
     root = _run_root(args.root)
     record = _run_record(root, args.run_id)
     if command == "status":
-        print(json.dumps(record, sort_keys=True)); return 0
+        print(json.dumps(observed_run(root, args.run_id, record), sort_keys=True)); return 0
     run_dir, _metadata, pid_file, log_file, footer_file = _run_paths(root, args.run_id)
     if command == "follow":
         return follow_run(root, args.run_id)
     if command == "await":
-        if record.get("state") != "COMPLETED":
-            watch_args = argparse.Namespace(pid_file=str(pid_file), log_file=str(log_file),
-                footer_file=str(footer_file), poll_interval=0.2, snapshot_interval=60.0,
-                tail_lines=40, footer_grace=3.0)
-            result = watch(watch_args)
-            if result: return result
-            record = _run_record(root, args.run_id)
-        print(json.dumps(record, sort_keys=True)); return int(record.get("exit_code", 0))
+        watch_args = argparse.Namespace(pid_file=str(pid_file), log_file=str(log_file),
+            footer_file=str(footer_file), poll_interval=0.2, snapshot_interval=60.0,
+            tail_lines=40, footer_grace=3.0)
+        result = watch(watch_args)
+        if result: return result
+        observed = observed_run(root, args.run_id, record)
+        print(json.dumps(observed, sort_keys=True))
+        return int(observed["exit_code"]) if observed["exit_code"] is not None else 2
     raise WatchError(f"unknown run command: {command}")
 
 
@@ -638,13 +573,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    if len(sys.argv) > 1 and sys.argv[1] == "_produce":
-        try:
-            separator = sys.argv.index("--", 4)
-            return _producer(Path(sys.argv[2]), float(sys.argv[3]), sys.argv[separator + 1:])
-        except (WatchError, OSError, ValueError) as exc:
-            print(f"watch producer: error: {exc}", file=sys.stderr); return 2
-    if len(sys.argv) > 1 and sys.argv[1] in {"exec", "status", "await", "follow"}:
+    if len(sys.argv) > 1 and sys.argv[1] in {"exec", "_produce", "status", "await", "follow"}:
         try:
             return run_command_cli(sys.argv[1:])
         except KeyboardInterrupt:
