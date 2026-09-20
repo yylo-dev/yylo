@@ -109,9 +109,15 @@ the five-second end-to-end acceptance budget.
 
 ## Ordinary execution and explicit upgrade
 
-Normal task/merge execution and agent startup authenticate the selected active
-runtime under a reader lease. They never discover candidate artifacts, plan an
-upgrade, migrate, repair or recover an interrupted transaction. Installing a new
+Normal task/merge execution, agent startup, and ordinary observation authenticate
+only the selected active runtime under a reader lease. Ordinary observation includes
+`task status|admission|preflight|lease-status|evidence-status`, `integration status`,
+and `info`, `where`, and `capabilities`. These reads use the same authenticated
+retained-executable dispatch, exact argument/signal/exit forwarding, and one-hop
+cycle protection as execution. Missing global candidate artifact evidence does not
+invalidate a healthy active runtime; unsupported or tampered active state refuses.
+Ordinary reads never discover candidate artifacts, plan an upgrade, migrate,
+repair or recover an interrupted transaction. Installing a new
 global package does not activate it: ordinary execution uses the authenticated
 retained active executable unless the invoking package is an exact-byte authenticated
 copy of that active artifact. This comparison uses the already authenticated active
@@ -129,7 +135,8 @@ installation:
 yy scripts generation upgrade
 ```
 
-Read-only diagnostics may assess a prospective candidate but do not migrate:
+Explicit doctors (including `doctor` and `task doctor`) remain maintenance
+assessments: they may assess a prospective candidate but do not migrate:
 
 ```sh
 yy scripts generation doctor
@@ -137,8 +144,9 @@ yy scripts doctor
 yy integration runtime-doctor
 ```
 
-After activation these doctors use the same package-generation assessment as
-startup. When the invoked package root is already the selected active generation,
+After activation these doctors retain prospective package-generation assessment,
+separate from ordinary observation's active-only admission. When the invoked
+package root is already the selected active generation,
 assessment validates the active package, managed inventory, runtime selectors and
 applicable attempt/ACTIVE-lease pins directly, without discovering a candidate or
 building a hypothetical migration plan. Authentication and schema facts are reused

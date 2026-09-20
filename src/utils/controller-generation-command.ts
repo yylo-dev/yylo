@@ -83,13 +83,15 @@ export function generationInvocationContext(program: Command, argv: string[], cw
     version: options.version === true, commandArgs, ...(quiet ? { quiet: true } : {}) };
 }
 
-export function generationCommandKind(args: string[]): 'read' | 'execute' | 'maintenance' | 'skip' {
+export function generationCommandKind(args: string[]): 'read' | 'diagnostic' | 'execute' | 'maintenance' | 'skip' {
   const [command = '', operation = ''] = args;
   if (command === 'scripts' && operation === 'generation') return 'maintenance';
-  if (['info', 'where', 'capabilities', 'doctor'].includes(command)) return 'read';
-  if ((command === 'scripts' && operation === 'doctor')
-      || (command === 'integration' && ['status', 'runtime-doctor'].includes(operation))
-      || (command === 'task' && ['status', 'admission', 'preflight', 'doctor', 'lease-status', 'evidence-status'].includes(operation))) return 'read';
+  if (command === 'doctor' || (command === 'scripts' && operation === 'doctor')
+      || (command === 'integration' && operation === 'runtime-doctor')
+      || (command === 'task' && operation === 'doctor')) return 'diagnostic';
+  if (['info', 'where', 'capabilities'].includes(command)
+      || (command === 'integration' && operation === 'status')
+      || (command === 'task' && ['status', 'admission', 'preflight', 'lease-status', 'evidence-status'].includes(operation))) return 'read';
   if (['task', 'merge'].includes(command) && operation && !['local', 'runtime-bootstrap'].includes(operation)) return 'execute';
   if (!command || AGENT_COMMANDS.includes(command)) return 'execute';
   return 'skip';
@@ -162,7 +164,7 @@ export async function prepareControllerCommand(cwd: string, commandArgs: string[
     } else throw new Error('Use yy scripts generation readiness|doctor|upgrade|repair-plan|repair-apply|resume|rollback');
     return true;
   }
-  if (kind === 'read') {
+  if (kind === 'diagnostic') {
     const assessment = await assessControllerGeneration(controller, packageRoot);
     const generationDoctor = (commandArgs[0] === 'integration' && commandArgs[1] === 'runtime-doctor')
       || (commandArgs[0] === 'scripts' && commandArgs[1] === 'doctor');
@@ -181,6 +183,8 @@ export async function prepareControllerCommand(cwd: string, commandArgs: string[
     }
     return false;
   }
+  // Ordinary reads share execution's active-only authentication and retained
+  // dispatch, not diagnostic candidate assessment. Neither path migrates.
   // Authenticate after acquiring the reader lease: no pre-lock assessment to
   // race, and no writer acquisition or upgrade while holding a reader lease.
   const admission = await withWaitingProgress('Authenticating active controller runtime…',

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 
 PACKAGE = Path(__file__).resolve().parents[4]
@@ -58,7 +59,8 @@ class PublicGenerationDispatchTests(unittest.TestCase):
             write(package / 'package.json', {'name': '@yylo/cli', 'version': version, 'type': 'module',
                 'yyloControllerGeneration': {'ordinaryDispatch': 'explicit-only-v1'},
                 'dependencies': json.loads((PACKAGE / 'package.json').read_text())['dependencies']})
-            write(package / 'dist/bin/cli.mjs', (PACKAGE / 'dist/bin/cli.mjs').read_bytes())
+            for name in ('cli.mjs', 'yylo.sh', 'invocation-boundary.mjs'):
+                write(package / 'dist/bin' / name, (PACKAGE / 'dist/bin' / name).read_bytes())
             shutil.copytree(PACKAGE / 'dist/templates/scripts', package / 'dist/templates/scripts',
                             ignore=shutil.ignore_patterns('__pycache__', 'tests'))
             shutil.copytree(PACKAGE / 'dist/templates/maintenance', package / 'dist/templates/maintenance',
@@ -164,7 +166,56 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         self.assertEqual(invoke('task', 'finish', 'Y', '--lease-token', active['lease_token'])['state'], 'QUEUED')
         marker = (controller / migration.CURRENT).read_bytes()
         self.assertEqual(invoke('scripts', 'generation', 'doctor')['disposition'], 'ready')
-        invoke('task', 'status', 'X')
+        # Measure public wrapper and exact active entry independently. The shim
+        # records engine invocations without changing their bytes or outcomes.
+        trace = root / 'observation-python.jsonl'
+        shim = root / 'trace-bin/python3'
+        write(shim, (f'#!{sys.executable}\nimport json, os, sys\n'
+                     f'with open({str(trace)!r}, "a") as out: out.write(json.dumps(sys.argv[1:]) + "\\n")\n'
+                     f'os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])\n').encode())
+        shim.chmod(0o755)
+        # The shell wrapper puts its selected Node directory first on PATH.
+        # Keep that directory instrumented too, rather than silently losing counts.
+        (shim.parent / 'node').symlink_to(shutil.which('node'))
+        original_path = env['PATH']
+        env['PATH'] = str(shim.parent) + os.pathsep + original_path
+        selected = json.loads((controller / migration.CURRENT).read_text())['candidate']
+        active_cli = str(Path(selected['root']) / 'dist/bin/cli.mjs')
+        evidence_path = Path(candidate['root']) / '.yylo-generation-evidence.json'
+        evidence_bytes = evidence_path.read_bytes()
+        evidence_path.unlink()  # Mutable global candidate evidence is absent.
+        observations = []
+        try:
+            for label, prefix in [('wrapper', ['bash', str(Path(candidate['root']) / 'dist/bin/yylo.sh')]),
+                                  ('active-entry', ['node', active_cli])]:
+                trace.write_text('')
+                began = time.monotonic()
+                result = subprocess.run([*prefix, 'task', 'status', 'X', '--format', 'json'],
+                    cwd=controller, env=env, capture_output=True, text=True, timeout=120)
+                elapsed = time.monotonic() - began
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                payload = json.loads(result.stdout)['data']
+                observations.append({key: payload[key] for key in ('task_id', 'state', 'base_sha', 'tip_sha', 'worktree')})
+                calls = [json.loads(line) for line in trace.read_text().splitlines()]
+                maintenance = [args for args in calls if any(value in ('plan', 'repair-plan', 'discover') for value in args)]
+                self.assertTrue(calls, 'Python operation instrumentation must be active')
+                self.assertEqual(maintenance, [])
+                print(json.dumps({'fixture': label, 'wall_seconds': elapsed,
+                                  'python_calls': len(calls), 'candidate_plan_discovery_calls': len(maintenance)}))
+            self.assertEqual(observations[0], observations[1])
+            write(evidence_path, evidence_bytes)
+            trace.write_text('')
+            began = time.monotonic()
+            self.assertEqual(invoke('scripts', 'generation', 'doctor')['disposition'], 'ready')
+            elapsed = time.monotonic() - began
+            calls = [json.loads(line) for line in trace.read_text().splitlines()]
+            maintenance = [args for args in calls if 'plan' in args or 'discover' in args]
+            self.assertTrue(maintenance, 'explicit doctor must retain candidate assessment')
+            print(json.dumps({'fixture': 'explicit-doctor', 'wall_seconds': elapsed,
+                              'python_calls': len(calls), 'candidate_plan_discovery_calls': len(maintenance)}))
+        finally:
+            write(evidence_path, evidence_bytes)
+            env['PATH'] = original_path
         self.assertEqual((controller / migration.CURRENT).read_bytes(), marker)
         self.assertEqual((controller / 's1034-out.txt').read_bytes(), b'preserved unrelated output\x00')
         self.assertEqual(git(controller, 'rev-parse', 'product'), target)
