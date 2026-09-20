@@ -61,7 +61,7 @@ describe('worktree hydration helper', () => {
 
   it('selects admitted roots and finish prerequisites with frozen fail-closed evidence', () => {
     const result = spawnSync('python3', [
-      path.resolve(process.cwd(), 'src/templates/scripts/tests/test_scoped_hydration.py'),
+      path.resolve(process.cwd(), 'scripts/tests/scoped-hydration.test.py'),
     ], { encoding: 'utf8', timeout: 120_000 });
     expect(result.status, result.stdout + result.stderr).toBe(0);
     expect(result.stdout).toContain('"steps_avoided": 1');
