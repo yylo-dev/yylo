@@ -964,6 +964,22 @@ describe('Main Command', () => {
         }
       });
 
+      it.each([
+        ['task_Ab1Cd2', 'task', null], ['doc_Ab1Cd2', 'document', 'wiki'],
+        ['artifact_Ab1Cd2', 'artifact', 'report'],
+      ])('hydrates prefixed identity %s without truncation', async (id, kind, profile) => {
+        vi.mocked(fs.pathExists).mockResolvedValue(true);
+        vi.mocked(childProcess.execFile as any).mockImplementation(
+          (_file: string, _args: string[], _options: any, cb: any) => {
+            cb(null, JSON.stringify({ id, kind, profile, slug: `${id}-example`, body: 'task text',
+              payload: { backend: 'inline', text: 'document text' } }), ''); return {} as any;
+          });
+        const output = await expandKanbanTaskReferencesInPrompt(`Read ##${id}`, '/test/dir');
+        expect(output).toContain(kind === 'task' ? `[kanban_task:${id}]` : `[ledger_record:${id}]`);
+        expect(childProcess.execFile).toHaveBeenCalledWith(expect.any(String),
+          ['record', 'get', id, '-f', 'json'], expect.any(Object), expect.any(Function));
+      });
+
       it.each(['##{ABC123', '##ABC123}', '##{ABC123}}', '###ABC123', '##ABC123/path', '##\nABC123'])
         ('does not partially parse malformed reference %s', async (prompt) => {
           expect(await expandKanbanTaskReferencesInPrompt(prompt, '/test/dir')).toBe(prompt);

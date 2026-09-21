@@ -236,14 +236,14 @@ export function configureTaskWorkspaceCommand(
     .action(() => invokeLocal(['list']));
   local.command('get <task-id>').description('Read one local Ledger task')
     .action((id: string) => {
-      if (!/^[A-Za-z0-9]{6}$/.test(id)) throw new Error('Expected a six-character Ledger task ID.');
+      if (!/^(?:task_)?[A-Za-z0-9]{6}$/.test(id)) throw new Error('Expected a Ledger task ID (legacy or task_ prefixed).');
       return invokeLocal(['get', id]);
     });
   local.command('mark <status> <task-id>').description('Update Ledger bookkeeping, not managed delivery')
     .requiredOption('--response <text>', 'Reason for the bookkeeping change')
     .action((status: string, id: string, options: { response: string }) => {
       if (!['backlog', 'todo', 'in_progress', 'done'].includes(status)) throw new Error('Unsupported Ledger task status.');
-      if (!/^[A-Za-z0-9]{6}$/.test(id)) throw new Error('Expected a six-character Ledger task ID.');
+      if (!/^(?:task_)?[A-Za-z0-9]{6}$/.test(id)) throw new Error('Expected a Ledger task ID (legacy or task_ prefixed).');
       return invokeLocal(['mark', status, '--id', id, '--response', options.response]);
     });
   task
