@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs-extra';
+import semver from 'semver';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { SkillInstaller } from '../skill-installer.js';
@@ -194,11 +195,18 @@ describe('SkillInstaller remote acquisition', () => {
     }
   });
 
-  it('normalizes exact stable versions and rejects prereleases', async () => {
-    expect((await SkillInstaller.installRemote(project, { version: '2.0.2' })).version).toBe('v2.0.2');
+  it.each(['2.0.2', '2.0.3'])('normalizes compatible stable version %s and rejects prereleases', async (version) => {
+    runner.mockImplementation(async (command, args, cwd) => {
+      if (command === 'git' && args.includes('ls-remote')) {
+        return { stdout: `abc\trefs/tags/v${version}\n`, stderr: '' };
+      }
+      return defaultRunner(command, args, cwd);
+    });
+    expect((await SkillInstaller.installRemote(project, { version })).version).toBe(`v${version}`);
     expect(runner.mock.calls.some(([command, args]) =>
-      command === 'git' && args.includes('refs/tags/v2.0.2'))).toBe(true);
-    await expect(SkillInstaller.installRemote(project, { version: '2.0.2-rc.1' }))
+      command === 'git' && args.includes(`refs/tags/v${version}`))).toBe(true);
+    expect(await SkillInstaller.inspectGuidance(project)).toEqual({ coherent: true, version: `v${version}`, findings: [] });
+    await expect(SkillInstaller.installRemote(project, { version: `${version}-rc.1` }))
       .rejects.toThrow('Invalid stable skill version');
   });
 
@@ -382,10 +390,16 @@ describe('SkillInstaller remote acquisition', () => {
 
   it.runIf(fs.existsSync(path.resolve('../yylo-skills/VERSION')))('installs the canonical source release identically across all agent destinations', async () => {
     const source = path.resolve('../yylo-skills');
-    expect((await fs.readFile(path.join(source, 'VERSION'), 'utf8')).trim()).toBe('2.0.2');
+    const version = (await fs.readFile(path.join(source, 'VERSION'), 'utf8')).trim();
+    expect(semver.satisfies(version, SkillInstaller.VERSION_RANGE)).toBe(true);
+    expect(semver.prerelease(version)).toBeNull();
     await prepareUpgrade();
     runner.mockImplementation(async (command, args, cwd) => {
+      if (command === 'git' && args.includes('ls-remote')) {
+        return { stdout: `abc\trefs/tags/v${version}\n`, stderr: '' };
+      }
       if (command === 'npx') {
+        expect(args).toContain(`https://github.com/yylo-dev/yylo-skills/tree/v${version}`);
         for (const group of GROUPS) {
           await fs.copy(path.join(source, 'skills'), path.join(cwd!, group));
         }
@@ -393,14 +407,14 @@ describe('SkillInstaller remote acquisition', () => {
       }
       return defaultRunner(command, args, cwd);
     });
-    await SkillInstaller.installRemote(project);
+    expect(await SkillInstaller.installRemote(project)).toMatchObject({ changed: true, version: `v${version}` });
     const canonical = await fs.readFile(path.join(source, 'skills/ralph-loop-yylo/references/implement.md'));
     expect(canonical.toString()).toContain('Optional read-only');
     expect(canonical.toString()).toContain('Finish independently enforces admission');
     for (const group of GROUPS) {
       expect(await fs.readFile(path.join(project, group, 'ralph-loop-yylo/references/implement.md'))).toEqual(canonical);
     }
-    expect(await SkillInstaller.inspectGuidance(project)).toMatchObject({ coherent: true, version: 'v2.0.2' });
+    expect(await SkillInstaller.inspectGuidance(project)).toMatchObject({ coherent: true, version: `v${version}` });
     const raw = 'Record ##{actual-slug} literal $(touch /tmp/not-executed) $1';
     for (const skill of SKILLS) {
       const discovered = findSkillFile(skill, project);
