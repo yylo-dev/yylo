@@ -12,6 +12,16 @@ import {
 } from '../commands/task.js';
 
 describe('task workspace CLI', () => {
+  it.each(['Ab1Cd2', 'task_Ab1Cd2'])('forwards local task identity %s unchanged', async (id) => {
+    const local = vi.fn(async () => undefined);
+    const program = new Command().exitOverride();
+    configureTaskWorkspaceCommand(program, vi.fn(), vi.fn(), local);
+    await program.parseAsync(['node', 'yy', 'task', 'local', 'get', id]);
+    expect(local).toHaveBeenLastCalledWith(['get', id]);
+    await program.parseAsync(['node', 'yy', 'task', 'local', 'mark', 'todo', id, '--response', 'ready']);
+    expect(local).toHaveBeenLastCalledWith(['mark', 'todo', '--id', id, '--response', 'ready']);
+  });
+
   it.each(['run', 'resume'] as const)('retires task %s before dispatch', async (operation) => {
     const invoke = vi.fn(async () => undefined);
     const program = new Command().exitOverride();
