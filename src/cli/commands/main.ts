@@ -2077,6 +2077,7 @@ export async function mainCommandHandler(
       ...(options.cloneFromSession !== undefined ? { cloneFromSession: options.cloneFromSession } : {}),
       ...(options.continue !== undefined ? { continueConversation: options.continue } : {}),
       ...(options.thinking !== undefined ? { thinking: options.thinking } : {}),
+      ...(options.additionalArgs !== undefined ? { additionalArgs: options.additionalArgs } : {}),
       ...(options.live !== undefined ? { live: options.live } : {}),
       ...(liveInteractiveSession ? { liveInteractiveSession: true } : {}),
     });
