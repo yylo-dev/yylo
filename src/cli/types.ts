@@ -114,6 +114,8 @@ export interface MainCommandOptions extends GlobalCLIOptions {
   continueFromLatest?: boolean;
   /** Extended thinking level (forwarded to shell backend --thinking flag, pi subagent) */
   thinking?: string;
+  /** Existing service additional-args transport; interpreted by the service, never a shell. */
+  additionalArgs?: string;
 }
 
 /**

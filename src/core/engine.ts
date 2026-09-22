@@ -107,6 +107,7 @@ export interface ExecutionRequest {
 
   /** Extended thinking level (forwarded to shell backend --thinking flag) */
   readonly thinking?: string;
+  readonly additionalArgs?: string;
 
   /** Run Pi subagent in interactive live mode (forwarded to shell backend --live flag) */
   readonly live?: boolean;
@@ -1208,6 +1209,7 @@ export class ExecutionEngine extends EventEmitter {
             continueConversation: context.request.continueConversation,
           }),
           ...(context.request.thinking !== undefined && { thinking: context.request.thinking }),
+          ...(context.request.additionalArgs !== undefined && { additionalArgs: context.request.additionalArgs }),
           ...(context.request.live !== undefined && { live: context.request.live }),
           ...(context.request.liveInteractiveSession !== undefined && {
             liveInteractiveSession: context.request.liveInteractiveSession,
@@ -1991,6 +1993,7 @@ export function createExecutionRequest(options: {
   cloneFromSession?: string;
   continueConversation?: boolean;
   thinking?: string;
+  additionalArgs?: string;
   live?: boolean;
   liveInteractiveSession?: boolean;
   sessionMetadata?: Record<string, unknown>;
@@ -2054,6 +2057,10 @@ export function createExecutionRequest(options: {
 
   if (options.thinking !== undefined) {
     (result as any).thinking = options.thinking;
+  }
+
+  if (options.additionalArgs !== undefined) {
+    (result as any).additionalArgs = options.additionalArgs;
   }
 
   if (options.live !== undefined) {

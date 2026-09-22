@@ -101,15 +101,13 @@ export function generationCommandKind(args: string[]): 'read' | 'diagnostic' | '
 export async function prepareControllerCommand(cwd: string, commandArgs: string[], rawArgs: string[], invocationCwd = cwd, progressEnabled = true): Promise<boolean> {
   const kind = generationCommandKind(commandArgs);
   if (kind === 'skip') return false;
-  // Presence only; routing/authority comes exclusively from the installed resolver.
-  let cursor = path.resolve(cwd);
-  while (!(await fs.pathExists(path.join(cursor, '.juno_task')))) {
-    const parent = path.dirname(cursor);
-    if (parent === cursor) return false;
-    cursor = parent;
-  }
-  const authority = resolveController(cwd, 'diagnostic', { trustedResolver: true });
-  if (authority.role === 'simple' || !(await ScriptInstaller.isMetadataOnlyController(authority.path))) return false;
+  // Use the same workspace boundary as agent startup. An unrelated ancestor's
+  // .juno_task (for example in /tmp) must not enroll a neutral reviewer root.
+  // Persisted registration and inherited authority assertions still fail closed.
+  const { resolveAgentWorkspace } = await import('./agent-startup.js');
+  const authority = resolveAgentWorkspace(cwd, undefined, 'diagnostic');
+  if (authority.role === 'unregistered' || authority.role === 'simple'
+      || !(await ScriptInstaller.isMetadataOnlyController(authority.path))) return false;
   const registered = authority.source === 'environment'
     ? resolveController(cwd, 'diagnostic', { trustedResolver: true, ignoreEnvironmentAssertions: true }) : authority;
   if (!authority.valid || !registered.valid || registered.source !== 'registration' || registered.path !== authority.path) {
