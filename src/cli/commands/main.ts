@@ -2047,6 +2047,13 @@ export async function mainCommandHandler(
       typeof options.resume === 'string' &&
       options.resume.trim().length > 0;
 
+    // Envelope metadata must not manufacture controller authority for generic
+    // directories (including neutral managed reviewers). Use the same validated
+    // workspace discovery as startup; registered/invalid workspaces still fail closed.
+    const executionAuthority = options.executionEnvelope === true
+      ? resolveAgentWorkspace(config.workingDirectory, undefined, 'diagnostic')
+      : undefined;
+
     // Create execution request
     // Pass both --tools and --allowed-tools as separate parameters
     // Use nullish coalescing (??) instead of || to properly handle 0 or NaN values
@@ -2057,11 +2064,8 @@ export async function mainCommandHandler(
       workingDirectory: config.workingDirectory,
       maxIterations: options.maxIterations ?? config.defaultMaxIterations,
       model: resolvedModel,
-      ...(options.executionEnvelope === true ? { sessionMetadata: {
-        executionControllerDirectory: resolveController(config.workingDirectory, 'diagnostic', {
-          ignoreEnvironmentAssertions: true,
-          trustedResolver: true,
-        }).path,
+      ...(executionAuthority && executionAuthority.role !== 'unregistered' ? { sessionMetadata: {
+        executionControllerDirectory: executionAuthority.path,
       } } : {}),
       ...(options.agents !== undefined ? { agents: options.agents } : {}),
       ...(options.tools !== undefined ? { tools: options.tools } : {}),
