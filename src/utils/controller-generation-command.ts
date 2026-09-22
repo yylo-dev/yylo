@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'fs-extra';
 import path from 'node:path';
+import { resolveAgentWorkspace } from './agent-startup.js';
 import { constants } from 'node:os';
 import { Command } from 'commander';
 import { withWaitingProgress } from './terminal-progress-writer.js';
@@ -101,6 +102,12 @@ export function generationCommandKind(args: string[]): 'read' | 'diagnostic' | '
 export async function prepareControllerCommand(cwd: string, commandArgs: string[], rawArgs: string[], invocationCwd = cwd, progressEnabled = true): Promise<boolean> {
   const kind = generationCommandKind(commandArgs);
   if (kind === 'skip') return false;
+  // Agent roots can be intentionally neutral even beneath unrelated scratch
+  // directories containing .juno_task. Use workspace discovery, not an ancestor
+  // marker, to decide whether this launch has any controller authority.
+  const agent = !commandArgs[0] || AGENT_COMMANDS.includes(commandArgs[0]);
+  const agentAuthority = agent ? resolveAgentWorkspace(cwd, undefined, 'diagnostic') : undefined;
+  if (agentAuthority?.role === 'unregistered') return false;
   // Presence only; routing/authority comes exclusively from the installed resolver.
   let cursor = path.resolve(cwd);
   while (!(await fs.pathExists(path.join(cursor, '.juno_task')))) {
@@ -108,7 +115,7 @@ export async function prepareControllerCommand(cwd: string, commandArgs: string[
     if (parent === cursor) return false;
     cursor = parent;
   }
-  const authority = resolveController(cwd, 'diagnostic', { trustedResolver: true });
+  const authority = agentAuthority ?? resolveController(cwd, 'diagnostic', { trustedResolver: true });
   if (authority.role === 'simple' || !(await ScriptInstaller.isMetadataOnlyController(authority.path))) return false;
   const registered = authority.source === 'environment'
     ? resolveController(cwd, 'diagnostic', { trustedResolver: true, ignoreEnvironmentAssertions: true }) : authority;

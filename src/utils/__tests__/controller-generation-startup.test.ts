@@ -5,7 +5,7 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { assessControllerGeneration, ensureControllerGeneration, upgradeControllerGeneration, prepareInstalledControllerRepair,
   admitControllerCommand, reuseControllerCommandAdmission } from '../controller-generation-startup.js';
-import { assertExternalGenerationPlan, generationCommandKind, generationInvocationContext } from '../controller-generation-command.js';
+import { assertExternalGenerationPlan, generationCommandKind, generationInvocationContext, prepareControllerCommand } from '../controller-generation-command.js';
 import { Command } from 'commander';
 
 const engine = vi.hoisted(() => ({ acquire: vi.fn(), release: vi.fn(), held: vi.fn(), recheck: vi.fn(), plan: vi.fn(), apply: vi.fn(), recover: vi.fn(), ready: vi.fn(), active: vi.fn(), discover: vi.fn(), retain: vi.fn() }));
@@ -52,6 +52,27 @@ describe('operation-specific first-use generation dispatch', () => {
     if (oldCache === undefined) delete process.env.npm_config_cache;
     else process.env.npm_config_cache = oldCache;
     await fs.remove(root);
+    vi.unstubAllEnvs();
+  });
+
+  it.each([{ args: [] }, { args: ['pi'] }])('leaves a neutral agent root below an unrelated marker unmanaged: $args', async ({ args }) => {
+    for (const key of ['JUNO_TASK_ROOT', 'JUNO_CONTROLLER_BRANCH', 'JUNO_WORKSPACE_ROLE']) vi.stubEnv(key, '');
+    await fs.ensureDir(path.join(root, '.juno_task'));
+    const neutral = path.join(root, 'review/agent-root');
+    await fs.ensureDir(neutral);
+    await expect(prepareControllerCommand(neutral, args, args)).resolves.toBe(false);
+    expect(engine.acquire).not.toHaveBeenCalled();
+    expect(engine.plan).not.toHaveBeenCalled();
+    expect(await fs.readdir(neutral)).toEqual([]);
+    vi.stubEnv('JUNO_TASK_ROOT', controller);
+    await expect(prepareControllerCommand(neutral, args, args)).rejects.toThrow('cannot inherit controller authority');
+  });
+
+  it('refuses malformed workspace registration rather than treating it as neutral', async () => {
+    for (const key of ['JUNO_TASK_ROOT', 'JUNO_CONTROLLER_BRANCH', 'JUNO_WORKSPACE_ROLE']) vi.stubEnv(key, '');
+    await fs.outputJson(path.join(controller, '.juno_task/config.json'), { controllerWorkspace: { mode: 'invalid' } });
+    await expect(prepareControllerCommand(controller, ['pi'], ['pi'])).rejects.toThrow();
+    expect(engine.acquire).not.toHaveBeenCalled();
   });
 
   it('refuses plan destinations inside even malformed repositories without interpreting Git errors', async () => {
