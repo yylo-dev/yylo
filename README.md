@@ -59,11 +59,17 @@ npm install --global '@yylo/cli@latest'
 # Explicit prerelease
 npm install --global '@yylo/cli@next'
 # Exact version matching this checkout (once published)
-npm install -g @yylo/cli@0.2.8
+npm install -g @yylo/cli@0.2.9
 
 npm view '@yylo/cli' version dist-tags --json
 yy --version
 ```
+
+This source targets CLI **0.2.9**, requiring **Ledger 0.4.0 exactly** for universal
+Record retrieval and storage-kind-prefixed IDs. Older Ledger 0.3.3, prereleases,
+and later versions are rejected before delegation. Install the matching Ledger
+explicitly once published; ordinary delegation does not auto-install a substitute.
+A source bump neither publishes these versions nor activates installed runtimes.
 
 Pin an exact version in CI. Installing `@next` is an intentional prerelease choice.
 The first guarded release-helper checkpoint is exact `--set v0.1.0-rc.1`; later releases must use their separately authorized exact SemVer.
@@ -472,7 +478,7 @@ yy integration sync
 Install canonical packages independently:
 
 ```bash
-python3 -m pip install 'yylo-ledger==0.3.3'
+python3 -m pip install 'yylo-ledger==0.4.0'
 npm install --global '@yylo/benchmark@0.1.2'
 
 yylo-ledger --help
@@ -506,7 +512,7 @@ juno-kanban-juno-002 --version
 ./juno-code/scripts/juno-002-source-toolchain.sh status
 ```
 
-`yy ledger` and its labelled `yy kanban` compatibility alias use the exact Ledger compatibility policy `0.3.3`. The isolated source aliases also enforce the legacy controller package compatibility range `juno-kanban >=2.0.5,<3.0.0`. Source selection, controller registration, and data history are separate boundaries:
+`yy ledger` and its labelled `yy kanban` compatibility alias use the exact Ledger compatibility policy `0.4.0`. The isolated source aliases also enforce the legacy controller package compatibility range `juno-kanban >=2.0.5,<3.0.0`. Source selection, controller registration, and data history are separate boundaries:
 
 ```bash
 ./juno-code/scripts/juno-002-source-toolchain.sh register-controller /path/to/controller controller-branch
