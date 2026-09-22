@@ -901,6 +901,11 @@ export class ShellBackend implements Backend {
         args.push(...(request.arguments.disallowedTools as string[]));
       }
 
+      // Preserve the service's existing string transport as one argv value, including leading dashes.
+      if (isPython && request.arguments?.additionalArgs !== undefined) {
+        args.push(`--additional-args=${String(request.arguments.additionalArgs)}`);
+      }
+
       // For Python scripts, add thinking level if provided (--thinking LEVEL)
       if (isPython && request.arguments?.thinking) {
         args.push('--thinking', String(request.arguments.thinking));
