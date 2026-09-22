@@ -44,13 +44,16 @@ describe('Juno 2 Kanban compatibility policy', () => {
   });
 
   it.each([
-    ['yylo-ledger 0.3.3', true],
+    ['yylo-ledger 0.4.0', true],
+    ['yylo-ledger 0.3.3', false],
     ['yylo-ledger 0.3.2', false],
     ['yylo-ledger 0.3.1', false],
     ['yylo-ledger 0.3.0', false],
     ['yylo-ledger 0.2.0', false],
     ['yylo-ledger 0.3.3rc1', false],
-    ['yylo-ledger 0.4.0', false],
+    ['yylo-ledger 0.4.0rc1', false],
+    ['yylo-ledger 0.4.1', false],
+    ['yylo-ledger 0.5.0', false],
   ])('validates exact Ledger identity %j', (output, accepted) => {
     const result = spawnSync(
       'bash',

@@ -31,8 +31,28 @@ process.stdout.write('ledger stdout\\n');process.stderr.write('ledger stderr\\n'
 
 describe('ledger delegate', () => {
   it('binds this YYLO release to the supported stable Ledger', () => {
-    expect(LEDGER_VERSION_RANGE).toBe('0.3.3');
+    expect(LEDGER_VERSION_RANGE).toBe('0.4.0');
   });
+
+  it('keeps CLI package, lock and shipped Ledger policy coherent', async () => {
+    const metadata = JSON.parse(await readFile(path.resolve('package.json'), 'utf8'));
+    const lock = JSON.parse(await readFile(path.resolve('package-lock.json'), 'utf8'));
+    const policy = await readFile(path.resolve('src/templates/scripts/juno-toolchain-policy.sh'), 'utf8');
+    expect(metadata.version).toBe('0.2.9');
+    expect(lock.version).toBe(metadata.version);
+    expect(lock.packages[''].version).toBe(metadata.version);
+    expect(metadata.yyloLedger.version).toBe(LEDGER_VERSION_RANGE);
+    expect(policy).toContain(`YYLO_LEDGER_COMPAT_RANGE='${LEDGER_VERSION_RANGE}'`);
+  });
+
+  it.each(['yylo-ledger 0.3.3', 'yylo-ledger 0.4.0rc1', 'yylo-ledger 0.4.1', 'yylo-ledger 0.5.0'])(
+    'refuses %s before dispatch without installing a substitute', async (version) => {
+      const item = await fixture(version);
+      await expect(invokeLedger(['get', 'doc_Ab1Cd2'], { cwd: item.root, env: item.env }))
+        .rejects.toMatchObject({ exitCode: 69 });
+      await expect(readFile(item.record)).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
 
   it('discovers only yylo-ledger and preserves argv, cwd, environment, and exit', async () => {
     const item = await fixture();
