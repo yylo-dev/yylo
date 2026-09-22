@@ -307,6 +307,7 @@ function setupGlobalOptions(program: Command): void {
     )
     .option('-q, --quiet', 'Quiet mode: suppress agent messages and hook output (alias: --silent)')
     .option('--execution-envelope', 'Emit the versioned public machine execution envelope as the only stdout payload')
+    .option('--additional-args <args>', 'Additional service CLI arguments; quote paths with spaces inside the string (no shell evaluation)')
     .option('--silent', 'Alias for --quiet')
     .option('-c, --config <path>', 'Configuration file path (.json, .toml, pyproject.toml)')
     .option('-l, --log-file <path>', 'Log file path (auto-generated if not specified)')
