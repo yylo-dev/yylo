@@ -352,7 +352,7 @@ async function fetchKanbanTasksForCommand(
     const result = await runKanbanGetCommand(command, ['record', 'get', taskId, '-f', 'json'], workingDirectory, deadlineMs);
     const record = result.tasks[0];
     if (result.tasks.length === 1 && record && typeof record.id === 'string' &&
-        /^[A-Za-z0-9]{6}$/.test(record.id) &&
+        /^(?:(?:task|doc|artifact)_)?[A-Za-z0-9]{6}$/.test(record.id) &&
         (record.id === taskId || record.slug === taskId ||
           (Array.isArray(record.aliases) && record.aliases.includes(taskId)))) {
       tasksById.set(taskId, record);

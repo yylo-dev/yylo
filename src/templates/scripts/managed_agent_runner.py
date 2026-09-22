@@ -546,7 +546,7 @@ def worker_metadata_identity(root: Path, task_id: str) -> dict[str, str]:
     protected; ignored executable/instruction roots are explicitly included.
     This is acceptance evidence, not a sandbox or attribution of a writer.
     """
-    if not task_id.isascii() or not task_id.isalnum() or len(task_id) > 64:
+    if not TASK_RE.fullmatch(task_id):
         raise RunnerError("invalid worker task identity")
     state_path = root / ".juno_task/state/tasks.json"
     if (state_path.is_symlink() or state_path.resolve() != state_path.absolute()
@@ -571,9 +571,9 @@ def worker_metadata_identity(root: Path, task_id: str) -> dict[str, str]:
         if relative == ".juno_task/state/tasks.json":
             return True
         match = __import__("re").fullmatch(
-            r"\.juno_task/(?:tasks/([^/]+)/([A-Za-z0-9]+)\.md|"
-            r"ledger/([^/]+)/([A-Za-z0-9]+)/[^/]+\.ndjson|"
-            r"task-scopes/([^/]+)/([A-Za-z0-9]+)\.json)", relative)
+            r"\.juno_task/(?:tasks/([^/]+)/((?:task_)?[A-Za-z0-9]+)\.md|"
+            r"ledger/([^/]+)/((?:task_)?[A-Za-z0-9]+)/[^/]+\.ndjson|"
+            r"task-scopes/([^/]+)/((?:task_)?[A-Za-z0-9]+)\.json)", relative)
         if not match:
             return False
         shard, owner = next((match[i], match[i + 1]) for i in (1, 3, 5) if match[i])

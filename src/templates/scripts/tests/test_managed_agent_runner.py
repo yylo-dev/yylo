@@ -227,6 +227,16 @@ print(json.dumps({'path':str(pathlib.Path.cwd().resolve()),'role':'controller',
         with self.assertRaises(runner.RunnerError):
             runner.controller_identity(self.controller)
 
+    def test_worker_metadata_accepts_prefixed_task_identity(self):
+        state = self.controller / ".juno_task/state/tasks.json"
+        state.write_text('{"tasks":{"task_Ab1Cd2":{"state":"WORKING"}}}\n')
+        task_path = self.controller / ".juno_task/tasks/ta/task_Ab1Cd2.md"
+        task_path.parent.mkdir(parents=True, exist_ok=True)
+        task_path.write_text("prefixed task\n")
+        identity = runner.controller_identity(self.controller, worker_task_id="task_Ab1Cd2")
+        self.assertEqual(identity["worker_metadata_sha256"]["task_state"],
+                         runner.sha(runner.canonical({"state": "WORKING"})))
+
     def test_worker_metadata_admission_refuses_non_metadata_dirt(self):
         config = self.controller / ".juno_task/config.json"
         original = config.read_bytes()
