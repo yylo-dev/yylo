@@ -24,6 +24,7 @@ import type { MainCommandOptions } from '../types.js';
 import { ConfigurationError } from '../types.js';
 
 import { loadConfig } from '../../core/config.js';
+import { resolveAgentWorkspace } from '../../utils/agent-startup.js';
 import { createExecutionEngine, createExecutionRequest } from '../../core/engine.js';
 import { getCurrentGitBranch } from '../../core/git.js';
 import {
@@ -344,6 +345,34 @@ describe('Main Command', () => {
 
   describe('mainCommandHandler', () => {
     const mockCommand = new Command();
+
+    describe('execution envelope workspace authority', () => {
+      it.each(['unregistered', 'controller', 'task', 'simple'] as const)(
+        'preserves %s authority without inventing a controller for neutral roots', async (role) => {
+          vi.mocked(resolveAgentWorkspace).mockReturnValue({
+            path: '/validated/root', role, valid: true,
+          } as ReturnType<typeof resolveAgentWorkspace>);
+          await mainCommandHandler([], { subagent: 'pi', prompt: 'review', cwd: '/neutral',
+            executionEnvelope: true, quiet: true }, mockCommand);
+          expect(createExecutionRequest).toHaveBeenCalledOnce();
+          expect(resolveAgentWorkspace).toHaveBeenLastCalledWith(
+            vi.mocked(createExecutionRequest).mock.calls[0][0].workingDirectory, undefined, 'diagnostic',
+          );
+          expect(vi.mocked(createExecutionRequest).mock.calls[0][0].sessionMetadata).toEqual(
+            role === 'unregistered' ? undefined : { executionControllerDirectory: '/validated/root' },
+          );
+        },
+      );
+
+      it('refuses invalid execution workspace authority before envelope dispatch', async () => {
+        vi.mocked(resolveAgentWorkspace).mockReturnValueOnce({ role: 'controller' } as ReturnType<typeof resolveAgentWorkspace>)
+          .mockImplementationOnce(() => { throw new Error('invalid controller registration'); });
+        await mainCommandHandler([], { subagent: 'pi', prompt: 'review', executionEnvelope: true,
+          quiet: true }, mockCommand);
+        expect(createExecutionRequest).not.toHaveBeenCalled();
+        expect(processExitSpy).toHaveBeenCalledWith(99);
+      });
+    });
 
     describe('subagent validation', () => {
       it('should accept valid subagents', async () => {
