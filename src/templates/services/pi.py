@@ -10,6 +10,7 @@ import math
 import os
 import queue
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -979,7 +980,7 @@ Model shorthands:
             "--additional-args",
             type=str,
             default="",
-            help="Space-separated additional pi CLI arguments to append.",
+            help="Additional pi CLI arguments with shell-style quoting (no shell evaluation).",
         )
 
         parser.add_argument(
@@ -1127,7 +1128,7 @@ Model shorthands:
             # Additional raw arguments should still be honored; place before the
             # positional prompt so flags remain flags.
             if args.additional_args:
-                extra = args.additional_args.strip().split()
+                extra = shlex.split(args.additional_args)
                 if extra:
                     if full_prompt:
                         cmd = cmd[:-1] + extra + [cmd[-1]]
@@ -1140,7 +1141,7 @@ Model shorthands:
 
         # Additional raw arguments
         if args.additional_args:
-            extra = args.additional_args.strip().split()
+            extra = shlex.split(args.additional_args)
             if extra:
                 cmd.extend(extra)
 

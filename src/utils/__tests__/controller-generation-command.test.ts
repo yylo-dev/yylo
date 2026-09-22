@@ -10,6 +10,7 @@ vi.mock('../controller-generation-readiness.js', () => ({ controllerGenerationRe
 vi.mock('node:child_process', () => ({ spawn: mocks.spawn }));
 vi.mock('fs-extra', () => ({ default: { pathExists: vi.fn(async () => true) } }));
 vi.mock('../controller-resolver.js', () => ({ resolveController: mocks.resolve }));
+vi.mock('../agent-startup.js', () => ({ resolveAgentWorkspace: mocks.resolve }));
 vi.mock('../script-installer.js', () => ({ ScriptInstaller: { isMetadataOnlyController: mocks.metadata } }));
 vi.mock('../controller-generation-startup.js', () => ({
   admitControllerCommand: mocks.admit, assessControllerGeneration: mocks.assess,
