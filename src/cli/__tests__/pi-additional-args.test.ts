@@ -47,7 +47,11 @@ child.wait()
       expect(await fs.pathExists(marker), output).toBe(true);
       descendant = await fs.readJson(marker);
       const start = Date.now(); process.kill(-child.pid!, 'SIGTERM');
-      const force = setTimeout(() => { try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* gone */ } }, 1000);
+      const force = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* gone */ }
+        }
+      }, 1000);
       const [code, signal] = await closed; clearTimeout(force);
       expect(Date.now() - start).toBeLessThan(6000);
       // Preserve InvocationLifecycle's established interrupted/exit-0 contract;
@@ -59,7 +63,9 @@ child.wait()
     } finally {
       unrelated.kill('SIGTERM'); await unrelatedClosed;
       if (await live()) process.kill(descendant!.pid, 'SIGKILL');
-      try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* already settled */ }
+      if (child.exitCode === null && child.signalCode === null) {
+        try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* already settled */ }
+      }
       await closed;
     }
   }, 45000);
