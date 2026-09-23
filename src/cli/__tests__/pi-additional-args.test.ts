@@ -1,4 +1,5 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'fs-extra';
@@ -8,6 +9,67 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => fs.remove(root))); });
 
 describe('Pi existing additional-args transport through execution-envelope', () => {
+  it.skipIf(process.platform !== 'linux')('settles TERM-resistant Pi descendants before cancelled public execution exits', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'yylo-pi-cancel-')); roots.push(root);
+    const cwd = path.join(root, 'project'); const home = path.join(root, 'home'); const bin = path.join(root, 'bin');
+    await Promise.all([fs.ensureDir(path.join(cwd, '.juno_task')), fs.ensureDir(bin), fs.ensureDir(home)]);
+    expect(spawnSync('git', ['init', '--quiet'], { cwd }).status).toBe(0);
+    await fs.writeJson(path.join(cwd, '.juno_task/config.json'), { controllerWorkspace: { mode: 'simple', version: 1 } });
+    const pkg = await fs.readJson('package.json');
+    await fs.writeFile(path.join(bin, 'yylo-ledger'), `#!/bin/sh\n[ "$1" = "--version" ] && { echo "yylo-ledger ${pkg.yyloLedger.version}"; exit 0; }\nexit 98\n`, { mode: 0o755 });
+    const services = path.join(home, '.yylo/services');
+    await fs.copy(path.resolve('src/templates/services'), services);
+    await fs.writeFile(path.join(services, '.version'), `${pkg.version}\n`);
+    const marker = path.join(root, 'descendant.json');
+    await fs.writeFile(path.join(bin, 'pi'), `#!/usr/bin/env python3
+import subprocess, sys, time
+sys.stdin.read()
+child = subprocess.Popen([sys.executable, '-c', ${JSON.stringify(`import os, signal, time, json, pathlib; signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path(${JSON.stringify(marker)}).write_text(json.dumps({'pid': os.getpid(), 'stat': pathlib.Path('/proc/self/stat').read_text()})); time.sleep(120)`)}])
+child.wait()
+`, { mode: 0o755 });
+    const env: NodeJS.ProcessEnv = { PATH: `${bin}:${process.env.PATH}`, HOME: home, CI: '1', NO_COLOR: '1' };
+    const child = spawn(process.execPath, ['--import', path.resolve('node_modules/tsx/dist/loader.mjs'),
+      path.resolve('src/bin/cli.ts'), '--execution-envelope', 'pi', '--model', 'synthetic/timeout', '-p', 'Neutral cancellation fixture'],
+    { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const closed = once(child, 'close'); let output = ''; child.stdout.on('data', (b) => { output += String(b); }); child.stderr.on('data', (b) => { output += String(b); });
+    const unrelated = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+    const unrelatedClosed = once(unrelated, 'close');
+    let descendant: { pid: number; stat: string } | undefined;
+    const live = async (): Promise<boolean> => {
+      if (!descendant) return false;
+      const current = await fs.readFile(`/proc/${descendant.pid}/stat`, 'utf8').catch(() => '');
+      const fields = current.split(') ')[1]?.split(' ');
+      return Boolean(fields && fields[19] === descendant.stat.split(') ')[1]!.split(' ')[19] && fields[0] !== 'Z');
+    };
+    try {
+      const deadline = Date.now() + 30000;
+      while (!await fs.pathExists(marker) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+      expect(await fs.pathExists(marker), output).toBe(true);
+      descendant = await fs.readJson(marker);
+      const start = Date.now(); process.kill(-child.pid!, 'SIGTERM');
+      const force = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* gone */ }
+        }
+      }, 1000);
+      const [code, signal] = await closed; clearTimeout(force);
+      expect(Date.now() - start).toBeLessThan(6000);
+      // Preserve InvocationLifecycle's established interrupted/exit-0 contract;
+      // absence of an envelope is not successful candidate completion.
+      expect({ code, signal }, output).toEqual({ code: 0, signal: null });
+      expect(await live(), 'owned descendant survived public CLI exit').toBe(false);
+      expect(unrelated.exitCode).toBeNull();
+      expect(unrelated.signalCode).toBeNull();
+    } finally {
+      unrelated.kill('SIGTERM'); await unrelatedClosed;
+      if (await live()) process.kill(descendant!.pid, 'SIGKILL');
+      if (child.exitCode === null && child.signalCode === null) {
+        try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* already settled */ }
+      }
+      await closed;
+    }
+  }, 45000);
+
   it.each(['success', 'unsupported', 'malformed'])('retains literal argv and session destination: %s', async (mode) => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'yylo-pi-argv-')); roots.push(root);
     const cwd = path.join(root, 'project'); const home = path.join(root, 'home'); const bin = path.join(root, 'bin');
