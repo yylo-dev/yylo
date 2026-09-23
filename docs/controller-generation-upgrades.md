@@ -208,7 +208,7 @@ A semver string, matching one script, or an arbitrary package directory is not
 sufficient evidence. Unknown or customized state is preserved, not overwritten.
 
 Shared execution leases exclude generation writers. Active task pins bind the
-original attempt to its authenticated retained runtime. If a Juno source target
+original attempt to its authenticated retained runtime. If a YYLO source target
 advances beyond a historical reader's source copy, routing may select the fully
 admitted active reader so an older exact-copy policy does not block continuation.
 The active reader admits its installed generation independently of product bytes,
@@ -351,7 +351,7 @@ separate explicit-only startup policy.
 
 Activated source and consumer controllers admit their complete authenticated
 controller-local generation independently of product script copies. A comment or
-compatible functional change to Juno source does not require runtime adoption to
+compatible functional change to YYLO source does not require runtime adoption to
 start or finish a task. Supported configuration/declaration and shared-state
 checks remain mandatory; byte differences are not compatibility evidence in either
 direction. This does not rewrite historical tracked scripts/inventory or advance

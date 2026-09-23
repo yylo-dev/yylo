@@ -321,7 +321,7 @@ describe('normalized workspace topology', () => {
     const humanInfo = cli(['info', '--cwd', value.integration], value.integration);
     expect(humanInfo.status, humanInfo.stderr).toBe(0);
     expect(humanInfo.stderr).toBe('');
-    expect(humanInfo.stdout).toContain('Juno workspace (juno.workspace-topology.v1)');
+    expect(humanInfo.stdout).toContain('YYLO workspace (juno.workspace-topology.v1)');
     expect(humanInfo.stdout).toContain('Role authority');
 
     const nestedTask = path.join(value.task, 'nested', 'surface');

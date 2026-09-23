@@ -1601,7 +1601,7 @@ def select_continue_step(workflow: dict[str, Any], session_candidates: list[dict
             if str(item.get("session_id") or "").strip():
                 return item
             raise WorkflowError(f"continue_from_step '{selected}' selected {session_label(item)}, but it did not produce a session_id")
-    raise WorkflowError(f"continue_from_step '{selected}' did not match an executed Juno invocation with a session_id")
+    raise WorkflowError(f"continue_from_step '{selected}' did not match an executed YYLO invocation with a session_id")
 
 
 def session_label(item: dict[str, Any]) -> str:
@@ -2309,7 +2309,7 @@ def start_tmux_observer(out_dir: Path, workflow_id: str, run_id: str, requested_
     observer_script.write_text(
         "#!/usr/bin/env bash\n"
         "set -u\n"
-        f"printf '%s\\n' 'Juno workflow observer: {workflow_id}' 'Artifacts: {out_dir}' "
+        f"printf '%s\\n' 'YYLO workflow observer: {workflow_id}' 'Artifacts: {out_dir}' "
         "'This session remains available after workflow completion. Press Ctrl-C to stop following.'\n"
         f"exec tail -n +1 -F {shlex.quote(str(live_log))}\n",
         encoding="utf-8",

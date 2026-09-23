@@ -61,7 +61,7 @@ export function configureMigrationCommand(
 ): void {
   const migrate = program
     .command('migrate')
-    .description('Inventory and plan a reviewed Juno architecture migration');
+    .description('Inventory and plan a reviewed YYLO architecture migration');
   const controllerConfig = migrate.command('controller-config')
     .description('Reviewed ownership migration for legacy metadata-controller configuration');
   controllerConfig.command('plan')
@@ -151,8 +151,8 @@ export function configureMigrationCommand(
     .option('--project <path>', 'Project worktree to inspect', process.cwd())
     .option('--controller <path>', 'Explicit controller candidate')
     .option('--product-ref <ref>', 'Explicit full product target ref')
-    .option('--runtime <path>', 'Exact Juno runtime executable')
-    .option('--kanban-runtime <path>', 'Exact Juno Kanban executable')
+    .option('--runtime <path>', 'Exact YYLO runtime executable')
+    .option('--kanban-runtime <path>', 'Exact YYLO Ledger executable')
     .option('--heavy-threshold-bytes <bytes>', 'Heavy file threshold', String(10 * 1024 * 1024))
     .requiredOption('--output <path>', 'New receipt path outside the inspected project')
     .action((options) => {

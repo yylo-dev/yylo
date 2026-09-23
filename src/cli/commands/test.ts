@@ -1197,7 +1197,7 @@ export async function testCommandHandler(
 ): Promise<void> {
   const verbose = options.verbose ?? 0;
   try {
-    console.log(chalk.blue.bold('🧪 Juno Task - AI-Powered Testing Framework'));
+    console.log(chalk.blue.bold('🧪 YYLO - AI-Powered Testing Framework'));
 
     cliLogger.info('Starting test command', { options, args });
 

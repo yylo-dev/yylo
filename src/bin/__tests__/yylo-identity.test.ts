@@ -71,6 +71,29 @@ describe('YYLO launch identity', () => {
     expect(securityGuidance).toContain('`YYLO_*` prefix for application settings');
   });
 
+  it('uses YYLO in onboarding, diagnostics and migration help without renaming compatibility identifiers', async () => {
+    const surfaces = [
+      'src/cli/commands/workspace.ts', 'src/cli/commands/migrate.ts',
+      'src/cli/commands/integration.ts', 'src/cli/commands/test.ts',
+      'src/utils/script-installer.ts', 'src/utils/managed-project-assets.ts',
+      'src/utils/logger.ts', 'src/core/session-metadata.ts',
+      'src/templates/controller-agent/AGENTS.md', 'src/templates/controller-agent/CLAUDE.md',
+      'docs/agent-startup.md', 'docs/controller-generation-upgrades.md',
+    ];
+    for (const file of surfaces) {
+      const source = await fs.readFile(path.resolve(file), 'utf8');
+      expect(source, file).not.toMatch(/\bJuno\b/);
+      expect(source, file).toContain('YYLO');
+    }
+    const resolver = await fs.readFile(path.resolve('src/templates/scripts/controller_resolver.py'), 'utf8');
+    expect(resolver).toContain('JUNO_TASK_ROOT');
+    expect(resolver).toContain('juno.controller.path');
+    const simple = await fs.readFile(path.resolve('src/utils/simple-init.ts'), 'utf8');
+    expect(simple).toContain('.juno_task');
+    expect(simple).toContain('juno_task_workspace_state.v1');
+    expect(simple).toContain('juno_task_workspace_state.v2');
+  });
+
   it('includes the active YYLO logo in the publishable npm file set', async () => {
     const packed = await execa('npm', ['pack', '--dry-run', '--json', '--ignore-scripts']);
     const report = JSON.parse(packed.stdout) as Array<{ files: Array<{ path: string }> }>;
