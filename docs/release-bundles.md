@@ -15,7 +15,16 @@ execution occurs in the bundle preparer.
 ## Maintainer preparation
 
 First use the existing reviewed two-package release preparation. This still
-owns CLI/benchmark builds and the current packed controller gate. With the
+owns CLI/benchmark builds and the current packed controller gate. That gate also
+requires task-local Ledger source at the committed `juno_kanban` gitlink. Select
+it at task creation where possible. For an existing worktree missing this
+read-only test dependency, explicit `git submodule update --init --checkout
+--no-fetch -- juno_kanban` materializes the pinned checkout; verify its HEAD
+against `git ls-tree HEAD juno_kanban` and verify both checkouts remain clean.
+This grants no Ledger edit authority, does not change the gitlink, and must not
+reuse another worktree's dependency tree. If required objects are unavailable,
+obtain the required checkout through authorized dependency preparation rather
+than weakening the packed gate. With the
 CLI built, prepare a new bundle from reviewed exact component release evidence:
 
 ```sh
@@ -31,9 +40,15 @@ The private input has exactly two keys:
 
 The preparer verifies all artifact hashes and lengths, authored CLI compatibility
 expectations, CLI/benchmark package locks, and the existing prepared release's
-CLI/benchmark identities. It refuses missing, changed or symlinked artifacts,
-Git-contained output destinations and overwriting an existing output. Local
-artifact paths are never emitted in the portable manifest.
+CLI/benchmark identities. It also inspects the archives without extracting or
+executing their contents: npm `package/package.json`, wheel `.dist-info/METADATA`,
+and the skills archive's root `VERSION` plus `.claude-plugin/plugin.json`.
+Packed CLI dependency declarations must agree with the selected bundle. Duplicate
+members, unsafe paths, special members, oversized metadata and stale component
+versions refuse. Inspection has artifact, member-count, expanded-size and process
+time bounds. It refuses missing, changed or symlinked artifacts, Git-contained
+output destinations and overwriting an existing output. Local artifact paths
+are never emitted in the portable manifest.
 
 The typed contract is `src/utils/release-bundle.ts`. The shape is:
 
@@ -50,8 +65,9 @@ components:
 URLs must be HTTPS without credentials, queries or fragments. A digest binds the
 bytes, not the origin: maintainers must review artifacts against trusted release
 or registry evidence. The preparer does not independently certify URLs are
-published, extract/check archive contents, or prove source provenance. Metadata
-claims alone are never permission to execute a package.
+published or prove source provenance. Archive identity checks are not a malware
+scan or proof that a package is safe to execute. Metadata claims alone are never
+permission to execute a package.
 
 The result is explicitly `prepared_not_qualified`, with `published: false` and
 `activated: false`. Existing CLI-only acceptance is **not** a four-component
