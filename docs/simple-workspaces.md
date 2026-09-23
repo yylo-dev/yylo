@@ -38,6 +38,12 @@ yy init "Build an API" --mode advanced
 
 Use an ordinary Git repository, not a managed controller or linked worktree.
 For a new folder, run `git init` yourself first; no-Git operation is not supported.
+Independent Git repositories may live beneath another Simple or Advanced YYLO
+workspace. Discovery stops at the child's Git boundary: the parent's metadata,
+board, and runtime are not inherited. An uninitialized child must be initialized
+locally; parent metadata is not a fallback. Multiple Simple roots inside the
+same Git repository remain unsupported. Explicit managed registrations and
+contradictory inherited environment assertions still receive safety checks.
 From the repository root, preview an external plan, inspect its paths and
 preserved-file identities, then apply that exact plan:
 
@@ -123,8 +129,15 @@ the converter never finishes tasks, stages work, stashes, or deletes anything fo
 Ignored durable controller data, unknown states, symlinks, submodules, tracked
 secret/runtime paths, nested agent configuration/managed instructions,
 non-UTF-8 Git paths, sparse/assume-unchanged indexes, conflicting product-side Ledger data and existing
-destinations are refused. Use a fresh sibling directory with an existing parent,
-not a directory inside another workspace.
+destinations are refused. Use a fresh directory with an existing parent, separate
+from every source worktree and its Git storage. An unrelated ancestor YYLO
+workspace does not prevent creating an independent destination repository.
+
+Both supported lifecycle schemas (`juno_task_workspace_state.v1` and `.v2`)
+are accepted after structure and settled-task validation. Pre-queue v1 may omit
+`queues`; v2 requires the queue object and matching terminal tombstones.
+Unknown schemas or malformed records refuse with a specific diagnostic; the
+converter never upgrades or rewrites source lifecycle state.
 
 ```sh
 # Read-only preview; store the plan outside source worktrees and Git storage.

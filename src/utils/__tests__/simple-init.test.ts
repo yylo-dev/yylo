@@ -77,6 +77,53 @@ function conversionDestination(): string {
 }
 
 describe('Advanced-to-Simple fresh-workspace conversion', () => {
+  it.each(['v1', 'v2'])('converts settled %s under an unrelated ancestor without source changes', async (version) => {
+    await advancedFixture();
+    const state = { schema_version: `juno_task_workspace_state.${version}`, tasks: {
+      ABC123: version === 'v2' ? { state: 'MERGED', task_id: 'ABC123', schema_version: 'juno_task_terminal_tombstone.v1' } : { state: 'MERGED' },
+      DEF456: version === 'v2' ? { state: 'WITHDRAWN', task_id: 'DEF456', schema_version: 'juno_task_terminal_tombstone.v1' } : { state: 'WITHDRAWN' },
+    }, queues: {} };
+    await fs.writeFile(path.join(root, '.juno_task/state/tasks.json'), JSON.stringify(state));
+    git('add', '.'); git('commit', '-qm', 'settled state');
+    const parent = conversionDestination(); await fs.mkdir(parent);
+    execFileSync('git', ['-C', parent, 'init', '-q']);
+    await applySimpleInit(await planSimpleInit(parent));
+    const parentConfig = await fs.readFile(path.join(parent, '.juno_task/config.json'));
+    const destination = path.join(parent, 'child');
+    const before = snap(); const stateBytes = await fs.readFile(path.join(root, '.juno_task/state/tasks.json'));
+    await applySimpleConversion(await planSimpleConversion(root, destination));
+    expect(resolveController(destination)).toMatchObject({ role: 'simple', path: destination });
+    expect(snap()).toEqual(before);
+    expect(await fs.readFile(path.join(root, '.juno_task/state/tasks.json'))).toEqual(stateBytes);
+    expect(await fs.readFile(path.join(parent, '.juno_task/config.json'))).toEqual(parentConfig);
+  });
+
+  it('accepts pre-queue v1 without rewriting source state', async () => {
+    await advancedFixture();
+    await fs.writeFile(path.join(root, '.juno_task/state/tasks.json'), JSON.stringify({ schema_version: 'juno_task_workspace_state.v1', tasks: {} }));
+    git('add', '.'); git('commit', '-qm', 'pre-queue v1');
+    const before = snap();
+    await planSimpleConversion(root, conversionDestination());
+    expect(snap()).toEqual(before);
+  });
+
+  it.each([
+    { schema_version: 'future.v3', tasks: {}, queues: {} },
+    { schema_version: 'juno_task_workspace_state.v1', tasks: [], queues: {} },
+    { schema_version: 'juno_task_workspace_state.v1', tasks: {}, queues: [] },
+    { schema_version: 'juno_task_workspace_state.v2', tasks: {} },
+    { schema_version: 'juno_task_workspace_state.v2', tasks: { ABC123: { state: 'MERGED' } }, queues: {} },
+    { schema_version: 'juno_task_workspace_state.v1', tasks: { ABC123: null }, queues: {} },
+    { schema_version: 'juno_task_workspace_state.v1', tasks: { ABC123: { state: 'QUEUED' } }, queues: {} },
+  ])('refuses malformed, unsupported or unfinished state %j before writes', async (state) => {
+    await advancedFixture(); const destination = conversionDestination();
+    await fs.writeFile(path.join(root, '.juno_task/state/tasks.json'), JSON.stringify(state));
+    git('add', '.'); git('commit', '-qm', 'state fixture');
+    const before = snap();
+    await expect(planSimpleConversion(root, destination)).rejects.toThrow(/lifecycle/);
+    expect(snap()).toEqual(before);
+    await expect(fs.stat(destination)).rejects.toThrow();
+  });
   it('previews and applies product history plus Ledger, leaving source/registration unchanged', async () => {
     const product = await advancedFixture();
     const before = snap(); const config = git('config', '--local', '--list');
@@ -123,7 +170,7 @@ describe('Advanced-to-Simple fresh-workspace conversion', () => {
 
   it.each(['WORKING', 'QUEUED', 'CONFLICTED', 'unknown'])('refuses unsettled lifecycle %s without destination writes', async (state) => {
     await advancedFixture(); const destination = conversionDestination();
-    await fs.writeFile(path.join(root, '.juno_task/state/tasks.json'), JSON.stringify({ schema_version: 'juno_task_workspace_state.v2', tasks: { ABC123: { state } } }));
+    await fs.writeFile(path.join(root, '.juno_task/state/tasks.json'), JSON.stringify({ schema_version: 'juno_task_workspace_state.v2', tasks: { ABC123: { state } }, queues: {} }));
     git('add', '.'); git('commit', '-qm', 'state');
     await expect(planSimpleConversion(root, destination)).rejects.toThrow(/Unfinished or unknown/);
     await expect(fs.stat(destination)).rejects.toThrow();
@@ -230,6 +277,19 @@ describe('Advanced-to-Simple fresh-workspace conversion', () => {
 });
 
 describe('fresh Simple initialization', () => {
+  it.each(['simple', 'metadata-only'])('allows independent child Git roots beneath %s metadata', async (mode) => {
+    await fs.mkdir(path.join(root, '.juno_task'), { recursive: true });
+    const bytes = JSON.stringify({ controllerWorkspace: mode === 'simple' ? { mode, version: 1 } : { mode, policy: '.juno_task/config/metadata-controller.json' } });
+    await fs.writeFile(path.join(root, '.juno_task/config.json'), bytes);
+    const child = path.join(root, 'child'); await fs.mkdir(child);
+    execFileSync('git', ['-C', child, 'init', '-q']);
+    const before = snap();
+    await applySimpleInit(await planSimpleInit(child));
+    expect(resolveController(child)).toMatchObject({ role: 'simple', path: child });
+    expect(await applySimpleInit(await planSimpleInit(child))).toBe('already-initialized');
+    expect(snap()).toEqual(before);
+    expect(await fs.readFile(path.join(root, '.juno_task/config.json'), 'utf8')).toBe(bytes);
+  });
   it.each([undefined, 'simple'])('initializes guided Simple with final choice or explicit mode %s', async (mode) => {
     const before = snap();
     vi.spyOn(console, 'log').mockImplementation(() => undefined);

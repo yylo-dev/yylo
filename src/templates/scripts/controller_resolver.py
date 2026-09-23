@@ -85,13 +85,14 @@ def resolve_simple(cwd: Path, root: Path, has_git: bool, operation: str) -> Opti
         "workspace_mode": "simple", "workspace_version": 1,
         "capabilities": ["diagnostics", "local-agent", "ledger", "local-task-bookkeeping"],
     }
-    # A Simple marker below/above this Git root must not cross a project boundary.
+    # Search inside this Git root only. Independent ancestor repositories have
+    # their own authority; only a nested marker within this repository conflicts.
     for directory in (cwd, *cwd.parents):
         reservation = directory / ".yylo-simple-init"
         if reservation.exists() or reservation.is_symlink():
             fail(f"incomplete or active Simple initialization: {reservation}; preserve bytes and inspect before explicit recovery", result)
         if directory == root:
-            continue
+            break
         other = directory / ".juno_task/config.json"
         if other.is_file():
             try:
