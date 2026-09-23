@@ -10,7 +10,7 @@ import { findSkillFile, expandSkillInvocation } from '../../templates/extensions
 const GROUPS = ['.agents/skills', '.claude/skills', '.pi/skills'];
 const GROUP_NAMES = ['codex', 'claude', 'pi'];
 const SKILLS = [
-  'artifact-yylo', 'ledger-tasks-yylo', 'plan-ledger-tasks-yylo',
+  'artifact-yylo', 'benchmark-yylo', 'ledger-tasks-yylo', 'plan-ledger-tasks-yylo',
   'ralph-loop-yylo', 'understand-project-yylo', 'wiki-yylo', 'workflow-yylo',
 ];
 const LEGACY = ['kanban-workflow', 'plan-kanban-tasks', 'ralph-loop', 'understand-project'];
@@ -173,13 +173,15 @@ describe('SkillInstaller remote acquisition', () => {
     await fs.outputFile(path.join(project, '.pi/skills/project-owned/SKILL.md'), 'yy merge drive TASK_ID');
     const report = await SkillInstaller.inspectGuidance(project);
     expect(report.coherent).toBe(false);
-    expect(report.findings).toHaveLength(21);
+    expect(report.findings).toHaveLength(GROUPS.length * SKILLS.length);
     expect(report.findings.every((finding) => finding.reason === 'missing')).toBe(true);
     expect(report.findings.some((finding) => finding.destination.includes('project-owned'))).toBe(false);
     expect(runner).not.toHaveBeenCalled();
   });
 
-  it('resolves latest stable SemVer and installs the exact seven targeted skills', async () => {
+  it('resolves latest stable SemVer and installs the exact eight targeted skills', async () => {
+    expect(SkillInstaller.SKILLS).toEqual(SKILLS);
+    expect(SkillInstaller.SKILLS).toHaveLength(8);
     const result = await SkillInstaller.installRemote(project);
     expect(result).toEqual({ changed: true, version: 'v2.0.2', acquisition: 'npx' });
     const npx = runner.mock.calls.find(([command]) => command === 'npx');
@@ -242,7 +244,7 @@ describe('SkillInstaller remote acquisition', () => {
       return defaultRunner(command, args, cwd);
     });
     await expect(SkillInstaller.installRemote(project, { version: '2.0.2' }))
-      .rejects.toThrow('not the canonical seven-skill set');
+      .rejects.toThrow('not the canonical 8-skill set');
 
     runner.mockImplementation(async (command, args, cwd) => {
       if (command === 'npx') {
@@ -255,6 +257,23 @@ describe('SkillInstaller remote acquisition', () => {
     });
     await expect(SkillInstaller.installRemote(project, { version: '2.0.2' }))
       .rejects.toThrow('symbolic link');
+  });
+
+  it('rejects a seven-skill stage missing benchmark-yylo before any installation', async () => {
+    runner.mockImplementation(async (command, args, cwd) => {
+      if (command === 'npx') {
+        await populateNpxStage(cwd!);
+        for (const group of GROUPS) {
+          await fs.remove(path.join(cwd!, group, 'benchmark-yylo'));
+        }
+        return { stdout: '', stderr: '' };
+      }
+      return defaultRunner(command, args, cwd);
+    });
+    await expect(SkillInstaller.installRemote(project))
+      .rejects.toThrow('not the canonical 8-skill set');
+    for (const group of GROUPS) expect(await fs.pathExists(path.join(project, group))).toBe(false);
+    expect(await SkillInstaller.getInstallRecord(project)).toBeUndefined();
   });
 
   it('rejects staged skill identity mismatches before any installation', async () => {
@@ -274,12 +293,12 @@ describe('SkillInstaller remote acquisition', () => {
   });
 
   it('distinguishes missing, unrecorded and modified installations offline', async () => {
-    expect((await SkillInstaller.inspectGuidance(project)).findings).toHaveLength(21);
+    expect((await SkillInstaller.inspectGuidance(project)).findings).toHaveLength(GROUPS.length * SKILLS.length);
     await SkillInstaller.installRemote(project);
     await fs.remove(path.join(project, '.juno_task/runtime/skills-install.json'));
     runner.mockClear();
     const unrecorded = await SkillInstaller.inspectGuidance(project);
-    expect(unrecorded.findings).toHaveLength(21);
+    expect(unrecorded.findings).toHaveLength(GROUPS.length * SKILLS.length);
     expect(unrecorded.findings.every((finding) => finding.reason === 'unverified')).toBe(true);
     expect(await SkillInstaller.needsUpdate(project)).toBe(true);
     expect(runner).not.toHaveBeenCalled();
@@ -353,7 +372,7 @@ describe('SkillInstaller remote acquisition', () => {
     await SkillInstaller.installRemote(project, { version: '2.0.2' });
     runner.mockClear();
     expect(await SkillInstaller.needsUpdate(project)).toBe(false);
-    expect((await SkillInstaller.listSkillGroups(project))[0]?.files).toHaveLength(7);
+    expect((await SkillInstaller.listSkillGroups(project))[0]?.files).toHaveLength(SKILLS.length);
     expect(await SkillInstaller.getInstallRecord(project)).toMatchObject({ version: 'v2.0.2' });
     expect(runner).not.toHaveBeenCalled();
     await fs.writeFile(path.join(project, '.agents/skills/ledger-tasks-yylo/SKILL.md'), 'changed\n');
