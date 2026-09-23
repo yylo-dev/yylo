@@ -672,7 +672,7 @@ exec "$ROOT/.juno_task/scripts/git-flow.sh" "$@"
       if (!existing.includes(this.ROOT_DELEGATE_MARKER)) {
         if (!silent) {
           console.error(
-            '⚠ Preserved existing scripts/git-flow.sh because it is not Juno-managed.',
+            '⚠ Preserved existing scripts/git-flow.sh because it is not YYLO-managed.',
           );
         }
         return false;

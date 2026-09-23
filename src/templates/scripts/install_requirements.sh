@@ -1007,7 +1007,7 @@ main() {
     # Align all checks with project-local installation target when available.
     activate_project_venv_if_available
     if ! ensure_selected_juno_kanban_runtime; then
-        log_error "Failed to restore the selected Juno 2 Kanban runtime"
+        log_error "Failed to restore the selected YYLO Ledger runtime"
         exit 1
     fi
 

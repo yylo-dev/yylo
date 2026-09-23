@@ -1,6 +1,6 @@
-# Juno 2.1 Metadata Controller
+# YYLO Metadata Controller
 
-This folder is the default entry point for Juno agents. It owns Kanban, task
+This folder is the default entry point for YYLO agents. It owns Kanban, task
 state, merge orchestration, and compact controller metadata; it does not contain
 product code.
 
@@ -15,7 +15,7 @@ current ownership before explicit continuation; never reset or replay attempts.
 
 ## Working contract
 
-1. Use the controller-local Juno skills for Kanban, planning, project discovery,
+1. Use the controller-local YYLO skills for Kanban, planning, project discovery,
    and explicitly requested Ralph execution.
 2. Run Kanban and `yy task`/`yy merge` commands from this controller.
 3. Read `.juno_task/config/task-workspace.json` for the exact product target and

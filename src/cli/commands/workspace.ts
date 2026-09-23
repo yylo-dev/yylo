@@ -54,7 +54,7 @@ function humanInfo(report: WorkspaceTopology): string {
       )
     : ['  OK: no workspace topology findings'];
   return [
-    `Juno workspace (${report.schemaVersion})`,
+    `YYLO workspace (${report.schemaVersion})`,
     line('Repository', report.repository.root),
     line('Invocation', report.invocation.cwd),
     line(

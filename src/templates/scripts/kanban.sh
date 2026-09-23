@@ -431,7 +431,7 @@ main() {
     fi
     local policy_file="$SCRIPT_DIR/juno-toolchain-policy.sh"
     if [[ ! -f "$policy_file" ]]; then
-        log_error "Juno 2 Kanban compatibility policy missing: $policy_file"
+        log_error "YYLO Ledger compatibility policy missing: $policy_file"
         exit 1
     fi
     # shellcheck source=juno-toolchain-policy.sh

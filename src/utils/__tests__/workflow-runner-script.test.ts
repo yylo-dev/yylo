@@ -2869,7 +2869,7 @@ exec "$(dirname "$0")/yy" pi --live "$@"
     ]);
 
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("continue_from_step 'summary' did not match an executed Juno invocation with a session_id");
+    expect(result.stderr).toContain("continue_from_step 'summary' did not match an executed YYLO invocation with a session_id");
   });
 
   it('fails strict continue_from_step when the selected step has no session id', async () => {
