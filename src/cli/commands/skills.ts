@@ -11,7 +11,7 @@ export function createSkillsCommand(): Command {
       `
 Examples:
   $ yylo skills install
-  $ yylo skills install --version 2.0.2
+  $ yylo skills install --version 2.0.4
   $ yylo skills update
   $ yylo skills list
   $ yylo skills status
@@ -30,7 +30,7 @@ install skills.
     command
       .command(name)
       .description(`${name === 'install' ? 'Install' : 'Update'} canonical YYLO skills from GitHub`)
-      .option('-v, --version <semver>', `Exact stable release satisfying ${SkillInstaller.VERSION_RANGE} (for example 2.0.2)`)
+      .option('-v, --version <semver>', `Exact stable release satisfying ${SkillInstaller.VERSION_RANGE} (for example 2.0.4)`)
       .addOption(new Option('--skill-version <semver>').hideHelp())
       .option('-f, --force', 'Replace differing YYLO-owned skill directories')
       .action(async (options: { version?: string; skillVersion?: string; force?: boolean }) => {
