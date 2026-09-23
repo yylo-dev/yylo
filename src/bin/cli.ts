@@ -2246,7 +2246,7 @@ async function main(): Promise<void> {
   const isTmuxCommand = commandArgs[0] === 'tmux';
   const isControlPlaneCommand = ['ledger', 'kanban', 'wiki', 'task', 'merge', 'integration'].includes(commandArgs[0] ?? '');
   // Explicit mode initialization owns every write; never run legacy bootstrap first.
-  const isModeInit = commandArgs[0] === 'init' && commandArgs.some((arg) => /^--(?:mode|plan-file|apply-plan)(?:=|$)/.test(arg));
+  const isModeInit = commandArgs[0] === 'init' && commandArgs.some((arg) => /^--(?:mode|dry-run|from-advanced|plan-file|apply-plan)(?:=|$)/.test(arg));
   const isReadOnlyIdentityRequest = isReadOnlyVersionRequest || isReadOnlyLifecycleStatus || isReadOnlyTaskStatus || isMigrationCommand || isScriptsDoctor || isWorkspaceDiscovery || isTmuxCommand || isControlPlaneCommand || isModeInit;
   const isForceUpdate = process.argv.includes('--force-update');
   const isExplicitProjectAssetUpdate =
@@ -2652,8 +2652,13 @@ if (versionOnly) {
   const observationProgram = new Command();
   configureCommandSurface(observationProgram);
   const initialInvocation = classifyExplicitInvocation(process.argv.slice(2), observationProgram);
-  if (initialInvocation.kind === 'help') {
-    // Do not create even the durable invocation-attempt record for help.
+  const initArgs = process.argv.slice(2);
+  const initLeading = classifyLeadingCommand(initArgs);
+  const explicitInit = initArgs[initLeading.index] === 'init' && initArgs.slice(initLeading.index + 1)
+    .some((arg) => /^--(?:mode|dry-run|from-advanced|plan-file|apply-plan)(?:=|$)/.test(arg));
+  if (initialInvocation.kind === 'help' || explicitInit) {
+    // Explicit initialization owns its narrow writes, including zero-write previews
+    // and refusals. Telemetry must not create Git-local state before validation.
     void main().catch(reportFatalError);
   } else {
     const requestObservation = observeCommanderRequest(observationProgram);

@@ -11,6 +11,7 @@ import fs from 'fs-extra';
 import chalk from 'chalk';
 import { Command } from 'commander';
 import { promptMultiline, promptInputOnce } from '../utils/multiline.js';
+import { resolveMachineOutput, writeMachineResponse, MACHINE_RESPONSE_SCHEMA } from '../machine-output.js';
 import { planSimpleInit, applySimpleInit, planSimpleConversion, applySimpleConversion, writeSimpleInitPlan, type SimpleInitPlan, type SimpleConversionPlan } from '../../utils/simple-init.js';
 
 import { getDefaultHooks } from '../../templates/default-hooks.js';
@@ -1050,9 +1051,7 @@ export async function initCommandHandler(
     if ((context.mode || options.mode) === 'simple') {
       const plan = await planSimpleInit(context.targetDirectory, { task: context.task, subagent: context.subagent });
       const outcome = await applySimpleInit(plan);
-      console.log(chalk.green(`✓ Simple workspace ${outcome}: ${plan.root}`));
-      console.log('Read .juno_task/simple-agent-guidance.md alongside your project instructions. Use yy ledger for local tasks.');
-      console.log('No Git state or dependencies were changed. Runtime readiness is separate: yy doctor workspace.');
+      printSimpleOutcome(outcome, plan.root);
       return;
     }
 
@@ -1121,6 +1120,12 @@ export async function initCommandHandler(
   }
 }
 
+function printSimpleOutcome(outcome: string, root: string): void {
+  console.log(`${outcome === 'already-initialized' ? 'Already initialized' : 'Initialized'} Simple workspace: ${root}`);
+  console.log('Read .juno_task/simple-agent-guidance.md alongside your project instructions; next: yy ledger, yy pi.');
+  console.log('No dependencies installed; initialization does not certify agent readiness.');
+}
+
 /**
  * Configure the init command for Commander.js (simplified)
  */
@@ -1137,6 +1142,9 @@ export function configureInitCommand(program: Command): void {
     .option('-d, --directory <path>', 'Target directory (default: current directory)')
     .option('--mode <mode>', 'Workspace mode: simple or advanced (interactive choice; headless default: advanced)')
     .option('--from-advanced <controller>', 'Simple: convert a settled Advanced controller into a fresh --directory (preview by default)')
+    .option('--dry-run', 'Fresh Simple: read-only preview instead of initializing')
+    .option('--format <format>', 'Machine response format: json or ndjson (Simple automation)')
+    .option('--raw', 'Emit compact machine output (machine mode only)')
     .option('--plan-file <path>', 'Simple: write a fresh preview plan outside the project')
     .option('--apply-plan <path>', 'Simple: apply an inspected, unchanged initialization plan')
     .option('-f, --force', 'Force overwrite existing files (never supported in Simple mode)')
@@ -1145,14 +1153,27 @@ export function configureInitCommand(program: Command): void {
     .option('--target-branch <name>', 'Product default branch (env: YYLO_TARGET_BRANCH; default: main)')
     .option('-t, --task <description>', 'Task description (alias for positional description)')
     .action(async (description, options, command) => {
+      if ((options.format || options.raw || command.parent?.opts().format) && (options.mode !== 'simple' || options.interactive)) {
+        throw new ValidationError('Machine output requires noninteractive --mode simple initialization.', []);
+      }
       if (options.mode !== undefined && !['simple', 'advanced'].includes(options.mode)) {
         throw new ValidationError('Workspace mode must be simple or advanced.', []);
       }
-      if (options.fromAdvanced || options.planFile || options.applyPlan || (options.mode === 'simple' && !options.interactive)) {
+      if (options.dryRun || options.fromAdvanced || options.planFile || options.applyPlan || (options.mode === 'simple' && !options.interactive)) {
         try {
           if (options.mode !== 'simple') throw new Error('Plan/apply options require --mode simple. No conversion is performed.');
+          if (options.dryRun && (options.applyPlan || options.planFile || options.fromAdvanced || options.interactive)) {
+            throw new Error('--dry-run is only for fresh noninteractive Simple preview; omit --apply-plan, --plan-file, --from-advanced and --interactive.');
+          }
+          const format = options.format ?? command.parent?.opts().format;
+          if (format !== undefined && !['json', 'ndjson'].includes(format)) throw new Error('Choose --format json or ndjson.');
+          const machine = resolveMachineOutput(format ? ['--format', format, ...(options.raw ? ['--raw'] : [])] : []);
+          const report = (data: unknown, human: () => void) => {
+            if (machine) writeMachineResponse({ schema_version: MACHINE_RESPONSE_SCHEMA, command: { name: 'init', version: 1 }, status: 'success', projection: 'default', data, error: null }, machine);
+            else human();
+          };
           if (description || options.task || options.force || options.interactive || options.gitRepo || options.gitUrl || options.targetBranch || options.subagent) {
-            throw new Error('Simple plan/apply supports --directory, --from-advanced, --plan-file or --apply-plan only. No force, managed Git options or interactive setup in plan/apply. Use --interactive --mode simple for guided fresh setup.');
+            throw new Error('Simple automation supports --directory, --dry-run, --from-advanced, --plan-file or --apply-plan only. No force, managed Git options or interactive setup in automation. Use --interactive --mode simple for guided fresh setup.');
           }
           if (options.planFile && options.applyPlan) throw new Error('Choose --plan-file or --apply-plan, not both.');
           if (options.fromAdvanced && options.applyPlan) throw new Error('--apply-plan already binds the source; do not also pass --from-advanced.');
@@ -1167,11 +1188,22 @@ export function configureInitCommand(program: Command): void {
               if (canonical !== plan.root) throw new Error('--directory does not match the inspected plan root.');
             }
             const outcome = plan.schema === 'yylo_simple_conversion_plan.v1' ? await applySimpleConversion(plan) : await applySimpleInit(plan);
-            console.log(JSON.stringify({ outcome, root: plan.root }));
+            report({ outcome, root: plan.root }, () => printSimpleOutcome(outcome, plan.root));
           } else {
             const plan = options.fromAdvanced ? await planSimpleConversion(options.fromAdvanced, options.directory) : await planSimpleInit(options.directory || process.cwd());
             if (options.planFile) await writeSimpleInitPlan(options.planFile, plan);
-            console.log(JSON.stringify(plan, null, 2));
+            if (options.dryRun) {
+              report(plan, () => {
+                console.log(`Preview only; not initialized: ${plan.root}`);
+                console.log((plan as SimpleInitPlan).outcome === 'already-initialized' ? 'Already initialized; no proposed writes.' : `Proposed files: ${Object.keys((plan as SimpleInitPlan).files).join(', ')}`);
+                console.log('To initialize: yy init --mode simple --directory ' + JSON.stringify(plan.root));
+              });
+            } else if (options.planFile || options.fromAdvanced) {
+              report(plan, () => console.log(JSON.stringify(plan, null, 2)));
+            } else {
+              const outcome = await applySimpleInit(plan as SimpleInitPlan);
+              report({ outcome, root: plan.root }, () => printSimpleOutcome(outcome, plan.root));
+            }
           }
         } catch (error) {
           throw new ValidationError(`Simple initialization refused: ${error instanceof Error ? error.message : String(error)}`, []);
@@ -1210,10 +1242,16 @@ Workspace modes:
   yy init "Build an API" --mode advanced # Explicit Advanced automation
 
 Simple workspace automation (prior Git initialization required):
+  yy init --mode simple                  # Initializes now, without confirmation
+  yy init --mode simple --directory /project
+  yy init --mode simple --dry-run        # Read-only preview; no files written
+
+Optional saved-plan automation:
   yy init --mode simple --directory /project --plan-file /external/simple-plan.json
   yy init --mode simple --apply-plan /external/simple-plan.json
 
-  Without --plan-file/--apply-plan, prints a read-only preview.
+  Plain fresh Simple init now writes files. Preview automation must use --dry-run
+  or --plan-file. Conversion remains preview-only until explicit --apply-plan.
   Preserves existing AGENTS.md, CLAUDE.md and .gitignore; generates supplemental
   .juno_task/simple-agent-guidance.md and a metadata-local ignore file.
   Fresh Simple setup has no force, Git initialization, commits, worktrees, or installation.
