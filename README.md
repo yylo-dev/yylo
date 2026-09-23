@@ -80,13 +80,13 @@ Next: [run an agent](#beginner-agent-workflow), [manage a typed task](#typed-tas
 
 YYLO skill content is versioned independently in the public
 [`yylo-dev/yylo-skills`](https://github.com/yylo-dev/yylo-skills) repository and
-is not bundled in `@yylo/cli`. This CLI requires stable skills `^2.0.2`, declared
+is not bundled in `@yylo/cli`. This CLI requires stable skills `^2.0.4`, declared
 in `package.json` as `yyloSkills.version`. Install the latest compatible stable
 release, or pin an exact compatible version:
 
 ```bash
 yy skills install
-yy skills install --version 2.0.2
+yy skills install --version 2.0.4
 yy skills update
 yy skills status
 ```
