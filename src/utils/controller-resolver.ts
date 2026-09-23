@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import * as path from 'node:path';
-import { existsSync as requireExists, readFileSync } from 'node:fs';
+import { existsSync as requireExists, readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { buildChildProcessEnvironment } from '../core/child-process-environment.js';
 
@@ -14,9 +14,13 @@ const PACKAGED_CONTROLLER_RESOLVER = [
 export type ControllerOperation = 'diagnostic' | 'kanban' | 'orchestration' | 'session-write' | 'product-edit';
 export type WorkspaceRole = 'controller' | 'controller-retired' | 'task' | 'integration-owner' | 'unregistered' | 'simple';
 
+function discoveryDirectory(cwd: string): string {
+  try { return realpathSync(cwd); } catch { return path.resolve(cwd); }
+}
+
 /** Discovery hint only. The installed resolver validates bytes and Git authority. */
 export function hasSimpleWorkspaceHint(cwd: string): boolean {
-  let directory = path.resolve(cwd);
+  let directory = discoveryDirectory(cwd);
   while (true) {
     if (requireExists(path.join(directory, '.yylo-simple-init'))) return true;
     const marker = path.join(directory, '.juno_task/config.json');
@@ -27,7 +31,7 @@ export function hasSimpleWorkspaceHint(cwd: string): boolean {
         if (workspace !== undefined && workspace?.mode !== 'metadata-only' && !(workspace?.mode === undefined && workspace?.enabled === true)) return true;
       } catch { return true; }
     }
-    if (directory === path.dirname(directory)) return false;
+    if (requireExists(path.join(directory, '.git')) || directory === path.dirname(directory)) return false;
     directory = path.dirname(directory);
   }
 }
@@ -59,11 +63,11 @@ export function resolveController(
 ): ControllerResolution {
   const simpleHint = hasSimpleWorkspaceHint(workingDirectory);
   const trustedResolver = options.trustedResolver || simpleHint;
-  let search = path.resolve(workingDirectory);
+  let search = discoveryDirectory(workingDirectory);
   let resolver = trustedResolver
     ? PACKAGED_CONTROLLER_RESOLVER
     : path.join(search, '.juno_task', 'scripts', 'controller_resolver.py');
-  while (!trustedResolver && !requireExists(resolver) && search !== path.dirname(search)) {
+  while (!trustedResolver && !requireExists(resolver) && !requireExists(path.join(search, '.git')) && search !== path.dirname(search)) {
     search = path.dirname(search);
     resolver = path.join(search, '.juno_task', 'scripts', 'controller_resolver.py');
   }

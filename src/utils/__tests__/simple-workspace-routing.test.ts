@@ -4,7 +4,7 @@ import fs from 'fs-extra';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { resolveController, resolveAutomaticProjectBootstrap } from '../controller-resolver.js';
+import { hasSimpleWorkspaceHint, resolveController, resolveAutomaticProjectBootstrap } from '../controller-resolver.js';
 import { routeControlPlane } from '../control-plane-router.js';
 import { configureTaskWorkspaceCommand, invokeTaskWorkspace, invokeLocalTaskBookkeeping } from '../../cli/commands/task.js';
 import { configureWorkspaceCommands } from '../../cli/commands/workspace.js';
@@ -66,10 +66,23 @@ describe('Simple shared resolver', () => {
     expect(() => resolveController(root)).toThrow(/conflicts with managed/);
   });
 
-  it('rejects no-Git Simple folders and nested unrelated Git roots', async () => {
+  it('isolates independent child repositories while refusing no-Git Simple folders', async () => {
     const nested = path.join(root, 'child'); await fs.ensureDir(nested);
     execFileSync('git', ['-C', nested, 'init', '-q']);
-    expect(() => resolveController(nested)).toThrow(/nested Simple/);
+    // Even a copied parent resolver must never be executed for the child.
+    await fs.outputFile(path.join(root, '.juno_task/scripts/controller_resolver.py'), 'raise Exception("parent resolver executed")');
+    expect(hasSimpleWorkspaceHint(nested)).toBe(false);
+    expect(resolveController(nested)).toMatchObject({ valid: false, resolver: 'missing', path: nested });
+    const plain = spawnSync('python3', [script, '--cwd', nested, '--operation', 'kanban'], { encoding: 'utf8' });
+    expect(JSON.parse(plain.stdout).path).toBe(nested);
+    await fs.outputJson(path.join(nested, '.juno_task/config.json'), { controllerWorkspace: { mode: 'simple', version: 1 } });
+    const deeper = path.join(nested, 'notes'); await fs.ensureDir(deeper);
+    expect(resolveController(deeper)).toMatchObject({ valid: true, role: 'simple', path: nested });
+    await fs.ensureDir(path.join(root, '.yylo-simple-init'));
+    expect(resolveController(deeper).path).toBe(nested); // Parent reservations are not child authority.
+    process.env.JUNO_TASK_ROOT = root;
+    expect(() => resolveController(deeper)).toThrow(/assertion mismatch/);
+    delete process.env.JUNO_TASK_ROOT;
     const noGit = await fs.mkdtemp(path.join(os.tmpdir(), 'yylo-simple-no-git-'));
     try {
       await fs.ensureDir(path.join(noGit, '.juno_task'));

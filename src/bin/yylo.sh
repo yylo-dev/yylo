@@ -272,9 +272,12 @@ read_runtime_version() {
 }
 
 has_managed_workspace_marker() {
-    local current="$PWD" parent
+    local current parent
+    current="$(pwd -P)"
     while true; do
         [ -d "$current/.juno_task" ] && return 0
+        # Independent repositories never inherit an ancestor's board/runtime.
+        [ -e "$current/.git" ] && return 1
         parent="$(dirname "$current")"
         [ "$parent" != "$current" ] || return 1
         current="$parent"

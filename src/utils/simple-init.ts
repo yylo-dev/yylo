@@ -81,15 +81,8 @@ async function inspectRoot(directory: string): Promise<SimpleInitPlan['identity'
   if (process.env.JUNO_CONTROLLER_BRANCH || ['JUNO_WORKSPACE_ROLE', 'JUNO_CONTROL_INVOCATION_ROLE'].some((key) => process.env[key] && process.env[key] !== 'simple')) {
     throw new Error('Inherited managed workspace authority conflicts with Simple initialization.');
   }
-  // Never create a second Simple project nested inside an existing project.
-  let ancestor = path.dirname(root);
-  while (ancestor !== path.dirname(ancestor)) {
-    try {
-      await fs.lstat(path.join(ancestor, '.juno_task'));
-      throw new Error(`Ancestor Juno workspace conflicts with Simple initialization: ${ancestor}`);
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    ancestor = path.dirname(ancestor);
-  }
+  // The independent primary Git root is the ownership boundary. Ancestor
+  // metadata belongs to another repository and does not veto initialization.
   return { root, commonDir, head: gitOptional(root, ['rev-parse', '--verify', 'HEAD']),
     ref: gitOptional(root, ['symbolic-ref', '--quiet', 'HEAD']), gitConfig: await fileDigest(path.join(commonDir, 'config')) };
 }
@@ -262,10 +255,23 @@ async function inspectConversionSource(directory: string): Promise<SimpleConvers
     throw new Error('Controller registration/branch does not match its policy.');
   }
   const state = await readSourceJson(root, '.juno_task/state/tasks.json');
-  if (state.schema_version !== 'juno_task_workspace_state.v2' || !state.tasks || Array.isArray(state.tasks) || typeof state.tasks !== 'object') throw new Error('Unsupported lifecycle state; no conversion performed.');
+  const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
+  const bounded = state.schema_version === 'juno_task_workspace_state.v2';
+  if (!bounded && state.schema_version !== 'juno_task_workspace_state.v1') {
+    throw new Error(`Unsupported lifecycle schema ${JSON.stringify(state.schema_version)} in .juno_task/state/tasks.json; supported: juno_task_workspace_state.v1, juno_task_workspace_state.v2. No conversion performed.`);
+  }
+  // Match read_state: pre-queue v1 may omit queues; v2 requires it. Do not
+  // rewrite or upgrade the source to make it eligible for a snapshot export.
+  if (!object(state.tasks) || (!object(state.queues) && (bounded || 'queues' in state)) ||
+      Object.keys(state).some((key) => !['schema_version', 'tasks', 'queues'].includes(key))) {
+    throw new Error('Invalid lifecycle state structure in .juno_task/state/tasks.json: expected object tasks and queues (queues optional only in v1); no conversion performed.');
+  }
   for (const [id, record] of Object.entries(state.tasks)) {
-    if (!record || !['MERGED', 'WITHDRAWN'].includes((record as { state?: string }).state || '')) {
+    if (!object(record) || !['MERGED', 'WITHDRAWN'].includes(String(record.state))) {
       throw new Error(`Unfinished or unknown lifecycle task ${id}; settle managed work before conversion.`);
+    }
+    if (bounded && (record.schema_version !== 'juno_task_terminal_tombstone.v1' || record.task_id !== id)) {
+      throw new Error(`Invalid bounded lifecycle task ${id}: v2 terminal records require matching task_id and juno_task_terminal_tombstone.v1; no conversion performed.`);
     }
   }
   const worktrees = conversionText(root, ['worktree', 'list', '--porcelain', '-z']);
@@ -325,13 +331,8 @@ async function assertFreshDestination(root: string, source: SimpleConversionPlan
   if (sourceRoots.some((location) => isWithin(location, root) || isWithin(root, location))) throw new Error('Destination must be separate from all source worktrees and Git storage.');
   try { await fs.lstat(root); throw new Error('Conversion destination must not exist; preserve any prior attempt and choose a fresh folder.'); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-  let ancestor = path.dirname(root);
-  while (true) {
-    try { await fs.lstat(path.join(ancestor, '.juno_task')); throw new Error('Destination is nested inside an existing workspace.'); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    if (ancestor === path.dirname(ancestor)) break;
-    ancestor = path.dirname(ancestor);
-  }
+  // Apply creates an independent primary checkout. Only overlap with source
+  // worktrees/storage is unsafe; unrelated ancestor workspaces remain untouched.
 }
 
 /** Create a new standalone checkout; failure preserves it, never touches source. */

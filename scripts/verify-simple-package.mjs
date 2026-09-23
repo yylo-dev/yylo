@@ -78,7 +78,7 @@ try {
   const created = ok(yy(nested, ['ledger', 'create', 'Packaged Simple round trip']), 'create local task');
   // The public alias may frame one record as NDJSON or a singleton JSON array.
   const decoded = JSON.parse(created); const task = Array.isArray(decoded) ? decoded[0] : decoded;
-  assert.match(task.id, /^[A-Za-z0-9]{6}$/u);
+  assert.match(task.id, /^(?:task_)?[A-Za-z0-9]{6}$/u);
   ok(yy(nested, ['task', 'local', 'get', task.id]), 'local get');
   ok(yy(nested, ['task', 'local', 'mark', 'done', task.id, '--response', 'Local bookkeeping only']), 'local mark');
   const read = ok(yy(nested, ['ledger', 'get', task.id]), 'readback');
@@ -88,6 +88,23 @@ try {
   assert.equal(existsSync(path.join(root, '.juno_task/state/tasks.json')), false);
   assert.deepEqual(snapshot(root), before);
   assert.equal(readFileSync(path.join(root, 'untracked.csv'), 'utf8'), 'private fixture data\n');
+  // An independent child must neither inherit nor mutate this parent's board.
+  const parentBoard = ok(yy(root, ['ledger', 'list', '-f', 'json']), 'parent board');
+  const child = path.join(root, 'independent'); mkdirSync(child);
+  git(child, 'init', '-q');
+  const uninitialized = yy(child, ['ledger', 'get', task.id]);
+  assert.notEqual(uninitialized.status, 0, 'uninitialized child must not read parent task');
+  const childPlan = path.join(temporary, 'child-plan.json');
+  ok(yy(child, ['init', '--mode', 'simple', '--plan-file', childPlan]), 'nested independent preview');
+  ok(yy(child, ['init', '--mode', 'simple', '--apply-plan', childPlan]), 'nested independent apply');
+  const childNotes = path.join(child, 'notes'); mkdirSync(childNotes);
+  const childInfo = JSON.parse(ok(yy(childNotes, ['info', '--json']), 'child info'));
+  assert.equal(childInfo.root, child);
+  const childRecord = JSON.parse(ok(yy(childNotes, ['ledger', 'create', 'Independent child task']), 'child Ledger create'));
+  const childId = (Array.isArray(childRecord) ? childRecord[0] : childRecord).id;
+  ok(yy(childNotes, ['ledger', 'get', childId]), 'child Ledger read');
+  assert.notEqual(yy(root, ['ledger', 'get', childId]).status, 0, 'child task must not enter parent board');
+  assert.equal(ok(yy(root, ['ledger', 'list', '-f', 'json']), 'parent unchanged'), parentBoard);
   assert.equal(existsSync(forbidden), false, 'Simple must never invoke an installer');
   // Git commits are possible, but only because this test explicitly requests one.
   git(root, 'add', 'lesson.ipynb'); git(root, 'commit', '-qm', 'explicit notebook commit');

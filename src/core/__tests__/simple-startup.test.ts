@@ -77,7 +77,7 @@ describe('validated Simple local startup', () => {
     await fs.symlink(os.tmpdir(), path.join(root, 'escape'));
     await expect(loadConfig({ baseDir: root, cliConfig: { workingDirectory: 'escape' } })).rejects.toThrow(/same project root/);
     const child = path.join(root, 'child'); await fs.ensureDir(child); execFileSync('git', ['-C', child, 'init', '-q']);
-    await expect(loadConfig({ baseDir: root, cliConfig: { workingDirectory: child } })).rejects.toThrow(/nested Simple/);
+    await expect(loadConfig({ baseDir: root, cliConfig: { workingDirectory: child } })).rejects.toThrow(/workingDirectory must remain canonically inside the same project root/);
     await expect(loadConfig({ baseDir: root, cliConfig: { controllerWorkspace: undefined } })).rejects.toThrow(/contradicts/);
   });
 

@@ -28,7 +28,7 @@ export function hasManagedWorkspaceMarker(workingDirectory: string): boolean {
   while (true) {
     if (existsSync(path.join(current, '.juno_task'))) return true;
     const parent = path.dirname(current);
-    if (parent === current) return false;
+    if (existsSync(path.join(current, '.git')) || parent === current) return false;
     current = parent;
   }
 }
