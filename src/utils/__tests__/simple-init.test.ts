@@ -263,8 +263,11 @@ describe('Advanced-to-Simple fresh-workspace conversion', () => {
   it('exposes conversion through the existing init plan/apply CLI only', async () => {
     await advancedFixture(); const destination = conversionDestination();
     const external = `${root}-conversion.json`; conversionDestinations.push(external);
-    const program = new Command(); configureInitCommand(program);
+    const preview = new Command(); configureInitCommand(preview);
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    await preview.parseAsync(['init', '--mode', 'simple', '--from-advanced', root, '--directory', destination], { from: 'user' });
+    await expect(fs.stat(destination)).rejects.toThrow();
+    const program = new Command(); configureInitCommand(program);
     await program.parseAsync(['init', '--mode', 'simple', '--from-advanced', root, '--directory', destination, '--plan-file', external], { from: 'user' });
     await expect(fs.stat(destination)).rejects.toThrow();
     // Fresh Commander instances avoid retained options across multiple parses.
@@ -469,7 +472,7 @@ describe('fresh Simple initialization', () => {
     expect(await fs.readFile(path.join(root, 'notebook.ipynb'), 'utf8')).toBe('dirty notebook');
   });
 
-  it('writes plans exclusively outside the project and CLI defaults to preview', async () => {
+  it('writes plans exclusively outside the project and dry-run preserves explicit apply', async () => {
     const plan = await planSimpleInit(root);
     await expect(writeSimpleInitPlan(path.join(root, 'plan.json'), plan)).rejects.toThrow(/outside/);
     const external = await fs.mkdtemp(path.join(os.tmpdir(), 'yylo-init-plan-'));
@@ -478,11 +481,12 @@ describe('fresh Simple initialization', () => {
       await expect(writeSimpleInitPlan(file, plan)).rejects.toThrow();
       const program = new Command(); configureInitCommand(program);
       const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-      await program.parseAsync(['init', '--mode', 'simple', '--directory', root], { from: 'user' });
-      expect(JSON.parse(String(log.mock.calls[0][0])).outcome).toBe('ready');
+      await program.parseAsync(['init', '--mode', 'simple', '--dry-run', '--directory', root], { from: 'user' });
+      expect(String(log.mock.calls[0][0])).toContain('Preview only; not initialized');
       await expect(fs.stat(path.join(root, '.juno_task'))).rejects.toThrow();
-      await program.parseAsync(['init', '--mode', 'simple', '--apply-plan', file], { from: 'user' });
-      expect(JSON.parse(String(log.mock.calls[1][0])).outcome).toBe('initialized');
+      const apply = new Command(); configureInitCommand(apply);
+      await apply.parseAsync(['init', '--mode', 'simple', '--apply-plan', file], { from: 'user' });
+      expect(log).toHaveBeenCalledWith(`Initialized Simple workspace: ${root}`);
     } finally { await fs.rm(external, { recursive: true, force: true }); }
   });
 });

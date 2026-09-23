@@ -11,6 +11,21 @@ below creates a separate Simple workspace without changing the source.
 | Parallel agents | Shared files and Git index; coordinate edits | Isolated task worktrees |
 | Git | Explicit owner-authorized ordinary Git | Managed protected-target delivery |
 
+## One-command Simple initialization
+
+```sh
+git init                       # Explicit prerequisite in a new project folder
+yy init --mode simple          # Initializes immediately, without confirmation
+# Or select an existing independent Git root:
+yy init --mode simple --directory /absolute/project
+```
+
+**Changed default side effects:** plain fresh Simple init now writes files rather
+than printing a plan. Preview automation must select `--dry-run` (no writes) or
+`--plan-file`. Initialization does not install dependencies or certify agent
+readiness. Read `.juno_task/simple-agent-guidance.md`, then use `yy ledger` and
+`yy pi` with separately installed dependencies and credentials.
+
 ## Interactive initialization
 
 In the intended new project folder, run `git init` explicitly, then `yy init`.
@@ -34,7 +49,7 @@ yy init --interactive --mode simple
 yy init "Build an API" --mode advanced
 ```
 
-## Simple automation: preview and apply
+## Optional Simple previews and saved-plan automation
 
 Use an ordinary Git repository, not a managed controller or linked worktree.
 For a new folder, run `git init` yourself first; no-Git operation is not supported.
@@ -44,7 +59,13 @@ board, and runtime are not inherited. An uninitialized child must be initialized
 locally; parent metadata is not a fallback. Multiple Simple roots inside the
 same Git repository remain unsupported. Explicit managed registrations and
 contradictory inherited environment assertions still receive safety checks.
-From the repository root, preview an external plan, inspect its paths and
+For a read-only preview with no plan file, use `yy init --mode simple --dry-run`.
+It reports the destination and proposed files, not successful initialization.
+`--dry-run` cannot be combined with saved-plan, conversion, interactive or Advanced
+options. Exact repeat initialization is a no-op; customized configuration is not
+silently reconfigured.
+
+For saved-plan automation, preview an external plan, inspect its paths and
 preserved-file identities, then apply that exact plan:
 
 ```sh

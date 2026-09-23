@@ -52,10 +52,13 @@ try {
   writeFileSync(path.join(root, 'lesson.ipynb'), 'dirty notebook\n');
   writeFileSync(path.join(root, 'untracked.csv'), 'private fixture data\n');
   const before = snapshot(root);
-  const planPath = path.join(temporary, 'simple-plan.json');
-  ok(yy(root, ['init', '--mode', 'simple', '--directory', root, '--plan-file', planPath]), 'preview');
+  const preview = ok(yy(root, ['init', '--mode', 'simple', '--dry-run']), 'dry-run');
+  assert.match(preview, /Preview only; not initialized/u);
   assert.equal(existsSync(path.join(root, '.juno_task')), false);
-  ok(yy(root, ['init', '--mode', 'simple', '--apply-plan', planPath]), 'apply');
+  assert.equal(existsSync(path.join(root, '.yylo-simple-init')), false);
+  assert.deepEqual(snapshot(root), before);
+  assert.match(ok(yy(root, ['init', '--mode', 'simple', '--directory', root]), 'direct init'), /Initialized Simple workspace/u);
+  assert.match(ok(yy(root, ['init', '--mode', 'simple']), 'duplicate init'), /Already initialized/u);
   assert.deepEqual(snapshot(root), before);
   const config = JSON.parse(readFileSync(path.join(root, '.juno_task/config.json'), 'utf8'));
   assert.deepEqual(config.controllerWorkspace, { mode: 'simple', version: 1 });
@@ -90,13 +93,15 @@ try {
   assert.equal(readFileSync(path.join(root, 'untracked.csv'), 'utf8'), 'private fixture data\n');
   // An independent child must neither inherit nor mutate this parent's board.
   const parentBoard = ok(yy(root, ['ledger', 'list', '-f', 'json']), 'parent board');
+  const uninitializedChild = path.join(root, 'uninitialized'); mkdirSync(uninitializedChild);
+  git(uninitializedChild, 'init', '-q');
+  const uninitialized = yy(uninitializedChild, ['ledger', 'get', task.id]);
+  assert.notEqual(uninitialized.status, 0, 'uninitialized child must not read parent task');
+  // Ledger may create local storage even on a missing-record read. Preserve it;
+  // do not treat that now-customized directory as a fresh-init fixture.
   const child = path.join(root, 'independent'); mkdirSync(child);
   git(child, 'init', '-q');
-  const uninitialized = yy(child, ['ledger', 'get', task.id]);
-  assert.notEqual(uninitialized.status, 0, 'uninitialized child must not read parent task');
-  const childPlan = path.join(temporary, 'child-plan.json');
-  ok(yy(child, ['init', '--mode', 'simple', '--plan-file', childPlan]), 'nested independent preview');
-  ok(yy(child, ['init', '--mode', 'simple', '--apply-plan', childPlan]), 'nested independent apply');
+  ok(yy(child, ['init', '--mode', 'simple']), 'nested independent direct init');
   const childNotes = path.join(child, 'notes'); mkdirSync(childNotes);
   const childInfo = JSON.parse(ok(yy(childNotes, ['info', '--json']), 'child info'));
   assert.equal(childInfo.root, child);
@@ -105,6 +110,25 @@ try {
   ok(yy(childNotes, ['ledger', 'get', childId]), 'child Ledger read');
   assert.notEqual(yy(root, ['ledger', 'get', childId]).status, 0, 'child task must not enter parent board');
   assert.equal(ok(yy(root, ['ledger', 'list', '-f', 'json']), 'parent unchanged'), parentBoard);
+  // Advanced ancestor metadata is likewise not authority over an independent child.
+  const advanced = path.join(temporary, 'advanced'); mkdirSync(advanced);
+  git(advanced, 'init', '-q');
+  mkdirSync(path.join(advanced, '.juno_task'));
+  const advancedConfig = JSON.stringify({ controllerWorkspace: { mode: 'metadata-only', policy: '.juno_task/config/metadata-controller.json' } });
+  writeFileSync(path.join(advanced, '.juno_task/config.json'), advancedConfig);
+  const advancedChild = path.join(advanced, 'child'); mkdirSync(advancedChild);
+  git(advancedChild, 'init', '-q');
+  ok(yy(advancedChild, ['init', '--mode', 'simple', '--directory', advancedChild]), 'Advanced ancestor child direct init');
+  const advancedRecord = JSON.parse(ok(yy(advancedChild, ['ledger', 'create', 'Advanced ancestor child local task']), 'Advanced child create'));
+  ok(yy(advancedChild, ['ledger', 'get', (Array.isArray(advancedRecord) ? advancedRecord[0] : advancedRecord).id]), 'Advanced child read');
+  assert.equal(readFileSync(path.join(advanced, '.juno_task/config.json'), 'utf8'), advancedConfig);
+  assert.equal(existsSync(path.join(advanced, '.juno_task/tasks')), false);
+  // Saved-plan automation remains available independently of the direct path.
+  const savedRoot = path.join(temporary, 'saved'); mkdirSync(savedRoot); git(savedRoot, 'init', '-q');
+  const savedPlan = path.join(temporary, 'saved.json');
+  ok(yy(savedRoot, ['init', '--mode', 'simple', '--plan-file', savedPlan]), 'saved plan');
+  assert.equal(existsSync(path.join(savedRoot, '.juno_task')), false);
+  ok(yy(savedRoot, ['init', '--mode', 'simple', '--apply-plan', savedPlan]), 'saved apply');
   assert.equal(existsSync(forbidden), false, 'Simple must never invoke an installer');
   // Git commits are possible, but only because this test explicitly requests one.
   git(root, 'add', 'lesson.ipynb'); git(root, 'commit', '-qm', 'explicit notebook commit');
