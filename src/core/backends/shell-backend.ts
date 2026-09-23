@@ -24,6 +24,7 @@ import type {
 } from '../../types/execution.js';
 import { engineLogger } from '../../cli/utils/advanced-logger.js';
 import { buildChildProcessEnvironment } from '../child-process-environment.js';
+import { joinActiveInvocation } from '../invocation-lifecycle.js';
 
 // =============================================================================
 // Type Definitions
@@ -1058,9 +1059,22 @@ export class ShellBackend implements Backend {
         }
         return !ownedGroupIsActive();
       };
+      // The invocation signal observer can request process.exit in this same
+      // turn. Keep its finalization behind the existing close/group-settlement
+      // boundary, or it can exit before our escalation timer kills descendants.
+      let cancellationEscalation: NodeJS.Timeout | undefined;
+      let settleOwnedProcess!: () => void;
+      const ownedProcessSettlement = new Promise<void>((resolveSettlement) => {
+        settleOwnedProcess = () => {
+          if (cancellationEscalation) clearTimeout(cancellationEscalation);
+          resolveSettlement();
+        };
+      });
+      joinActiveInvocation(ownedProcessSettlement);
+
       const cancelOwnedGroup = (signal: NodeJS.Signals): void => {
         signalOwnedGroup(signal);
-        setTimeout(() => signalOwnedGroup('SIGKILL'), 250);
+        cancellationEscalation ??= setTimeout(() => signalOwnedGroup('SIGKILL'), 250);
       };
       const onSigint = (): void => cancelOwnedGroup('SIGINT');
       const onSigterm = (): void => cancelOwnedGroup('SIGTERM');
@@ -1224,7 +1238,7 @@ export class ShellBackend implements Backend {
             execResult.subAgentResponse = subAgentResponse;
           }
           resolve(execResult);
-        })();
+        })().finally(settleOwnedProcess);
       });
 
       // Handle process errors
@@ -1239,7 +1253,10 @@ export class ShellBackend implements Backend {
             engineLogger.error(`Script execution error: ${error.message}`);
           }
           reject(new Error(`Failed to execute script: ${error.message}`));
-        })();
+        })().finally(() => {
+          // A failed spawn owns no process; otherwise close must settle its group.
+          if (!child.pid) settleOwnedProcess();
+        });
       });
 
       // Apply timeout if configured. Pi live sessions are intentionally long-lived
