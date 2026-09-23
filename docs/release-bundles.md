@@ -55,6 +55,8 @@ The typed contract is `src/utils/release-bundle.ts`. The shape is:
 ```text
 schema_version: yylo_release_bundle.v1
 version: exact CLI version
+controller_generation: {ordinary_dispatch: explicit-only-v1}
+acceptance: {url, sha256, bytes}  # optional until qualification
 components:
   cli:       {name, version, url, sha256, bytes, source: {repository, commit}}
   ledger:    {name, version, url, sha256, bytes, source: {repository, commit}}
@@ -69,12 +71,66 @@ published or prove source provenance. Archive identity checks are not a malware
 scan or proof that a package is safe to execute. Metadata claims alone are never
 permission to execute a package.
 
-The result is explicitly `prepared_not_qualified`, with `published: false` and
-`activated: false`. Existing CLI-only acceptance is **not** a four-component
-acceptance result. Bundle publication, qualification against actual components,
-and consumer activation are separate work; this command provides none of them.
+The preparation result is explicitly `prepared_not_qualified`, with `published:
+false` and `activated: false`. The declared ordinary-dispatch capability must
+match both the source and packed CLI; this describes the existing explicit-only
+contract, not a claim that software-only activation has already been implemented.
 Existing `yylo_two_package_release.v2` manifests retain their current meaning
 and are not silently promoted to bundle manifests.
+
+## Explicit publication and acceptance verification
+
+```sh
+scripts/release-cli.sh bundle-verify CLI_VERSION BENCHMARK_VERSION \
+  /external/bundle.json
+```
+
+This read-only maintainer operation uses bounded HTTPS requests, not npm/pip
+installation or cache discovery. It verifies every selected artifact is available:
+
+- CLI/benchmark: canonical npm registry name/version/tarball and SHA-512 integrity;
+  published `gitHead`, when present, must agree with the declared source commit.
+- Ledger: canonical PyPI release, non-yanked wheel URL/size/SHA-256.
+- Skills: upstream `yylo-dev/yylo-skills` version tag resolves to the exact source
+  commit, including an annotated-tag hop; download the canonical codeload archive
+  at that commit. A mutable tag archive is not an artifact identity.
+- Every downloaded artifact must also match the bundle's exact SHA-256 and size.
+
+Missing releases, unavailable dependencies, conflicting hashes, unsafe origins
+or redirects refuse. There is no implicit source fallback or automatic publication.
+Registry-origin authentication is not a reproducible-build attestation: source
+commits remain reviewed release provenance, not proof reconstructed from a wheel.
+
+Without an acceptance reference the result is
+`registry_available_not_qualified`, `ready_to_upgrade: false`, exit 2. To qualify,
+the manifest must bind an exact published acceptance report. Its inert JSON shape
+is:
+
+```text
+schema_version: yylo_bundle_upgrade_acceptance.v1
+outcome: passed
+coverage: four-component-upgrade.v1
+bundle_inputs_sha256: SHA256 of canonical bundle inputs
+source: {sha: exact prepared source commit, dirty: false}
+gate_sha256: SHA256 of the ordered controller-upgrade gate implementation files
+```
+
+`bundleInputsDigest` in the shared module computes the canonical input digest:
+version, controller-generation capability, and all four complete component
+identities. The acceptance reference is excluded to avoid a self-hash cycle.
+`gate_sha256` uses the existing release gate's ordered JavaScript/Python source
+pair. The verifier binds source and CLI/benchmark identities to the existing
+prepared release, independently rechecks all public artifact bytes, then verifies
+the report reference, full input digest, clean source and gate implementation.
+Changed evidence, partial publication, CLI-only coverage or stale input/gate hashes
+cannot produce `acceptance_qualified` / `ready_to_upgrade: true`.
+
+The existing CLI-only packed gate does **not** produce this four-component report;
+that real-component qualification producer belongs to the downstream packed-release
+gate work. Do not fabricate or relabel its report. The report reference must come
+from reviewed maintainer execution evidence, not from arbitrary untrusted JSON.
+This task supplies its verification contract, not the missing end-to-end producer.
+The verifier never installs, activates, writes project pins or publishes anything.
 
 ## Portable desired pin
 

@@ -11,6 +11,7 @@ const https = z.string().url().refine(value => {
   const url = new URL(value);
   return url.protocol === 'https:' && !url.username && !url.password && !url.hash && !url.search;
 }, 'Credential-free immutable HTTPS artifact URL required');
+const evidenceReference = z.object({ url: https, sha256, bytes: z.number().int().positive().max(64 * 1024) }).strict();
 const artifact = z.object({
   version: exactVersion,
   url: https,
@@ -22,6 +23,8 @@ const artifact = z.object({
 export const releaseBundleSchema = z.object({
   schema_version: z.literal('yylo_release_bundle.v1'),
   version: exactVersion,
+  controller_generation: z.object({ ordinary_dispatch: z.literal('explicit-only-v1') }).strict(),
+  acceptance: evidenceReference.optional(),
   components: z.object({
     cli: artifact.extend({ name: z.literal('@yylo/cli') }),
     ledger: artifact.extend({ name: z.literal('yylo-ledger') }),
@@ -82,10 +85,13 @@ export function verifyBundleArtifact(bundleInput: unknown, component: BundleComp
  * exactly one version. This permits explicit preparation before those declarations migrate.
  */
 export function verifyBundleDeclarations(bundleInput: unknown, input: {
-  cli: { name: string; version: string; yyloLedger: { version: string }; yyloBenchmark: { version: string }; yyloSkills: { version: string } };
+  cli: { name: string; version: string; yyloLedger: { version: string }; yyloBenchmark: { version: string }; yyloSkills: { version: string }; yyloControllerGeneration?: { ordinaryDispatch: string } };
   benchmark: { name: string; version: string };
 }): ReleaseBundle {
   const bundle = releaseBundleSchema.parse(bundleInput);
+  if (input.cli.yyloControllerGeneration?.ordinaryDispatch !== bundle.controller_generation.ordinary_dispatch) {
+    throw new Error('release_generation_capability_mismatch');
+  }
   for (const [role, name, version] of [
     ['cli', input.cli.name, input.cli.version],
     ['benchmark', input.benchmark.name, input.benchmark.version],
@@ -102,4 +108,33 @@ export function verifyBundleDeclarations(bundleInput: unknown, input: {
     }
   }
   return bundle;
+}
+
+/** Bind test inputs without a manifest/report self-hash cycle. Zod parsing fixes key order.
+ * The acceptance reference itself is excluded; all component identities remain included.
+ */
+export function bundleInputsDigest(input: unknown): string {
+  const { version, controller_generation, components } = releaseBundleSchema.parse(input);
+  return createHash('sha256').update(JSON.stringify({ version, controller_generation, components })).digest('hex');
+}
+
+export function verifyBundleAcceptance(input: unknown, bytes: Uint8Array,
+  expectedSource: string, expectedGate: string): void {
+  const bundle = releaseBundleSchema.parse(input);
+  const reference = bundle.acceptance;
+  if (!reference) throw new Error('bundle_acceptance_missing');
+  if (bytes.byteLength > MAX_MANIFEST_BYTES || bytes.byteLength !== reference.bytes
+      || createHash('sha256').update(bytes).digest('hex') !== reference.sha256) {
+    throw new Error('bundle_acceptance_digest_mismatch');
+  }
+  const report = z.object({
+    schema_version: z.literal('yylo_bundle_upgrade_acceptance.v1'),
+    outcome: z.literal('passed'),
+    coverage: z.literal('four-component-upgrade.v1'),
+    bundle_inputs_sha256: sha256,
+    source: z.object({ sha: z.string().regex(/^[a-f0-9]{40}$/), dirty: z.literal(false) }).strict(),
+    gate_sha256: sha256,
+  }).strict().parse(parseJson(bytes));
+  if (report.bundle_inputs_sha256 !== bundleInputsDigest(bundle) || report.source.sha !== expectedSource
+      || report.gate_sha256 !== expectedGate) throw new Error('bundle_acceptance_inputs_mismatch');
 }
