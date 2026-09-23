@@ -66,6 +66,7 @@ export class SkillInstaller {
   static readonly REPOSITORY = 'https://github.com/yylo-dev/yylo-skills.git';
   static readonly SKILLS = [
     'artifact-yylo',
+    'benchmark-yylo',
     'ledger-tasks-yylo',
     'plan-ledger-tasks-yylo',
     'ralph-loop-yylo',
@@ -272,7 +273,7 @@ export class SkillInstaller {
       const names = entries.map((entry) => entry.name).sort();
       if (entries.some((entry) => !entry.isDirectory())
           || names.join('\0') !== [...this.SKILLS].sort().join('\0')) {
-        throw new Error(`Staged ${group.name} skills are not the canonical seven-skill set`);
+        throw new Error(`Staged ${group.name} skills are not the canonical ${this.SKILLS.length}-skill set`);
       }
       const digests = new Map<string, string>();
       for (const skill of this.SKILLS) {
