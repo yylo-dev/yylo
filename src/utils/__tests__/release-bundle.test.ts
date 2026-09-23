@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   BUNDLE_COMPONENTS, parseReleasePin, releaseBundleSchema, verifyBundleArtifact,
-  verifyBundleDeclarations, verifyPinnedRelease,
+  verifyBundleDeclarations, verifyPinnedRelease, bundleInputsDigest, verifyBundleAcceptance,
 } from '../release-bundle.js';
 
 const digest = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
@@ -14,13 +14,14 @@ function fixture() {
     sha256: digest(payloads[role]), bytes: payloads[role].length,
     source: { repository: `https://example.invalid/${role}`, commit: 'a'.repeat(40) },
   }]));
-  const bundle = { schema_version: 'yylo_release_bundle.v1', version: '1.2.3', components };
+  const bundle = { schema_version: 'yylo_release_bundle.v1', version: '1.2.3',
+    controller_generation: { ordinary_dispatch: 'explicit-only-v1' }, components };
   const bytes = Buffer.from(JSON.stringify(bundle));
   const pin = { schema_version: 'yylo_release_pin.v1', version: '1.2.3', manifest: {
     url: 'https://releases.example.invalid/1.2.3/bundle.json', sha256: digest(bytes),
   } };
   const declarations = {
-    cli: { name: '@yylo/cli', version: '1.2.3', yyloLedger: { version: '1.2.3' },
+    cli: { name: '@yylo/cli', version: '1.2.3', yyloControllerGeneration: { ordinaryDispatch: 'explicit-only-v1' }, yyloLedger: { version: '1.2.3' },
       yyloBenchmark: { version: '1.2.3' }, yyloSkills: { version: '^1.2.0' } },
     benchmark: { name: '@yylo/benchmark', version: '1.2.3' },
   };
@@ -100,6 +101,40 @@ describe('portable exact release bundles', () => {
     f.bundle.components[role].version = '1.2.4';
     if (role === 'cli') f.bundle.version = '1.2.4';
     expect(() => verifyBundleDeclarations(f.bundle, f.declarations)).toThrow(`release_declaration_mismatch:${role}`);
+  });
+
+  it('binds qualification to all component inputs, clean source and exact gate bytes', () => {
+    const f = fixture();
+    const report = { schema_version: 'yylo_bundle_upgrade_acceptance.v1', outcome: 'passed',
+      coverage: 'four-component-upgrade.v1', bundle_inputs_sha256: bundleInputsDigest(f.bundle),
+      source: { sha: 'a'.repeat(40), dirty: false }, gate_sha256: 'b'.repeat(64) };
+    const bytes = Buffer.from(JSON.stringify(report));
+    const bundle = { ...f.bundle, acceptance: { url: 'https://example.invalid/acceptance.json', sha256: digest(bytes), bytes: bytes.length } };
+    verifyBundleAcceptance(bundle, bytes, report.source.sha, report.gate_sha256);
+    expect(bundleInputsDigest(bundle)).toBe(bundleInputsDigest(f.bundle));
+    expect(() => verifyBundleAcceptance(bundle, bytes, 'c'.repeat(40), report.gate_sha256)).toThrow('bundle_acceptance_inputs_mismatch');
+    expect(() => verifyBundleAcceptance(bundle, bytes, report.source.sha, 'd'.repeat(64))).toThrow('bundle_acceptance_inputs_mismatch');
+    bundle.components.skills.sha256 = 'f'.repeat(64);
+    expect(() => verifyBundleAcceptance(bundle, bytes, report.source.sha, report.gate_sha256)).toThrow('bundle_acceptance_inputs_mismatch');
+  });
+
+  it('rejects missing, tampered, dirty or CLI-only acceptance', () => {
+    const f = fixture();
+    expect(() => verifyBundleAcceptance(f.bundle, Buffer.from('{}'), 'a'.repeat(40), 'b'.repeat(64))).toThrow('bundle_acceptance_missing');
+    for (const dirty of [true, false]) {
+      const bytes = Buffer.from(JSON.stringify({ schema_version: dirty ? 'yylo_bundle_upgrade_acceptance.v1' : 'yylo_controller_upgrade_acceptance.v1',
+        outcome: 'passed', coverage: 'four-component-upgrade.v1', bundle_inputs_sha256: bundleInputsDigest(f.bundle),
+        source: { sha: 'a'.repeat(40), dirty }, gate_sha256: 'b'.repeat(64) }));
+      const bundle = { ...f.bundle, acceptance: { url: 'https://example.invalid/acceptance.json', sha256: digest(bytes), bytes: bytes.length } };
+      expect(() => verifyBundleAcceptance(bundle, bytes, 'a'.repeat(40), 'b'.repeat(64))).toThrow();
+      expect(() => verifyBundleAcceptance(bundle, Buffer.from('{}'), 'a'.repeat(40), 'b'.repeat(64))).toThrow('bundle_acceptance_digest_mismatch');
+    }
+  });
+
+  it('rejects a generation capability not supported by the packed CLI', () => {
+    const f = fixture();
+    f.declarations.cli.yyloControllerGeneration.ordinaryDispatch = 'automatic-upgrade';
+    expect(() => verifyBundleDeclarations(f.bundle, f.declarations)).toThrow('release_generation_capability_mismatch');
   });
 
   it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])('refuses invalid artifact byte length %s', bytes => {
