@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'fs-extra';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   resolveAutomaticProjectBootstrap,
   resolveController,
@@ -66,12 +66,17 @@ describe('control-plane argv classification', () => {
   it('detects a managed marker from nested paths without classifying its parent', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'yylo-managed-marker-'));
     try {
+      execFileSync('git', ['-C', root, 'init', '-q']);
       const managed = path.join(root, 'managed');
       const nested = path.join(managed, 'nested');
       await fs.ensureDir(path.join(managed, '.juno_task'));
       await fs.ensureDir(nested);
       expect(hasManagedWorkspaceMarker(nested)).toBe(true);
       expect(hasManagedWorkspaceMarker(root)).toBe(false);
+      const independent = path.join(managed, 'child');
+      await fs.ensureDir(independent);
+      execFileSync('git', ['-C', independent, 'init', '-q']);
+      expect(hasManagedWorkspaceMarker(independent)).toBe(false);
     } finally {
       await fs.remove(root);
     }
