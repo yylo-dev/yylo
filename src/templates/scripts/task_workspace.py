@@ -1953,7 +1953,7 @@ def require_current_runtime(repository: Path, target_sha: str,
                 prefix = Path.home() / ".local/share/juno/runtimes" / f"source-{target_sha[:12]}"
                 receipt = Path("/tmp") / f"yylo-source-runtime-adoption-{target_sha[:12]}.json"
                 raise TaskWorkspaceError(
-                    "managed task runtime differs from a Juno source target. Complete safe recovery: "
+                    "managed task runtime differs from a YYLO source target. Complete safe recovery: "
                     f"`yy integration runtime-adopt-source --previous-sha {previous} "
                     f"--target-sha {target_sha} --install-prefix {shlex.quote(str(prefix))} "
                     f"--output {shlex.quote(str(receipt))}`; this one transaction builds and authenticates "
@@ -1962,7 +1962,7 @@ def require_current_runtime(repository: Path, target_sha: str,
                     "runtime-install-rebind or runtime-refresh alone"
                 )
             raise TaskWorkspaceError(
-                "managed task runtime differs from a Juno source target; recover only with the complete "
+                "managed task runtime differs from a YYLO source target; recover only with the complete "
                 "`yy integration runtime-adopt-source --help` transaction (the current managed generation "
                 "identity is unavailable), not runtime-install-rebind or runtime-refresh alone"
             )
@@ -6070,21 +6070,21 @@ def _runtime_prior_state(controller: Path, repository: Path, target_sha: str,
     if source_repository and (not isinstance(package, dict)
                               or package.get("name") != "@yylo/cli"
                               or not is_valid_semver(package.get("version"))):
-        raise TaskWorkspaceError("Juno source target package identity is invalid")
+        raise TaskWorkspaceError("YYLO source target package identity is invalid")
     if prior is None:
         if source_repository:
             target_package_version = package["version"]
             if source != proposed:
                 if not semver_precedes(target_package_version, recovery_package_version):
                     raise TaskWorkspaceError(
-                        "Juno source target runtime is absent at a non-older package/template "
+                        "YYLO source target runtime is absent at a non-older package/template "
                         "generation; upgrade or rebind the controller package/runtime to match "
                         "the target, then repair source identities atomically if still required")
                 raise TaskWorkspaceError(
-                    "Juno source target runtime is absent at an older package/template "
+                    "YYLO source target runtime is absent at an older package/template "
                     "generation; update package template/runtime/inventory atomically")
             raise TaskWorkspaceError(
-                "Juno source target runtime is absent; update package template/runtime/inventory "
+                "YYLO source target runtime is absent; update package template/runtime/inventory "
                 "atomically instead of runtime bootstrap")
         inventory_bytes = target_blob(repository, target_sha, MANAGED_INVENTORY_PATH)
         if inventory_bytes is None:
@@ -6158,17 +6158,17 @@ def _runtime_prior_state(controller: Path, repository: Path, target_sha: str,
     )
     if source_repository:
         if source != prior:
-            raise TaskWorkspaceError("Juno source target template/runtime identity is inconsistent")
+            raise TaskWorkspaceError("YYLO source target template/runtime identity is inconsistent")
         if not inventory_valid or package.get("version") != runtime_package_version:
             raise TaskWorkspaceError(
-                "Juno source target runtime is customized or lacks exact "
+                "YYLO source target runtime is customized or lacks exact "
                 "package/source/inventory provenance; refusing bootstrap")
         if not semver_precedes(runtime_package_version, recovery_package_version):
             raise TaskWorkspaceError(
-                "Juno source target generation is not older than the recovery package; upgrade "
+                "YYLO source target generation is not older than the recovery package; upgrade "
                 "or rebind the controller package/runtime to match the target")
         raise TaskWorkspaceError(
-            "Juno source target runtime is stale; update package template/runtime/inventory "
+            "YYLO source target runtime is stale; update package template/runtime/inventory "
             "atomically instead of runtime bootstrap")
     if not inventory_valid:
         if inventory_bytes is None:

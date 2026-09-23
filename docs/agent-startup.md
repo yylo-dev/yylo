@@ -1,7 +1,7 @@
 # Workspace-aware agent startup
 
 Agent startup distinguishes an ordinary directory from an initialized or
-registered Juno workspace before dispatching controller-owned preflight.
+registered YYLO workspace before dispatching controller-owned preflight.
 
 - **Ordinary directory or container parent:** generic agent behavior. No child
   directory search, controller creation, controller dependency checks, default

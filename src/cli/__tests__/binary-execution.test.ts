@@ -643,7 +643,7 @@ exit 1
         const after = await digestTree();
 
         expect(result.exitCode).not.toBe(0);
-        expect(result.all).toContain('Legacy Juno 2.0 lifecycle/controllerWorkspace config');
+        expect(result.all).toContain('Legacy YYLO 2.0 lifecycle/controllerWorkspace config');
         expect(result.all).not.toMatch(/✓|Force updated|dependencies force updated|Managed assets:/);
         expect(await fs.pathExists(requirementMarker)).toBe(false);
         expect(after).toBe(before);

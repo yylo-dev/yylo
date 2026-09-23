@@ -61,7 +61,7 @@ export class JunoLogger {
     this.logFilePath = path.join(this.logDirectory, logFileName);
 
     // Initialize log file with header
-    const header = `# Juno-Task TypeScript Log - Started ${new Date().toISOString()}\n`;
+    const header = `# YYLO TypeScript Log - Started ${new Date().toISOString()}\n`;
     await fs.writeFile(this.logFilePath, header);
   }
 

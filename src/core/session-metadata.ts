@@ -45,7 +45,7 @@ export function resolveJunoProjectStateLocation(
   env: NodeJS.ProcessEnv = process.env,
 ): JunoProjectStateLocation {
   if (!PROJECT_STATE_KIND_PATTERN.test(stateKind)) {
-    throw new Error(`Invalid Juno project-state kind: ${stateKind}`);
+    throw new Error(`Invalid YYLO project-state kind: ${stateKind}`);
   }
 
   const canonicalWorkingDirectory = canonicalPath(workingDirectory);

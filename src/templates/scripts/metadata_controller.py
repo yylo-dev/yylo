@@ -256,7 +256,7 @@ def reviewed_policies_from_sources(
                 or bundle.get("operation") != "generate-policy"
                 or bundle.get("outcome") != "generated_from_reviewed_answers"
                 or not isinstance(bundle.get("policies"), dict)):
-            raise BoundaryError("policy bundle is not a reviewed Juno migration policy bundle")
+            raise BoundaryError("policy bundle is not a reviewed YYLO migration policy bundle")
         policies = bundle["policies"]
         if set(policies) != {"metadata_controller", "task_workspace", "integration_workspace", "risk"}:
             raise BoundaryError("policy bundle must contain exactly metadata_controller, task_workspace, integration_workspace, and risk")

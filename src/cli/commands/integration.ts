@@ -167,7 +167,7 @@ export function configureIntegrationCommand(
     .action((options: { targetSha?: string }) => invoke('runtime-doctor', options));
   integration
     .command('runtime-adopt-source')
-    .description('Build and atomically adopt one exact unpublished Juno source generation')
+    .description('Build and atomically adopt one exact unpublished YYLO source generation')
     .requiredOption('--previous-sha <sha>', 'Exact currently admitted target generation')
     .requiredOption('--target-sha <sha>', 'Exact source target generation to adopt')
     .requiredOption('--install-prefix <path>', 'Fresh non-Git package installation prefix')

@@ -433,7 +433,7 @@ export class ManagedProjectAssets {
       if (projectConfig?.lifecycle !== undefined ||
           (controllerWorkspace !== undefined && !metadataOnlyController)) {
         throw new Error(
-          'Legacy Juno 2.0 lifecycle/controllerWorkspace config requires the reviewed 2.1 ' +
+          'Legacy YYLO 2.0 lifecycle/controllerWorkspace config requires the reviewed 2.1 ' +
             'migration flow. Run `yy migrate inventory`, generate the owner-reviewed policy, ' +
             'then apply and verify `yy migrate evacuation-*` in a disposable worktree before ' +
             'updating managed assets.',
@@ -553,7 +553,7 @@ export class ManagedProjectAssets {
       if (projectConfig?.lifecycle !== undefined ||
           (controllerWorkspace !== undefined && !metadataOnlyController)) {
         throw new Error(
-          'Legacy Juno 2.0 lifecycle/controllerWorkspace config requires the reviewed 2.1 ' +
+          'Legacy YYLO 2.0 lifecycle/controllerWorkspace config requires the reviewed 2.1 ' +
             'migration flow. Run `yy migrate inventory`, generate the owner-reviewed policy, ' +
             'then apply and verify `yy migrate evacuation-*` in a disposable worktree before ' +
             'updating managed assets.',
@@ -881,7 +881,7 @@ export class ManagedProjectAssets {
     if (projectConfig?.lifecycle !== undefined ||
         (controllerWorkspace !== undefined && !metadataOnlyController)) {
       throw new Error(
-        'Legacy Juno 2.0 lifecycle/controllerWorkspace config requires the reviewed 2.1 ' +
+        'Legacy YYLO 2.0 lifecycle/controllerWorkspace config requires the reviewed 2.1 ' +
           'migration flow. Run `yy migrate inventory`, generate the owner-reviewed policy, ' +
           'then apply and verify `yy migrate evacuation-*` in a disposable worktree before ' +
           'updating managed assets.',
