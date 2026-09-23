@@ -117,7 +117,7 @@ function findResolver(start: string): string | null {
     const candidate = path.join(cursor, '.juno_task', 'scripts', 'controller_resolver.py');
     if (existsSync(candidate)) return candidate;
     const parent = path.dirname(cursor);
-    if (parent === cursor) return null;
+    if (existsSync(path.join(cursor, '.git')) || parent === cursor) return null;
     cursor = parent;
   }
 }
