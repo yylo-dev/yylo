@@ -12,7 +12,7 @@ describe('kanban wrapper runtime selection', () => {
   let projectRoot: string;
 
   beforeEach(async () => {
-    projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'kanban-wrapper-runtime-'));
+    projectRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'kanban-wrapper-runtime-')));
 
     const scriptsDir = path.join(projectRoot, '.juno_task', 'scripts');
     const venvBin = path.join(projectRoot, '.venv_juno', 'bin');
