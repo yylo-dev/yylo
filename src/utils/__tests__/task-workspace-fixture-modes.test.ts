@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -264,6 +264,42 @@ describe('task-workspace supported profiler and runner', () => {
       }
     }
   }, 10_000);
+
+  it.runIf(process.platform === 'darwin')('never signals an unrelated holder of a shared or recycled socket identifier', async () => {
+    const root = temporaryDirectory();
+    const receipt = path.join(root, 'foreign-holder.json');
+    const victim = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], {
+      detached: true, stdio: 'ignore',
+    });
+    await new Promise<void>((resolve, reject) => { victim.once('spawn', resolve); victim.once('error', reject); });
+    try {
+      const bin = path.join(root, 'bin');
+      fs.mkdirSync(bin);
+      // Simulate lsof observing a descriptor recycled since capture: it now
+      // names a live process outside this runner's owned descendant closure.
+      fs.writeFileSync(path.join(bin, 'lsof'), [
+        '#!/bin/sh',
+        'case " $* " in',
+        `  *' -U '*) printf 'node ${victim.pid} user 1u unix 0xfeedbeef 0t0 ->0xcafe\\n';;`,
+        "  *) printf 'p1\\nf10\\nn->0xfeedbeef\\n';;",
+        'esac',
+      ].join('\n'), { mode: 0o755 });
+      const result = spawnSync(process.execPath, [runner, '--mode', 'seeded', '--receipt', receipt,
+        '--command', process.execPath, '--command-arg', '-e', '--command-arg', 'setTimeout(() => {}, 150)'], {
+        cwd: path.join(repository, 'juno-code'), encoding: 'utf8', timeout: 10_000,
+        env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` },
+      });
+      expect(result.status).not.toBe(0);
+      expect(() => process.kill(victim.pid!, 0)).not.toThrow();
+      const value = JSON.parse(fs.readFileSync(receipt, 'utf8'));
+      expect(value.eligible).toBe(false);
+      expect(value.processes).toEqual({ settled: false, surviving: ['containment:unavailable_for_arbitrary_command'] });
+    } finally {
+      const exited = new Promise<void>((resolve) => victim.once('exit', () => resolve()));
+      victim.kill('SIGKILL');
+      await exited;
+    }
+  }, 15_000);
 
   it('finalizes asynchronous launch failures promptly with an exact terminal receipt', () => {
     const root = temporaryDirectory();

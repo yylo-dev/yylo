@@ -631,7 +631,7 @@ describe('ypl wrapper', () => {
   });
 
   it('keeps fake-node wrapper assertions compatible with the runtime version probe', async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'juno-compatible-node-wrapper-'));
+    const tempDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'juno-compatible-node-wrapper-')));
     try {
       const binDir = path.join(tempDir, 'bin');
       const fakeBin = path.join(tempDir, 'fake-bin');
@@ -650,6 +650,30 @@ describe('ypl wrapper', () => {
       });
       expect(result.exitCode).toBe(0);
       expect(result.stdout.split('\n')).toEqual([path.join(binDir, 'cli.mjs'), '--version']);
+    } finally {
+      await fs.remove(tempDir);
+    }
+  });
+
+  it('does not shadow caller launchers with the compatible ambient Node bin directory', async () => {
+    const tempDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'yylo-node-path-')));
+    try {
+      const binDir = path.join(tempDir, 'selected');
+      const nodeDir = path.join(tempDir, 'node-bin');
+      await Promise.all([binDir, nodeDir].map((directory) => fs.ensureDir(directory)));
+      const wrapper = path.join(binDir, 'yylo.sh');
+      await fs.copy(YYLO_SOURCE, wrapper);
+      await fs.chmod(wrapper, 0o755);
+      await fs.writeFile(path.join(binDir, 'cli.mjs'), [
+        "import { execFileSync } from 'node:child_process';",
+        "console.log(JSON.stringify({path: process.env.PATH, feedback: execFileSync('feedback-yylo', {encoding: 'utf8'}).trim()}));",
+      ].join('\n'));
+      await fs.symlink(process.execPath, path.join(nodeDir, 'node'));
+      await fs.writeFile(path.join(binDir, 'feedback-yylo'), '#!/bin/sh\nprintf selected', { mode: 0o755 });
+      await fs.writeFile(path.join(nodeDir, 'feedback-yylo'), '#!/bin/sh\nprintf foreign-global', { mode: 0o755 });
+      const callerPath = `${binDir}:${nodeDir}:${process.env.PATH}`;
+      const result = await execa(wrapper, ['--version'], { cwd: tempDir, env: { PATH: callerPath } });
+      expect(JSON.parse(result.stdout)).toEqual({ path: callerPath, feedback: 'selected' });
     } finally {
       await fs.remove(tempDir);
     }

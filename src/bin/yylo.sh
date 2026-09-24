@@ -161,6 +161,13 @@ establish_node_contract() {
     node_dir="$(cd "$(dirname "$YYLO_NODE_EXECUTABLE")" && pwd -P)"
     YYLO_NODE_EXECUTABLE="$node_dir/$(basename "$YYLO_NODE_EXECUTABLE")"
     export YYLO_NODE_EXECUTABLE
+    # A compatible ambient Node is already the first Node on PATH. Moving its
+    # whole bin directory ahead of caller selectors also shadows yy/ypl and
+    # auxiliary package launchers with an unrelated global installation.
+    # Only an actual fallback Node selection needs PATH promotion.
+    if [ "$(command -v node 2>/dev/null || true)" -ef "$YYLO_NODE_EXECUTABLE" ]; then
+        return
+    fi
     IFS=: read -r -a path_entries <<< "$PATH"
     for entry in "${path_entries[@]}"; do
         [ -n "$entry" ] || continue
