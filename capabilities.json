@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "packageId": "yylo",
-  "sourceVersion": "0.2.9",
+  "sourceVersion": "0.2.10",
   "evidenceDate": "2026-09-14",
   "prerequisites": "Node.js 20.10+, npm, Git; install your chosen coding agent and configure provider credentials separately.",
   "releases": [

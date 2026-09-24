@@ -38,7 +38,7 @@ describe('ledger delegate', () => {
     const metadata = JSON.parse(await readFile(path.resolve('package.json'), 'utf8'));
     const lock = JSON.parse(await readFile(path.resolve('package-lock.json'), 'utf8'));
     const policy = await readFile(path.resolve('src/templates/scripts/juno-toolchain-policy.sh'), 'utf8');
-    expect(metadata.version).toBe('0.2.9');
+    expect(metadata.version).toBe('0.2.10');
     expect(lock.version).toBe(metadata.version);
     expect(lock.packages[''].version).toBe(metadata.version);
     expect(metadata.yyloLedger.version).toBe(LEDGER_VERSION_RANGE);
