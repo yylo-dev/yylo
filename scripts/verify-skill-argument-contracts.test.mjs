@@ -14,6 +14,8 @@ function fixture(t) {
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   fs.cpSync(path.join(source, 'skills'), path.join(dir, 'skills'), { recursive: true });
   fs.copyFileSync(metadata, path.join(dir, 'metadata.json'));
+  fs.copyFileSync(path.join(source, 'skills-manifest.json'), path.join(dir, 'skills-manifest.json'));
+  fs.copyFileSync(path.join(source, 'VERSION'), path.join(dir, 'VERSION'));
   return { dir, meta: path.join(dir, 'metadata.json') };
 }
 function changeMetadata(meta, change) {
@@ -51,6 +53,31 @@ test('empty metadata, unsupported schema and wrong counts fail', t => {
   fs.copyFileSync(metadata, meta);
   changeMetadata(meta, data => { data.skills['benchmark-yylo'].placeholders.$ARGUMENTS = 2; });
   assert.throws(() => verifySkillArguments(dir, meta), /expected 2, got 1/);
+});
+test('manifest is mandatory; no fallback to a generated requirements list', t => {
+  const { dir, meta } = fixture(t);
+  fs.unlinkSync(path.join(dir, 'skills-manifest.json'));
+  assert.throws(() => verifySkillArguments(dir, meta), /Missing or invalid skills release manifest/);
+});
+test('unsupported release contract and incompatible version fail explicitly', t => {
+  const { dir, meta } = fixture(t);
+  changeMetadata(path.join(dir, 'skills-manifest.json'), data => {
+    data.schemaVersion = 2;
+    data.skills['benchmark-yylo'].contractVersion = 99;
+    data.skills['benchmark-yylo'].semantics = 'discard-request';
+    data.sourceVersion = '2.0.3';
+  });
+  fs.writeFileSync(path.join(dir, 'VERSION'), '2.0.3\n');
+  assert.throws(() => verifySkillArguments(dir, meta), error =>
+    error.message.includes('unsupported skills release manifest contract')
+    && error.message.includes('benchmark-yylo: unsupported')
+    && error.message.includes('invocation semantics mismatch')
+    && error.message.includes('CLI requires ^2.0.4'));
+});
+test('manifest cannot omit a requirement even when source and metadata agree', t => {
+  const { dir, meta } = fixture(t);
+  changeMetadata(path.join(dir, 'skills-manifest.json'), data => delete data.skills['benchmark-yylo']);
+  assert.throws(() => verifySkillArguments(dir, meta), /release manifest: missing benchmark-yylo/);
 });
 test('unsafe skill links and missing skill files fail', t => {
   const { dir, meta } = fixture(t);

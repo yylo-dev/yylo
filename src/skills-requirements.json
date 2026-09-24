@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "manifestSchemaVersions": [1],
+  "contractVersions": [1],
+  "additionalSkills": "reject",
+  "required": {
+    "artifact-yylo": "complete-request",
+    "benchmark-yylo": "complete-request",
+    "ledger-tasks-yylo": "complete-request",
+    "plan-ledger-tasks-yylo": "complete-request",
+    "ralph-loop-yylo": "complete-assigned-request",
+    "understand-project-yylo": "structured-main-task-constraints-and-complete-request",
+    "wiki-yylo": "complete-request",
+    "workflow-yylo": "complete-request"
+  }
+}

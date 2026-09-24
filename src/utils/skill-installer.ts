@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { promisify } from 'node:util';
 import semver from 'semver';
 import packageMetadata from '../../package.json';
+import skillRequirements from '../skills-requirements.json';
 import { assertSafeManagedWritePath, lstatIfPresent } from './managed-update-transaction.js';
 
 interface SkillGroup {
@@ -64,16 +65,7 @@ export class SkillInstaller {
   }
 
   static readonly REPOSITORY = 'https://github.com/yylo-dev/yylo-skills.git';
-  static readonly SKILLS = [
-    'artifact-yylo',
-    'benchmark-yylo',
-    'ledger-tasks-yylo',
-    'plan-ledger-tasks-yylo',
-    'ralph-loop-yylo',
-    'understand-project-yylo',
-    'wiki-yylo',
-    'workflow-yylo',
-  ] as const;
+  static readonly SKILLS: readonly string[] = Object.freeze(Object.keys(skillRequirements.required).sort());
 
   private static readonly LEGACY_SKILLS = [
     'kanban-workflow',
