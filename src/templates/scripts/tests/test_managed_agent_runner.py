@@ -164,8 +164,17 @@ else:
     def test_process_instance_binds_pid_to_start_time(self):
         identity = runner.process_instance(os.getpid())
         self.assertEqual(identity["pid"], os.getpid())
-        self.assertTrue(identity["observable"])
-        self.assertIsInstance(identity["start_ticks"], int)
+        if sys.platform == "linux":
+            self.assertTrue(identity["observable"])
+            self.assertIsInstance(identity["start_ticks"], int)
+        else:
+            self.assertEqual(identity, {"pid": os.getpid(), "start_ticks": None, "observable": False})
+        # Exercise the /proc parser independently of the host, including a comm
+        # with spaces/parentheses. Non-/proc hosts must stay unobservable.
+        stat = f'{os.getpid()} (fixture (worker)) ' + ' '.join(['0'] * 19 + ['12345'])
+        with mock.patch.object(Path, 'read_text', return_value=stat):
+            self.assertEqual(runner.process_instance(os.getpid()),
+                             {"pid": os.getpid(), "start_ticks": 12345, "observable": True})
         unknown = runner.process_instance(999999999)
         self.assertEqual(unknown, {"pid": 999999999, "start_ticks": None,
                                   "observable": False})
@@ -579,6 +588,16 @@ print(json.dumps({'path':str(pathlib.Path.cwd().resolve()),'role':'controller',
         self.assertEqual("18.15.0", node["path_node_version_before"])
         self.assertNotEqual("18.15.0", node["version"])
         self.assertIn("PATH", launch["environment_contract"]["explicit_key_names"])
+
+    def test_compatible_ambient_node_preserves_selected_launcher_precedence(self):
+        inherited = self.env()
+        inherited["PATH"] = os.pathsep.join((str(self.bin), os.environ["PATH"]))
+        with mock.patch.dict(os.environ, inherited, clear=True):
+            contract, effective_path = runner.managed_node_contract()
+        self.assertEqual(effective_path, inherited["PATH"])
+        self.assertEqual(Path(contract["executable"]).resolve(),
+                         Path(shutil.which("node", path=effective_path)).resolve())
+        self.assertEqual(shutil.which("yy", path=effective_path), str(self.bin / "yy"))
 
     def test_unsupported_canonical_node_fails_before_managed_child_with_diagnostics(self):
         out = self.tmp / "unsupported-node"
