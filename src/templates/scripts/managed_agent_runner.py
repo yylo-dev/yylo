@@ -980,10 +980,16 @@ def managed_node_contract() -> tuple[dict[str, str], str]:
         except OSError:
             pass
         normalized.append(entry)
+    # Do not promote Node's entire global bin directory when the selected Node
+    # is already the ambient executable: that shadows the caller's yy/yylo and
+    # other explicitly selected launchers. Stale-Node fallback still promotes it.
+    effective_path = (os.environ.get("PATH", "")
+                      if path_node and Path(path_node).resolve() == Path(canonical).resolve()
+                      else os.pathsep.join(normalized))
     return ({"executable": canonical, "version": canonical_version, "source": source,
              "yy_executable": str(Path(yy_executable).absolute()),
              "path_node_before": path_node or "not found", "path_node_version_before": path_version,
-             "required_version": ">=20.10"}, os.pathsep.join(normalized))
+             "required_version": ">=20.10"}, effective_path)
 
 
 def clean_environment(args: argparse.Namespace, capture: Path, metadata: Path,
