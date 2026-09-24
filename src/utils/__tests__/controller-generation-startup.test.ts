@@ -27,7 +27,7 @@ describe('operation-specific first-use generation dispatch', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     oldCache = process.env.npm_config_cache;
-    root = await fs.mkdtemp(path.join(os.tmpdir(), 'generation-startup-'));
+    root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'generation-startup-')));
     controller = path.join(root, 'controller'); candidate = path.join(root, 'candidate');
     const previous = path.join(root, 'previous');
     for (const pkg of [candidate, previous]) {

@@ -180,53 +180,6 @@ async function discoverOwnedProcesses(ownerToken, known) {
   return { rows: rememberOwnedDescendants(known, inventory.rows, ownerToken), error: null };
 }
 
-async function inheritedPipeTokens(child) {
-  if (process.platform === 'win32') return [];
-  const fds = [child?.stdout?._handle?.fd, child?.stderr?._handle?.fd]
-    .filter((fd) => Number.isInteger(fd));
-  if (!fds.length) return [];
-  if (process.platform === 'linux') {
-    return [...new Set(fds.flatMap((fd) => {
-      try { return [fs.readlinkSync(`/proc/self/fd/${fd}`)]; } catch { return []; }
-    }).filter((token) => token.startsWith('pipe:') || token.startsWith('socket:')))];
-  }
-  const inventory = await captureBounded('lsof', ['-nP', '-a', '-p', String(process.pid),
-    '-d', fds.join(','), '-Fn']);
-  if (!inventory.ok) return [];
-  return [...new Set(inventory.output.match(/0x[0-9a-f]+/gi) ?? [])];
-}
-
-async function rememberInheritedPipeHolders(known, tokens) {
-  if (process.platform === 'win32' || !tokens.length) return;
-  const holderPids = new Set();
-  if (process.platform === 'linux') {
-    for (const name of fs.readdirSync('/proc')) {
-      if (!/^\d+$/.test(name)) continue;
-      try {
-        const descriptors = fs.readdirSync(`/proc/${name}/fd`);
-        if (descriptors.some((fd) => {
-          try { return tokens.includes(fs.readlinkSync(`/proc/${name}/fd/${fd}`)); } catch { return false; }
-        })) holderPids.add(Number(name));
-      } catch { /* process exited or is not inspectable */ }
-    }
-  } else {
-    const inventory = await captureBounded('lsof', ['-nP', '-U'], 2_000);
-    if (!inventory.ok) return;
-    for (const line of inventory.output.split('\n')) {
-      if (!tokens.some((token) => line.includes(token))) continue;
-      const pid = Number(line.trim().split(/\s+/)[1]);
-      if (Number.isInteger(pid)) holderPids.add(pid);
-    }
-  }
-  const processes = await processInventory();
-  if (processes.error) return;
-  for (const row of processes.rows) {
-    if (holderPids.has(row.pid) && row.pid !== process.pid) {
-      known.set(row.pid, { pid: row.pid, creation_id: row.creation_id });
-    }
-  }
-}
-
 function signalOwnedGroup(child, signal) {
   if (!Number.isInteger(child?.pid) || child.pid <= 0) return;
   try {
@@ -306,7 +259,7 @@ async function signalVerifiedOwned(ownerToken, known, signal) {
   return discovered;
 }
 
-async function reconcileOwnedProcesses(child, ownerToken, known, pipeTokens = []) {
+async function reconcileOwnedProcesses(child, ownerToken, known) {
   const destroyPipes = () => {
     child?.stdout?.destroy();
     child?.stderr?.destroy();
@@ -315,7 +268,11 @@ async function reconcileOwnedProcesses(child, ownerToken, known, pipeTokens = []
     destroyPipes();
     return { settled: true, surviving: [] };
   }
-  await rememberInheritedPipeHolders(known, pipeTokens);
+  // Shared/recycled pipe and Unix socket identifiers are not process ownership.
+  // Promoting their holders can adopt the invoking test runner and its siblings
+  // (macOS lsof observes descriptors asynchronously after the child exits).
+  // Only observed ancestry and the exact per-run marker authorize signalling;
+  // arbitrary commands still unconditionally refuse containment below.
   const verify = async () => {
     const discovered = await discoverOwnedProcesses(ownerToken, known);
     const groupIdentityVerified = discovered.rows.some((row) => row.pgid === child.pid);
@@ -401,7 +358,6 @@ async function runOwned(command, args, timeoutMs, fixtureMode, outputLimit = 262
   }
   child.stdout?.on('data', append);
   child.stderr?.on('data', append);
-  const pipeTokensPromise = inheritedPipeTokens(child);
   if (Number.isInteger(child.pid) && child.pid > 0) {
     known.set(child.pid, { pid: child.pid, creation_id: '' });
     sampleInventory();
@@ -448,7 +404,7 @@ async function runOwned(command, args, timeoutMs, fixtureMode, outputLimit = 262
     if (inventoryTimer) clearInterval(inventoryTimer);
     if (inventoriesInFlight.size) await Promise.allSettled([...inventoriesInFlight]);
   }
-  const reconciliation = await reconcileOwnedProcesses(child, ownerToken, known, await pipeTokensPromise);
+  const reconciliation = await reconcileOwnedProcesses(child, ownerToken, known);
   if (escalationTimer) clearTimeout(escalationTimer);
   const arbitraryCommandUncontained = dependencies.arbitraryCommand === true
     && Number.isInteger(child?.pid) && child.pid > 0;
