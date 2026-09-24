@@ -2,18 +2,24 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import semver from 'semver';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-// Independent CLI requirements. The release manifest gate will supersede this
-// inventory; never infer requirements from the files being validated.
-const expected = [
-  'artifact-yylo', 'benchmark-yylo', 'ledger-tasks-yylo',
-  'plan-ledger-tasks-yylo', 'ralph-loop-yylo', 'understand-project-yylo',
-  'wiki-yylo', 'workflow-yylo',
-];
+const requirementsPath = path.join(root, 'src/skills-requirements.json');
 
-export function verifySkillArguments(canonicalRoot, metadata) {
+export function verifySkillArguments(canonicalRoot, metadata, requirementsFile = requirementsPath) {
   const errors = [];
+  const load = (file, label) => {
+    try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+    catch { throw new Error(`SKILLS_CONTRACT_MISMATCH\nMissing or invalid ${label}: ${file}`); }
+  };
+  const requirements = load(requirementsFile, 'CLI requirements');
+  if (requirements.schemaVersion !== 1 || requirements.additionalSkills !== 'reject'
+      || !requirements.required || !Array.isArray(requirements.manifestSchemaVersions)
+      || !Array.isArray(requirements.contractVersions)) {
+    throw new Error('SKILLS_CONTRACT_MISMATCH\nUnsupported CLI requirements contract');
+  }
+  const expected = Object.keys(requirements.required).sort();
   const mismatch = (label, names) => {
     for (const name of expected.filter(name => !names.includes(name))) errors.push(`${label}: missing ${name}`);
     for (const name of names.filter(name => !expected.includes(name))) errors.push(`${label}: unexpected ${name}`);
@@ -27,7 +33,24 @@ export function verifySkillArguments(canonicalRoot, metadata) {
   try { entries = fs.readdirSync(path.join(canonicalRoot, 'skills'), { withFileTypes: true }); }
   catch { throw new Error(`SKILLS_CONTRACT_MISMATCH\nMissing skills source: ${canonicalRoot}`); }
   mismatch('skills source', entries.map(entry => entry.name));
+  const manifest = load(path.join(canonicalRoot, 'skills-manifest.json'), 'skills release manifest');
+  if (manifest.packageId !== 'yylo-skills' || !requirements.manifestSchemaVersions.includes(manifest.schemaVersion)
+      || manifest.additionalSkills !== 'reject') errors.push('unsupported skills release manifest contract');
+  let version;
+  try { version = fs.readFileSync(path.join(canonicalRoot, 'VERSION'), 'utf8').trim(); }
+  catch { errors.push('missing skills VERSION'); }
+  const range = load(path.join(root, 'package.json'), 'CLI package').yyloSkills.version;
+  if (manifest.sourceVersion !== version || !semver.valid(version) || !semver.satisfies(version, range)) {
+    errors.push(`skills version mismatch: selected ${version}, manifest ${manifest.sourceVersion}, CLI requires ${range}`);
+  }
+  mismatch('release manifest', Object.keys(manifest.skills ?? {}));
   for (const slug of expected) {
+    const released = manifest.skills?.[slug];
+    const invocation = contract.skills?.[slug];
+    if (!released || !requirements.contractVersions.includes(released.contractVersion)) errors.push(`${slug}: unsupported or missing invocation contract version`);
+    if (released?.semantics !== requirements.required[slug] || invocation?.semantics !== requirements.required[slug]) errors.push(`${slug}: invocation semantics mismatch`);
+    const ordered = value => JSON.stringify(Object.entries(value ?? {}).sort(([a], [b]) => a.localeCompare(b)));
+    if (ordered(released?.placeholders) !== ordered(invocation?.placeholders)) errors.push(`${slug}: release/invocation placeholder metadata mismatch`);
     const entry = entries.find(entry => entry.name === slug);
     if (!entry) continue;
     if (!entry.isDirectory()) { errors.push(`${slug}: expected a real skill directory`); continue; }
