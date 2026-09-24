@@ -9,6 +9,7 @@ import { verifySkillArguments } from './verify-skill-argument-contracts.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const metadata = path.join(root, 'src/templates/skills/argument-contracts.json');
 const source = path.resolve(root, '../yylo-skills');
+const requiredSkillsRange = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).yyloSkills.version;
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yylo-skill-contract-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -72,7 +73,7 @@ test('unsupported release contract and incompatible version fail explicitly', t 
     error.message.includes('unsupported skills release manifest contract')
     && error.message.includes('benchmark-yylo: unsupported')
     && error.message.includes('invocation semantics mismatch')
-    && error.message.includes('CLI requires ^2.0.4'));
+    && error.message.includes(`CLI requires ${requiredSkillsRange}`));
 });
 test('manifest cannot omit a requirement even when source and metadata agree', t => {
   const { dir, meta } = fixture(t);
