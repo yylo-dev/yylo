@@ -70,9 +70,9 @@ describe('built yy/yylo benchmark delegate', () => {
     expect(JSON.parse(await readFile(fixture.record, 'utf8')).argv).toEqual(['--help']);
   });
 
-  it('preserves args including dry-run, stdio, cwd, environment, and success status', async () => {
+  it('preserves thin-runner args, stdio, cwd, environment, and success status', async () => {
     const fixture = await makeFixture();
-    const args = ['benchmark', 'plan', '--task', 'T1', '--models', ':mini,:sol', '--dry-run'];
+    const args = ['benchmark', 'run', '--case', '/cases/T 1', '--treatment', '/treatments/a.json', '--output', '/runs/new'];
     const result = await execa(wrapper, args, { cwd: fixture.root, env: fixture.env, reject: false });
     const observed = JSON.parse(await readFile(fixture.record, 'utf8'));
     expect(result.exitCode).toBe(0);
@@ -115,14 +115,14 @@ describe('built yy/yylo benchmark delegate', () => {
   it('fails closed when the executable is missing or incompatible', async () => {
     const missingRoot = await mkdtemp(path.join(os.tmpdir(), 'yylo-benchmark-missing-'));
     fixtures.push(missingRoot);
-    const missing = await execa(process.execPath, [path.join(projectRoot, 'dist/bin/cli.mjs'), 'benchmark', 'plan'], {
+    const missing = await execa(process.execPath, [path.join(projectRoot, 'dist/bin/cli.mjs'), 'benchmark', 'case', 'draft'], {
       cwd: missingRoot, env: { ...process.env, PATH: missingRoot }, reject: false,
     });
     expect(missing.exitCode).toBe(127);
     expect(missing.stderr).toContain('independently installed');
 
-    const incompatible = await makeFixture('yylo-benchmark 99.0.0');
-    const rejected = await execa(wrapper, ['benchmark', 'plan'], {
+    const incompatible = await makeFixture('yylo-benchmark 0.1.3');
+    const rejected = await execa(wrapper, ['benchmark', 'run'], {
       cwd: incompatible.root, env: incompatible.env, reject: false,
     });
     expect(rejected.exitCode).toBe(69);

@@ -2,10 +2,19 @@
 
 ## Unreleased
 
-### 0.2.7 source baseline
+### 0.2.10 source baseline
 
-The working package currently declares this version. The changes below are
-unreleased source changes, not evidence of publication or an installed upgrade.
+- Require independently installed `@yylo/benchmark@0.2.0` for the breaking thin
+  runner lifecycle (case, run, evaluate, report, disqualify). Old 0.1.x executables
+  are rejected before dispatch; `yy benchmark` remains a transparent delegate.
+- Require canonical skills `^2.1.0`, including updated Benchmark preparation,
+  trusted-host limits, workflow-prefix comparisons and independent evaluation.
+  CLI installation does not overwrite installed skills.
+
+These are unreleased source changes, not evidence of publication or an installed
+upgrade. Benchmark and skills require separately authorized releases.
+
+### Earlier 0.2.7 source changes
 
 - **Breaking: external implementation, deterministic delivery.** Autonomous task
   run/resume and implementation budget recovery refuse without dispatch. Agents

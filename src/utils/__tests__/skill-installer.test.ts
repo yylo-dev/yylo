@@ -50,8 +50,8 @@ describe('SkillInstaller remote acquisition', () => {
     if (command === 'git' && args.includes('ls-remote')) {
       return {
         stdout: args.includes('--refs')
-          ? ['a\trefs/tags/v1.0.0', 'b\trefs/tags/v2.0.4-rc.1', 'c\trefs/tags/v2.0.4'].join('\n') + '\n'
-          : 'c\trefs/tags/v2.0.4\n',
+          ? ['a\trefs/tags/v2.0.4', 'b\trefs/tags/v2.1.0-rc.1', 'c\trefs/tags/v2.1.0'].join('\n') + '\n'
+          : 'c\trefs/tags/v2.1.0\n',
         stderr: '',
       };
     }
@@ -102,9 +102,9 @@ describe('SkillInstaller remote acquisition', () => {
   });
 
   it('inspects independent skill receipts locally without claiming CLI-package ownership', async () => {
-    await SkillInstaller.installRemote(project, { version: '2.0.4' });
+    await SkillInstaller.installRemote(project, { version: '2.1.0' });
     runner.mockClear();
-    expect(await SkillInstaller.inspectGuidance(project)).toEqual({ coherent: true, version: 'v2.0.4', findings: [] });
+    expect(await SkillInstaller.inspectGuidance(project)).toEqual({ coherent: true, version: 'v2.1.0', findings: [] });
     const legacy = '.pi/skills/ralph-loop/references/implement.md';
     await fs.outputFile(path.join(project, legacy), 'Run yy merge arbiter run TASK_ID\nReviewer A then Reviewer B\n');
     const report = await SkillInstaller.inspectGuidance(project);
@@ -116,7 +116,7 @@ describe('SkillInstaller remote acquisition', () => {
   });
 
   it('detects retired nested instructions even when the independent receipt matches', async () => {
-    await SkillInstaller.installRemote(project, { version: '2.0.4' });
+    await SkillInstaller.installRemote(project, { version: '2.1.0' });
     const destination = '.claude/skills/ralph-loop-yylo/references/implement.md';
     await fs.outputFile(path.join(project, destination), 'yy merge drive TASK_ID\n');
     const receiptPath = path.join(project, '.juno_task/runtime/skills-install.json');
@@ -135,7 +135,7 @@ describe('SkillInstaller remote acquisition', () => {
   });
 
   it('reports modified, missing and unverified skills without replacing bytes', async () => {
-    await SkillInstaller.installRemote(project, { version: '2.0.4' });
+    await SkillInstaller.installRemote(project, { version: '2.1.0' });
     const root = '.pi/skills/ralph-loop-yylo';
     await fs.outputFile(path.join(project, root, 'references/local.md'), 'owner bytes');
     await fs.remove(path.join(project, '.agents/skills/wiki-yylo'));
@@ -183,11 +183,11 @@ describe('SkillInstaller remote acquisition', () => {
     expect(SkillInstaller.SKILLS).toEqual(SKILLS);
     expect(SkillInstaller.SKILLS).toHaveLength(8);
     const result = await SkillInstaller.installRemote(project);
-    expect(result).toEqual({ changed: true, version: 'v2.0.4', acquisition: 'npx' });
+    expect(result).toEqual({ changed: true, version: 'v2.1.0', acquisition: 'npx' });
     const npx = runner.mock.calls.find(([command]) => command === 'npx');
     expect(npx?.[1]).toEqual(expect.arrayContaining([
       '--yes', 'skills', 'add',
-      'https://github.com/yylo-dev/yylo-skills/tree/v2.0.4',
+      'https://github.com/yylo-dev/yylo-skills/tree/v2.1.0',
       '--copy', '--agent', 'codex', 'claude-code', 'pi',
       ...SKILLS,
     ]));
@@ -197,7 +197,7 @@ describe('SkillInstaller remote acquisition', () => {
     }
   });
 
-  it.each(['2.0.4', '2.0.5'])('normalizes compatible stable version %s and rejects prereleases', async (version) => {
+  it.each(['2.1.0', '2.1.1'])('normalizes compatible stable version %s and rejects prereleases', async (version) => {
     runner.mockImplementation(async (command, args, cwd) => {
       if (command === 'git' && args.includes('ls-remote')) {
         return { stdout: `abc\trefs/tags/v${version}\n`, stderr: '' };
@@ -217,10 +217,10 @@ describe('SkillInstaller remote acquisition', () => {
       if (command === 'npx') throw new Error('npx unavailable');
       return defaultRunner(command, args, cwd);
     });
-    const result = await SkillInstaller.installRemote(project, { version: 'v2.0.4' });
+    const result = await SkillInstaller.installRemote(project, { version: 'v2.1.0' });
     expect(result.acquisition).toBe('git');
     const clone = runner.mock.calls.find(([command, args]) => command === 'git' && args[0] === 'clone');
-    expect(clone?.[1]).toEqual(expect.arrayContaining(['--depth', '1', '--branch', 'v2.0.4', '--single-branch']));
+    expect(clone?.[1]).toEqual(expect.arrayContaining(['--depth', '1', '--branch', 'v2.1.0', '--single-branch']));
   });
 
   it('fails without destination mutation when both acquisition methods fail', async () => {
@@ -228,7 +228,7 @@ describe('SkillInstaller remote acquisition', () => {
       if (command === 'npx' || (command === 'git' && args[0] === 'clone')) throw new Error('offline');
       return defaultRunner(command, args, cwd);
     });
-    await expect(SkillInstaller.installRemote(project, { version: '2.0.4' }))
+    await expect(SkillInstaller.installRemote(project, { version: '2.1.0' }))
       .rejects.toThrow('Skill acquisition failed with npx');
     for (const group of GROUPS) expect(await fs.pathExists(path.join(project, group))).toBe(false);
   });
@@ -243,7 +243,7 @@ describe('SkillInstaller remote acquisition', () => {
       if (command === 'git' && args[0] === 'clone') throw new Error('fallback disabled');
       return defaultRunner(command, args, cwd);
     });
-    await expect(SkillInstaller.installRemote(project, { version: '2.0.4' }))
+    await expect(SkillInstaller.installRemote(project, { version: '2.1.0' }))
       .rejects.toThrow('not the canonical 8-skill set');
 
     runner.mockImplementation(async (command, args, cwd) => {
@@ -255,7 +255,7 @@ describe('SkillInstaller remote acquisition', () => {
       if (command === 'git' && args[0] === 'clone') throw new Error('fallback disabled');
       return defaultRunner(command, args, cwd);
     });
-    await expect(SkillInstaller.installRemote(project, { version: '2.0.4' }))
+    await expect(SkillInstaller.installRemote(project, { version: '2.1.0' }))
       .rejects.toThrow('symbolic link');
   });
 
@@ -310,7 +310,7 @@ describe('SkillInstaller remote acquisition', () => {
     await fs.outputFile(conflict, 'owner bytes\n');
     await fs.outputFile(path.join(project, '.agents/skills/unrelated/SKILL.md'), 'unrelated\n');
 
-    await expect(SkillInstaller.installRemote(project, { version: '2.0.4' }))
+    await expect(SkillInstaller.installRemote(project, { version: '2.1.0' }))
       .rejects.toThrow('Skill conflict at .pi/skills/understand-project-yylo');
     expect(await fs.pathExists(path.join(project, '.agents/skills/kanban-workflow'))).toBe(true);
     expect(await fs.pathExists(path.join(project, '.agents/skills/artifact-yylo'))).toBe(false);
@@ -322,7 +322,7 @@ describe('SkillInstaller remote acquisition', () => {
     await fs.outputFile(conflict, 'owner bytes\n');
     await fs.outputFile(unrelated, 'unrelated\n');
 
-    await SkillInstaller.installRemote(project, { version: '2.0.4', force: true });
+    await SkillInstaller.installRemote(project, { version: '2.1.0', force: true });
     expect(await fs.readFile(conflict, 'utf8')).toContain('name: understand-project-yylo');
     expect(await fs.readFile(unrelated, 'utf8')).toBe('unrelated\n');
     expect(await SkillInstaller.getInstallRecord(project)).toMatchObject({ skills: SKILLS });
@@ -330,7 +330,7 @@ describe('SkillInstaller remote acquisition', () => {
 
   it('retires only recorded byte-identical legacy installs', async () => {
     await createRecordedLegacyInstall();
-    const result = await SkillInstaller.installRemote(project, { version: '2.0.4' });
+    const result = await SkillInstaller.installRemote(project, { version: '2.1.0' });
     expect(result.warnings).toBeUndefined();
     for (const group of GROUPS) for (const skill of LEGACY) {
       expect(await fs.pathExists(path.join(project, group, skill))).toBe(false);
@@ -340,7 +340,7 @@ describe('SkillInstaller remote acquisition', () => {
   it('rolls back new installs and legacy retirement when record publication fails', async () => {
     await createRecordedLegacyInstall();
     vi.spyOn(fs, 'writeJson').mockRejectedValueOnce(new Error('record write failed'));
-    await expect(SkillInstaller.installRemote(project, { version: '2.0.4' }))
+    await expect(SkillInstaller.installRemote(project, { version: '2.1.0' }))
       .rejects.toThrow('record write failed');
     for (const group of GROUPS) {
       expect(await fs.pathExists(path.join(project, group, 'kanban-workflow/SKILL.md'))).toBe(true);
@@ -353,14 +353,14 @@ describe('SkillInstaller remote acquisition', () => {
     await createRecordedLegacyInstall();
     const customized = path.join(project, '.claude/skills/ralph-loop/SKILL.md');
     await fs.appendFile(customized, 'owner customization\n');
-    const result = await SkillInstaller.installRemote(project, { version: '2.0.4' });
+    const result = await SkillInstaller.installRemote(project, { version: '2.1.0' });
     expect(await fs.pathExists(customized)).toBe(true);
     expect(result.warnings).toContain('Preserved customized or unrecorded legacy skill at .claude/skills/ralph-loop');
 
     const second = await fs.mkdtemp(path.join(os.tmpdir(), 'yylo-unrecorded-'));
     try {
       await fs.outputFile(path.join(second, '.agents/skills/kanban-workflow/SKILL.md'), 'owner\n');
-      const unrecorded = await SkillInstaller.installRemote(second, { version: '2.0.4' });
+      const unrecorded = await SkillInstaller.installRemote(second, { version: '2.1.0' });
       expect(unrecorded.warnings).toContain('Preserved customized or unrecorded legacy skill at .agents/skills/kanban-workflow');
       expect(await fs.pathExists(path.join(second, '.agents/skills/kanban-workflow'))).toBe(true);
     } finally {
@@ -369,11 +369,11 @@ describe('SkillInstaller remote acquisition', () => {
   });
 
   it('keeps list and status inspection offline', async () => {
-    await SkillInstaller.installRemote(project, { version: '2.0.4' });
+    await SkillInstaller.installRemote(project, { version: '2.1.0' });
     runner.mockClear();
     expect(await SkillInstaller.needsUpdate(project)).toBe(false);
     expect((await SkillInstaller.listSkillGroups(project))[0]?.files).toHaveLength(SKILLS.length);
-    expect(await SkillInstaller.getInstallRecord(project)).toMatchObject({ version: 'v2.0.4' });
+    expect(await SkillInstaller.getInstallRecord(project)).toMatchObject({ version: 'v2.1.0' });
     expect(runner).not.toHaveBeenCalled();
     await fs.writeFile(path.join(project, '.agents/skills/ledger-tasks-yylo/SKILL.md'), 'changed\n');
     expect(await SkillInstaller.needsUpdate(project)).toBe(true);
@@ -400,7 +400,7 @@ describe('SkillInstaller remote acquisition', () => {
     runner.mockClear();
     await createSkillsCommand().parseAsync(['status'], { from: 'user' });
     const output = log.mock.calls.flat().join('\n');
-    expect(output).toContain('Required: ^2.0.4');
+    expect(output).toContain('Required: ^2.1.0');
     expect(output).toContain('incompatible-version');
     expect(output).toContain('retired-lifecycle');
     expect(output).toContain('without --force');
@@ -452,8 +452,8 @@ describe('SkillInstaller remote acquisition', () => {
   });
 
   it('requires the release declared by the CLI and rejects old or incompatible exact versions offline', async () => {
-    expect(SkillInstaller.VERSION_RANGE).toBe('^2.0.4');
-    for (const version of ['2.0.1', '2.0.2', '2.0.3', '1.0.0', '3.0.0']) {
+    expect(SkillInstaller.VERSION_RANGE).toBe('^2.1.0');
+    for (const version of ['2.0.1', '2.0.2', '2.0.3', '2.0.4', '2.0.9', '1.0.0', '3.0.0']) {
       await expect(SkillInstaller.installRemote(project, { version })).rejects.toThrow('is incompatible');
     }
     expect(runner).not.toHaveBeenCalled();
@@ -591,12 +591,12 @@ describe('SkillInstaller remote acquisition', () => {
   });
 
   it('creates Pi settings once and preserves user settings', async () => {
-    await SkillInstaller.installRemote(project, { version: '2.0.4' });
+    await SkillInstaller.installRemote(project, { version: '2.1.0' });
     expect(await fs.readJson(path.join(project, '.pi/settings.json')))
       .toEqual({ skills: ['.claude/skills'], quietStartup: true });
     const custom = { theme: 'dark', skills: ['/owner/skills'] };
     await fs.writeJson(path.join(project, '.pi/settings.json'), custom);
-    await SkillInstaller.installRemote(project, { version: '2.0.4', force: true });
+    await SkillInstaller.installRemote(project, { version: '2.1.0', force: true });
     expect(await fs.readJson(path.join(project, '.pi/settings.json'))).toEqual(custom);
   });
 });
