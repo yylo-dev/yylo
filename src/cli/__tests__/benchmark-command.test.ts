@@ -367,6 +367,15 @@ describe('benchmark delegate', () => {
     });
     expect(result.exitCode, result.stderr).toBe(0);
     expect(result.stdout).toContain('benchmark release artifact smoke passed');
+    const receipt = JSON.parse(result.stdout.trim().split('\n')[0]!);
+    expect(receipt).toMatchObject({
+      schema_version: 'yylo_benchmark_installed_thin_acceptance.v1',
+      benchmark_version: requiredBenchmarkVersion,
+      live_model_calls: 0, candidate_dispatch_count: 1, evaluator_dispatch_count: 1,
+      standalone_delegate_equal: true, process_fidelity: true, retired_commands_rejected: true,
+    });
+    expect(receipt.leakage.files_scanned).toBeGreaterThan(0);
+    expect(receipt.leakage.canaries_checked).toBeGreaterThan(0);
   }, 610_000);
 
   it('discovers only PATH executables and preserves argument order, cwd, and caller environment', async () => {
