@@ -38,8 +38,13 @@ describe('YYLO launch identity', () => {
     // canonical scoped package with one concrete exact SemVer (derived from
     // package.json, the active release truth) instead of pinning a frozen RC
     // that drifts on every release commit (OEeK82).
-    const packageVersion = JSON.parse(await fs.readFile(path.resolve('package.json'), 'utf8')).version as string;
-    expect(packageReadme).toContain(`npm install -g @yylo/cli@${packageVersion}`);
+    const metadata = JSON.parse(await fs.readFile(path.resolve('package.json'), 'utf8'));
+    expect(packageReadme).toContain(`npm install -g @yylo/cli@${metadata.version}`);
+    expect(packageReadme).toContain(`'@yylo/benchmark@${metadata.yyloBenchmark.version}'`);
+    expect(packageReadme).toContain(`skills \`${metadata.yyloSkills.version}\``);
+    expect(packageReadme).toContain('once published');
+    expect(packageReadme).toContain('once separately published');
+    expect(packageReadme).toContain('A source bump neither publishes these versions nor activates installed runtimes.');
     expect(packageReadme).not.toMatch(/npm install -g yylo(?:\s|`|$)/m);
     const releaseGuidance = [rootReadme, packageReadme, launchPost].join('\n');
     expect(releaseGuidance).not.toMatch(/npm install -g (?:juno-code|yylo)(?:\s|`|$)/m);
