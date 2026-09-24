@@ -6,6 +6,10 @@
       "semantics": "complete-request",
       "placeholders": { "$ARGUMENTS": 1 }
     },
+    "benchmark-yylo": {
+      "semantics": "complete-request",
+      "placeholders": { "$ARGUMENTS": 1 }
+    },
     "ledger-tasks-yylo": {
       "semantics": "complete-request",
       "placeholders": { "$ARGUMENTS": 1 }
