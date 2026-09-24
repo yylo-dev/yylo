@@ -367,6 +367,15 @@ describe('benchmark delegate', () => {
     });
     expect(result.exitCode, result.stderr).toBe(0);
     expect(result.stdout).toContain('benchmark release artifact smoke passed');
+    const receipt = JSON.parse(result.stdout.trim().split('\n')[0]!);
+    expect(receipt).toMatchObject({
+      schema_version: 'yylo_benchmark_installed_thin_acceptance.v1',
+      benchmark_version: requiredBenchmarkVersion,
+      live_model_calls: 0, candidate_dispatch_count: 1, evaluator_dispatch_count: 1,
+      standalone_delegate_equal: true, process_fidelity: true, retired_commands_rejected: true,
+    });
+    expect(receipt.leakage.files_scanned).toBeGreaterThan(0);
+    expect(receipt.leakage.canaries_checked).toBeGreaterThan(0);
   }, 610_000);
 
   it('discovers only PATH executables and preserves argument order, cwd, and caller environment', async () => {
@@ -380,7 +389,7 @@ describe('benchmark delegate', () => {
       DELEGATE_MARKER: 'exact value',
       YYLO_PREFLIGHT_ONLY: 'must-not-leak',
     };
-    const args = ['plan', '--task', 'T 1', '--models', ':mini,:sol', '--dry-run'];
+    const args = ['run', '--case', '/cases/T 1', '--treatment', '/treatments/a.json', '--output', '/runs/new'];
 
     const result = await invokeBenchmark(args, { cwd, env });
     const observed = JSON.parse(await readFile(record, 'utf8'));
@@ -396,7 +405,7 @@ describe('benchmark delegate', () => {
 
   it('returns the canonical executable nonzero status unchanged', async () => {
     const { root, bin, record } = await fixture();
-    const result = await invokeBenchmark(['run', '--dry-run'], {
+    const result = await invokeBenchmark(['run', '--case', '/cases/example'], {
       cwd: root,
       env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}`, FAKE_RECORD: record, FAKE_EXIT: '47' },
     });
@@ -410,7 +419,7 @@ describe('benchmark delegate', () => {
       PATH: `bin${path.delimiter}${process.env.PATH ?? ''}`,
       FAKE_RECORD: record,
     };
-    const result = await invokeBenchmark(['plan'], { cwd: root, env });
+    const result = await invokeBenchmark(['case', 'draft', '--ledger-task', 'T1'], { cwd: root, env });
     expect(result).toEqual({ code: 0, signal: null });
   });
 
@@ -425,7 +434,7 @@ describe('benchmark delegate', () => {
     }
   });
 
-  it.each(['yylo-benchmark 0.1.0-rc.9', 'yylo-benchmark 1.0.0', 'yylo-benchmark 0.1.1-alpha.1'])(
+  it.each(['yylo-benchmark 0.1.3', 'yylo-benchmark 0.2.0-rc.1', 'yylo-benchmark 0.2.1', 'yylo-benchmark 1.0.0'])(
     'refuses incompatible version %s before forwarding user arguments',
     async (reportedVersion) => {
       const { root, bin, record } = await fixture();
