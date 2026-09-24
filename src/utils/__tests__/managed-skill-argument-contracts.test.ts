@@ -26,10 +26,11 @@ describe('remote skill package boundary', () => {
     expect(cli).not.toContain('SkillInstaller.preflightInstall');
   });
 
-  it('retains only argument metadata for the canonical seven skills', async () => {
+  it('retains only argument metadata for the canonical eight skills', async () => {
     const contract = await fs.readJson(path.join(sourceRoot, 'argument-contracts.json'));
     expect(Object.keys(contract.skills).sort()).toEqual([
       'artifact-yylo',
+      'benchmark-yylo',
       'ledger-tasks-yylo',
       'plan-ledger-tasks-yylo',
       'ralph-loop-yylo',
@@ -37,6 +38,7 @@ describe('remote skill package boundary', () => {
       'wiki-yylo',
       'workflow-yylo',
     ]);
+    expect(contract.skills['benchmark-yylo'].placeholders).toEqual({ $ARGUMENTS: 1 });
     expect(contract.skills['ralph-loop-yylo'].placeholders).toEqual({ $ARGUMENTS: 1 });
     expect(contract.skills['understand-project-yylo'].placeholders).toEqual({
       $1: 1,
