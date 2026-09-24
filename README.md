@@ -59,13 +59,13 @@ npm install --global '@yylo/cli@latest'
 # Explicit prerelease
 npm install --global '@yylo/cli@next'
 # Exact version matching this checkout (once published)
-npm install -g @yylo/cli@0.2.9
+npm install -g @yylo/cli@0.2.10
 
 npm view '@yylo/cli' version dist-tags --json
 yy --version
 ```
 
-This source targets CLI **0.2.9**, requiring **Ledger 0.4.0 exactly** for universal
+This unreleased source targets CLI **0.2.10**, requiring **Ledger 0.4.0 exactly** for universal
 Record retrieval and storage-kind-prefixed IDs. Older Ledger 0.3.3, prereleases,
 and later versions are rejected before delegation. Install the matching Ledger
 explicitly once published; ordinary delegation does not auto-install a substitute.
@@ -80,13 +80,14 @@ Next: [run an agent](#beginner-agent-workflow), [manage a typed task](#typed-tas
 
 YYLO skill content is versioned independently in the public
 [`yylo-dev/yylo-skills`](https://github.com/yylo-dev/yylo-skills) repository and
-is not bundled in `@yylo/cli`. This CLI requires stable skills `^2.0.4`, declared
+is not bundled in `@yylo/cli`. This CLI source requires stable skills `^2.1.0`, declared
 in `package.json` as `yyloSkills.version`. Install the latest compatible stable
-release, or pin an exact compatible version:
+release, or pin an exact compatible version once it is published. Source version
+2.1.0 is not evidence that this skills release is available:
 
 ```bash
 yy skills install
-yy skills install --version 2.0.4
+yy skills install --version 2.1.0
 yy skills update
 yy skills status
 ```
@@ -483,13 +484,19 @@ Install canonical packages independently:
 
 ```bash
 python3 -m pip install 'yylo-ledger==0.4.0'
-npm install --global '@yylo/benchmark@0.1.2'
+# Exact Benchmark dependency for CLI 0.2.10, once separately published:
+npm install --global '@yylo/benchmark@0.2.0'
 
 yylo-ledger --help
 yy ledger --help
 yylo-benchmark --help
 yy benchmark --help
 ```
+
+CLI 0.2.10 source requires Benchmark **0.2.0 exactly**, whose thin lifecycle is
+case draft/create → run → evaluate → report, plus append-only disqualify. Older
+Benchmark versions are rejected before dispatch. These source changes do not
+publish Benchmark, update installed skills, or activate a new global runtime.
 
 Delegation preserves arguments, stdin/stdout/stderr, cwd, exit status, and signals. It never silently chooses a checkout-local or legacy executable. See the [Ledger repository](https://github.com/yylo-dev/yylo-ledger) and [Benchmark repository](https://github.com/yylo-dev/yylo-benchmark) for package-specific guidance and prerelease boundaries.
 
