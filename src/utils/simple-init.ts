@@ -31,6 +31,8 @@ async function fileDigest(file: string): Promise<string | null> {
 export interface SimpleInitSettings {
   task?: string;
   subagent?: string;
+  /** Explicitly bound by new CLI plans; legacy saved plans remain offline. */
+  skills?: boolean;
 }
 
 export interface SimpleInitPlan {
@@ -47,7 +49,8 @@ export interface SimpleInitPlan {
 function generatedFiles(settings?: SimpleInitSettings): Record<string, string> {
   const files = { ...SIMPLE_FILES };
   if (settings) {
-    if (Object.keys(settings).some((key) => !['task', 'subagent'].includes(key)) ||
+    if (Object.keys(settings).some((key) => !['task', 'subagent', 'skills'].includes(key)) ||
+        (settings.skills !== undefined && typeof settings.skills !== 'boolean') ||
         (settings.task !== undefined && typeof settings.task !== 'string') ||
         (settings.subagent !== undefined && !['claude', 'codex', 'gemini', 'cursor', 'pi'].includes(settings.subagent))) {
       throw new Error('Invalid Simple initialization settings.');
@@ -137,7 +140,10 @@ export async function applySimpleInit(plan: SimpleInitPlan): Promise<'initialize
   if (plan?.schema !== 'yylo_simple_init_plan.v1' || typeof plan.root !== 'string') throw new Error('Invalid Simple initialization plan.');
   const fresh = await planSimpleInit(plan.root, plan.settings);
   if (JSON.stringify(fresh) !== JSON.stringify(plan)) throw new Error('Stale or modified Simple initialization plan; prepare and inspect a new plan.');
-  if (fresh.outcome === 'already-initialized') return 'already-initialized';
+  if (fresh.outcome === 'already-initialized') {
+    await installSimpleSkills(fresh);
+    return 'already-initialized';
+  }
   const reservation = path.join(plan.root, RESERVATION);
   await fs.mkdir(reservation, { mode: 0o700 }); // Exclusive: concurrent initializers cannot both apply.
   await fs.writeFile(path.join(reservation, 'plan-sha256'), digest(JSON.stringify(plan)), { flag: 'wx', mode: 0o600 });
@@ -154,7 +160,21 @@ export async function applySimpleInit(plan: SimpleInitPlan): Promise<'initialize
   // Only remove the initializer's own known reservation on successful publication.
   await fs.unlink(path.join(reservation, 'plan-sha256'));
   await fs.rmdir(reservation);
+  await installSimpleSkills(fresh);
   return 'initialized';
+}
+
+/** Independent acquisition after metadata publication: failures preserve a usable
+ * workspace and can be retried without an interrupted-init reservation. */
+async function installSimpleSkills(plan: SimpleInitPlan): Promise<void> {
+  if (!plan.settings?.skills) return;
+  try {
+    const { SkillInstaller } = await import('./skill-installer.js');
+    const result = await SkillInstaller.installRemote(plan.root, { silent: true });
+    for (const warning of result.warnings ?? []) console.error(`Skills: ${warning}`);
+  } catch (error) {
+    throw new Error(`Simple metadata initialized, but skills installation failed: ${error instanceof Error ? error.message : String(error)}. Preserve existing files; retry with yy skills install from ${JSON.stringify(plan.root)}, or rerun the same init command.`);
+  }
 }
 
 export async function writeSimpleInitPlan(file: string, plan: SimpleInitPlan | SimpleConversionPlan): Promise<void> {

@@ -122,6 +122,7 @@ export interface MainCommandOptions extends GlobalCLIOptions {
  * Init command options
  */
 export interface InitCommandOptions extends GlobalCLIOptions {
+  skills?: boolean;
   /** Workspace topology; omitted headless mode remains Advanced */
   mode?: 'simple' | 'advanced';
   /** Target directory */

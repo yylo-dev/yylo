@@ -7,6 +7,8 @@ import { Command } from 'commander';
 import { planSimpleInit, applySimpleInit, planSimpleConversion, applySimpleConversion, writeSimpleInitPlan } from '../simple-init.js';
 import { resolveController } from '../controller-resolver.js';
 import { configureInitCommand } from '../../cli/commands/init.js';
+import { SkillInstaller } from '../skill-installer.js';
+vi.mock('../skill-installer.js', () => ({ SkillInstaller: { installRemote: vi.fn() } }));
 import { SIMPLE_FILES } from '../../templates/simple-workspace.js';
 import { promptInputOnce, promptMultiline } from '../../cli/utils/multiline.js';
 vi.mock('../../cli/utils/multiline.js', () => ({ promptInputOnce: vi.fn(), promptMultiline: vi.fn() }));
@@ -17,6 +19,7 @@ const conversionDestinations: string[] = [];
 const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const snap = () => ({ head: git('rev-parse', 'HEAD'), refs: git('show-ref'), worktrees: git('worktree', 'list', '--porcelain'), index: git('ls-files', '--stage') });
 beforeEach(async () => {
+  vi.mocked(SkillInstaller.installRemote).mockResolvedValue({ changed: true, version: '2.1.0', acquisition: 'git' });
   originalEnv = { ...process.env };
   for (const key of Object.keys(process.env)) if (key.startsWith('JUNO_') || key.startsWith('YYLO_') || key.startsWith('GIT_')) delete process.env[key];
   root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'yylo-simple-init-')));
@@ -75,6 +78,42 @@ function conversionDestination(): string {
   conversionDestinations.push(destination);
   return destination;
 }
+
+describe('Simple init skill acquisition', () => {
+  it.each([true, false])('binds CLI skill choice (enabled=%s) and keeps previews offline', async (enabled) => {
+    const file = `${root}-plan.json`; conversionDestinations.push(file);
+    const program = new Command(); configureInitCommand(program);
+    await program.parseAsync(['init', '--mode', 'simple', '--directory', root, '--plan-file', file, ...(enabled ? [] : ['--no-skills'])], { from: 'user' });
+    expect(SkillInstaller.installRemote).not.toHaveBeenCalled();
+    const plan = JSON.parse(await fs.readFile(file, 'utf8'));
+    expect(plan.settings.skills).toBe(enabled);
+    const apply = new Command(); configureInitCommand(apply);
+    await apply.parseAsync(['init', '--mode', 'simple', '--apply-plan', file], { from: 'user' });
+    if (enabled) expect(SkillInstaller.installRemote).toHaveBeenCalledWith(root, { silent: true });
+    else expect(SkillInstaller.installRemote).not.toHaveBeenCalled();
+  });
+  it.each([true, false])('immediate headless init honors skill installation (enabled=%s)', async (enabled) => {
+    const program = new Command(); configureInitCommand(program);
+    await program.parseAsync(['init', '--mode', 'simple', '--directory', root, ...(enabled ? [] : ['--no-skills'])], { from: 'user' });
+    expect(SkillInstaller.installRemote).toHaveBeenCalledTimes(enabled ? 1 : 0);
+  });
+  it('reports failure without claiming success and allows retry after metadata publication', async () => {
+    const plan = await planSimpleInit(root, { skills: true });
+    vi.mocked(SkillInstaller.installRemote).mockRejectedValueOnce(new Error('offline'));
+    await expect(applySimpleInit(plan)).rejects.toThrow(/metadata initialized.*offline.*yy skills install/);
+    await expect(fs.stat(path.join(root, '.yylo-simple-init'))).rejects.toThrow();
+    expect(await applySimpleInit(await planSimpleInit(root, { skills: true }))).toBe('already-initialized');
+    expect(SkillInstaller.installRemote).toHaveBeenCalledTimes(2);
+  });
+  it('does not add installation authority to legacy plans', async () => {
+    await applySimpleInit(await planSimpleInit(root));
+    expect(SkillInstaller.installRemote).not.toHaveBeenCalled();
+  });
+  it('rejects invalid skill settings before writes', async () => {
+    await expect(planSimpleInit(root, { skills: 'false' as any })).rejects.toThrow(/Invalid/);
+    expect(SkillInstaller.installRemote).not.toHaveBeenCalled();
+  });
+});
 
 describe('Advanced-to-Simple fresh-workspace conversion', () => {
   it.each(['v1', 'v2'])('converts settled %s under an unrelated ancestor without source changes', async (version) => {
@@ -293,7 +332,7 @@ describe('fresh Simple initialization', () => {
     expect(snap()).toEqual(before);
     expect(await fs.readFile(path.join(root, '.juno_task/config.json'), 'utf8')).toBe(bytes);
   });
-  it.each([undefined, 'simple'])('initializes guided Simple with final choice or explicit mode %s', async (mode) => {
+  it.each([[undefined, true], ['simple', true], ['simple', false]] as const)('initializes guided Simple with mode %s and skills %s', async (mode, skills) => {
     const before = snap();
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     vi.mocked(promptMultiline).mockResolvedValue('Explore the notebook');
@@ -307,7 +346,8 @@ describe('fresh Simple initialization', () => {
       throw new Error(`Unexpected prompt: ${label}`);
     });
     const program = new Command(); configureInitCommand(program);
-    await program.parseAsync(['init', '--interactive', '--directory', root, ...(mode ? ['--mode', mode] : [])], { from: 'user' });
+    await program.parseAsync(['init', '--interactive', '--directory', root, ...(mode ? ['--mode', mode] : []), ...(skills ? [] : ['--no-skills'])], { from: 'user' });
+    expect(SkillInstaller.installRemote).toHaveBeenCalledTimes(skills ? 1 : 0);
     if (!mode) expect(promptInputOnce).toHaveBeenLastCalledWith(expect.stringContaining('Workspace mode'), '1');
     else expect(vi.mocked(promptInputOnce).mock.calls.some(([label]) => label.startsWith('Workspace mode'))).toBe(false);
     const config = JSON.parse(await fs.readFile(path.join(root, '.juno_task/config.json'), 'utf8'));
