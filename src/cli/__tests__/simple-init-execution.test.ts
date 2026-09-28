@@ -14,7 +14,10 @@ function git(cwd: string, ...args: string[]) {
   return result.stdout;
 }
 function yy(args: string[], cwd = root) {
-  return spawnSync(process.execPath, [cli, 'init', ...args], { cwd, env, input: '', encoding: 'utf8', timeout: 30000 });
+  // Real-binary filesystem tests remain offline; default acquisition is covered
+  // by the command tests with the independent installer mocked.
+  const offline = args.includes('--apply-plan') || args.includes('--from-advanced') ? [] : ['--no-skills'];
+  return spawnSync(process.execPath, [cli, 'init', ...offline, ...args], { cwd, env, input: '', encoding: 'utf8', timeout: 30000 });
 }
 function ok(args: string[], cwd = root) {
   const result = yy(args, cwd);
