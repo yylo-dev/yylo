@@ -84,7 +84,7 @@ class SimpleInitTUI {
     console.log(chalk.yellow('\n⚙️  Step 6: Workspace Mode'));
     console.log(chalk.gray('   Simple: code, notes and Ledger in one Git checkout; shared files, no managed delivery.'));
     console.log(chalk.gray('   Advanced: separate controller, isolated task worktrees and managed merging.'));
-    console.log(chalk.gray('   Simple adds config, local ignore rules, guidance and a receipt under .juno_task.'));
+    console.log(chalk.gray('   Simple adds metadata and installs independent YYLO skills (network required; opt out with --no-skills).'));
     console.log(chalk.gray('   Existing instructions are preserved; selecting a mode does not convert an existing project.'));
     const answer = options.mode || (await promptInputOnce('Workspace mode: 1) Simple (recommended)  2) Advanced', '1')).trim().toLowerCase() || '1';
     const mode = ['1', 'simple'].includes(answer) ? 'simple' : ['2', 'advanced'].includes(answer) ? 'advanced' : undefined;
@@ -1049,7 +1049,7 @@ export async function initCommandHandler(
     }
 
     if ((context.mode || options.mode) === 'simple') {
-      const plan = await planSimpleInit(context.targetDirectory, { task: context.task, subagent: context.subagent });
+      const plan = await planSimpleInit(context.targetDirectory, { task: context.task, subagent: context.subagent, skills: options.skills !== false });
       const outcome = await applySimpleInit(plan);
       printSimpleOutcome(outcome, plan.root);
       return;
@@ -1141,6 +1141,7 @@ export function configureInitCommand(program: Command): void {
     .option('-g, --git-repo <url>', 'Git repository URL')
     .option('-d, --directory <path>', 'Target directory (default: current directory)')
     .option('--mode <mode>', 'Workspace mode: simple or advanced (interactive choice; headless default: advanced)')
+    .option('--no-skills', 'Fresh Simple: skip default independent YYLO skill installation (also saved in preview plans)')
     .option('--from-advanced <controller>', 'Simple: convert a settled Advanced controller into a fresh --directory (preview by default)')
     .option('--dry-run', 'Fresh Simple: read-only preview instead of initializing')
     .option('--format <format>', 'Machine response format: json or ndjson (Simple automation)')
@@ -1173,11 +1174,12 @@ export function configureInitCommand(program: Command): void {
             else human();
           };
           if (description || options.task || options.force || options.interactive || options.gitRepo || options.gitUrl || options.targetBranch || options.subagent) {
-            throw new Error('Simple automation supports --directory, --dry-run, --from-advanced, --plan-file or --apply-plan only. No force, managed Git options or interactive setup in automation. Use --interactive --mode simple for guided fresh setup.');
+            throw new Error('Simple automation supports --directory, --no-skills, --dry-run, --from-advanced, --plan-file or --apply-plan only. No force, managed Git options or interactive setup in automation. Use --interactive --mode simple for guided fresh setup.');
           }
           if (options.planFile && options.applyPlan) throw new Error('Choose --plan-file or --apply-plan, not both.');
           if (options.fromAdvanced && options.applyPlan) throw new Error('--apply-plan already binds the source; do not also pass --from-advanced.');
           if (options.fromAdvanced && !options.directory) throw new Error('--from-advanced requires a fresh --directory. No in-place conversion.');
+          if (options.skills === false && (options.applyPlan || options.fromAdvanced)) throw new Error('--no-skills is for fresh Simple plans; --apply-plan honors its saved choice and conversion does not install skills.');
           if (options.applyPlan) {
             const stat = await fs.lstat(options.applyPlan);
             if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4194304) throw new Error('Simple plan must be a regular file no larger than 4 MiB.');
@@ -1190,13 +1192,14 @@ export function configureInitCommand(program: Command): void {
             const outcome = plan.schema === 'yylo_simple_conversion_plan.v1' ? await applySimpleConversion(plan) : await applySimpleInit(plan);
             report({ outcome, root: plan.root }, () => printSimpleOutcome(outcome, plan.root));
           } else {
-            const plan = options.fromAdvanced ? await planSimpleConversion(options.fromAdvanced, options.directory) : await planSimpleInit(options.directory || process.cwd());
+            const plan = options.fromAdvanced ? await planSimpleConversion(options.fromAdvanced, options.directory) : await planSimpleInit(options.directory || process.cwd(), { skills: options.skills !== false });
             if (options.planFile) await writeSimpleInitPlan(options.planFile, plan);
             if (options.dryRun) {
               report(plan, () => {
                 console.log(`Preview only; not initialized: ${plan.root}`);
-                console.log((plan as SimpleInitPlan).outcome === 'already-initialized' ? 'Already initialized; no proposed writes.' : `Proposed files: ${Object.keys((plan as SimpleInitPlan).files).join(', ')}`);
-                console.log('To initialize: yy init --mode simple --directory ' + JSON.stringify(plan.root));
+                console.log((plan as SimpleInitPlan).outcome === 'already-initialized' ? 'Already initialized; no proposed metadata writes.' : `Proposed files: ${Object.keys((plan as SimpleInitPlan).files).join(', ')}`);
+                console.log((plan as SimpleInitPlan).settings?.skills ? 'Skills: install latest compatible stable release on apply (network required).' : 'Skills: installation disabled.');
+                console.log('To initialize: yy init --mode simple --directory ' + JSON.stringify(plan.root) + (options.skills === false ? ' --no-skills' : ''));
               });
             } else if (options.planFile || options.fromAdvanced) {
               report(plan, () => console.log(JSON.stringify(plan, null, 2)));
@@ -1216,6 +1219,7 @@ export function configureInitCommand(program: Command): void {
 
       const initOptions: InitCommandOptions = {
         mode: options.mode,
+        skills: options.skills,
         directory: options.directory,
         force: options.force,
         task: taskDescription,
@@ -1254,7 +1258,11 @@ Optional saved-plan automation:
   or --plan-file. Conversion remains preview-only until explicit --apply-plan.
   Preserves existing AGENTS.md, CLAUDE.md and .gitignore; generates supplemental
   .juno_task/simple-agent-guidance.md and a metadata-local ignore file.
-  Fresh Simple setup has no force, Git initialization, commits, worktrees, or installation.
+  Fresh Simple setup installs the latest compatible stable YYLO skills by default.
+  Use --no-skills to skip (including offline setup); previews never acquire skills.
+  Saved plans bind this choice; old plans and conversion do not install skills.
+  Skill acquisition uses independent receipts, never force-overwrites custom files.
+  No force, Git initialization, commits, worktrees, or project dependency installation.
   Omitted-mode inline automation retains Advanced behavior; --mode advanced is explicit.
   Interrupted initialization is refused until explicitly inspected/recovered.
   Runtime readiness and agent activation are separate from initialization.

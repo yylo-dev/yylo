@@ -22,7 +22,15 @@ yy init --mode simple --directory /absolute/project
 
 **Changed default side effects:** plain fresh Simple init now writes files rather
 than printing a plan. Preview automation must select `--dry-run` (no writes) or
-`--plan-file`. Initialization does not install dependencies or certify agent
+`--plan-file`. Fresh Simple init also installs the latest compatible stable YYLO
+skills by default, in both guided and headless setup. Use `--no-skills` for offline
+setup or to opt out. Previews never acquire skills; saved fresh plans bind the
+choice (do not pass `--no-skills` again with `--apply-plan`). Legacy plans and
+Advanced conversion remain metadata-only. Installation uses the independent
+skill installer and receipt, preserving customized/unrecorded files without force.
+If acquisition fails, init reports failure but preserves initialized metadata;
+retry `yy skills install` in the project, or rerun the same init command.
+Initialization does not install project/runtime dependencies or certify agent
 readiness. Read `.juno_task/simple-agent-guidance.md`, then use `yy ledger` and
 `yy pi` with separately installed dependencies and credentials.
 
@@ -62,8 +70,9 @@ contradictory inherited environment assertions still receive safety checks.
 For a read-only preview with no plan file, use `yy init --mode simple --dry-run`.
 It reports the destination and proposed files, not successful initialization.
 `--dry-run` cannot be combined with saved-plan, conversion, interactive or Advanced
-options. Exact repeat initialization is a no-op; customized configuration is not
-silently reconfigured.
+options. Exact repeat initialization preserves metadata; unless opted out, skills
+are acquired again through the independent installer. Customized configuration is
+not silently reconfigured.
 
 For saved-plan automation, preview an external plan, inspect its paths and
 preserved-file identities, then apply that exact plan:
@@ -73,9 +82,11 @@ yy init --mode simple --directory /absolute/project --plan-file /external/simple
 yy init --mode simple --apply-plan /external/simple-plan.json
 ```
 
-Initialization writes only `.juno_task/config.json`, `.juno_task/.gitignore`,
+Metadata initialization writes `.juno_task/config.json`, `.juno_task/.gitignore`,
 `.juno_task/simple-agent-guidance.md`, and `.juno_task/simple-init.json`.
-It does not install dependencies, create branches/worktrees, stage, or commit.
+Default skill installation additionally writes `.agents/skills`, `.claude/skills`,
+`.pi/skills`, Pi settings, and its independent receipt under `.juno_task/runtime`.
+It does not install project dependencies, create branches/worktrees, stage, or commit.
 Ordinary dirty files are allowed. Existing root `AGENTS.md`, `CLAUDE.md`, and
 `.gitignore` are preserved; conflicting managed instructions or ignore rules
 that hide durable metadata refuse rather than being overwritten.
