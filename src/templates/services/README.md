@@ -284,7 +284,7 @@ npm install -g @mariozechner/pi-coding-agent
 - `-p, --prompt <text>`: Prompt text (required, mutually exclusive with --prompt-file)
 - `-pp, --prompt-file <path>`: Path to prompt file (required if no --prompt)
 - `--cd <path>`: Project path (default: current directory)
-- `-m, --model <name>`: Model name (supports shorthand aliases, including `:gpt` and `:astra` → `openai-codex/gpt-6-astra`, `:luna` → `openai-codex/gpt-5.6-luna`, `:sol` → `openai-codex/gpt-5.6-sol`, `:gpt5.5` → `openai-codex/gpt-5.5`, `:mini` → `openai-codex/gpt-5.6-terra`, `:codex` → `openai-codex/gpt-5.3-codex`, and `:api-codex` → `openai/gpt-5.3-codex`)
+- `-m, --model <name>`: Model name (supports shorthand aliases, including `:gpt` and `:astra` → `openai-codex/gpt-6-astra`, `:luna` → `openai-codex/gpt-6-luna`, `:sol` → `openai-codex/gpt-6.1-sol`, `:gpt5.5` → `openai-codex/gpt-5.5`, `:mini` → `openai-codex/gpt-5.6-terra`, `:codex` → `openai-codex/gpt-5.3-codex`, and `:api-codex` → `openai/gpt-5.3-codex`)
 - `--thinking <level>`: Thinking level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`); GPT-5.6 models support `max`
 - `--live`: Run Pi in interactive mode (no `--mode json`, prompt passed positionally)
 - `--no-extensions`: Disable Pi extensions (incompatible with `--live`)

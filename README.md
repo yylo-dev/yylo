@@ -230,8 +230,8 @@ Record relations.
 
 | Shortcut | Resolved model |
 | --- | --- |
-| `:luna` | `openai-codex/gpt-5.6-luna` |
-| `:sol` | `openai-codex/gpt-5.6-sol` |
+| `:luna` | `openai-codex/gpt-6-luna` |
+| `:sol` | `openai-codex/gpt-6.1-sol` |
 | `:gpt` | `openai-codex/gpt-6-astra` (Pi default) |
 | `:astra` | `openai-codex/gpt-6-astra` |
 | `:mini` | `openai-codex/gpt-5.6-terra` |

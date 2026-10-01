@@ -942,9 +942,9 @@ exit 1
       expect(result.stdout).toContain('future yy cc / yylo continue follows C');
       expect(result.stdout).toContain('--name main is reserved');
       expect(result.stdout).toContain(':luna');
-      expect(result.stdout).toContain('openai-codex/gpt-5.6-luna');
+      expect(result.stdout).toContain('openai-codex/gpt-6-luna');
       expect(result.stdout).toContain(':sol');
-      expect(result.stdout).toContain('openai-codex/gpt-5.6-sol');
+      expect(result.stdout).toContain('openai-codex/gpt-6.1-sol');
       expect(result.stdout).toMatch(/:gpt\s+openai-codex\/gpt-6-astra/);
       expect(result.stdout).toMatch(/:astra\s+openai-codex\/gpt-6-astra/);
       expect(result.stdout).toContain(':gpt5.5');
