@@ -126,10 +126,10 @@ class TestModelShorthandExpansion:
         assert self.svc.expand_model_shorthand(":haiku") == "anthropic/claude-haiku-4-5-20251001"
 
     def test_shorthand_luna(self):
-        assert self.svc.expand_model_shorthand(":luna") == "openai-codex/gpt-5.6-luna"
+        assert self.svc.expand_model_shorthand(":luna") == "openai-codex/gpt-6-luna"
 
     def test_shorthand_sol(self):
-        assert self.svc.expand_model_shorthand(":sol") == "openai-codex/gpt-5.6-sol"
+        assert self.svc.expand_model_shorthand(":sol") == "openai-codex/gpt-6.1-sol"
 
     def test_shorthand_gpt_aliases_sol(self):
         assert self.svc.MODEL_SHORTHANDS[":gpt"] == "openai-codex/gpt-6-astra"
@@ -219,6 +219,18 @@ class TestBuildPiCommand:
         assert "--model" in cmd
         model_idx = cmd.index("--model")
         assert cmd[model_idx + 1] == "claude-sonnet-4-6"
+
+    @pytest.mark.parametrize("shortcut,model", [
+        (":sol", "gpt-6.1-sol"),
+        (":luna", "gpt-6-luna"),
+    ])
+    def test_sol_luna_shortcuts_dispatch_exact_codex_models(self, shortcut, model):
+        self.svc.model_name = self.svc.expand_model_shorthand(shortcut)
+        self.svc.prompt = "test prompt"
+        cmd, _stdin = self.svc.build_pi_command(_make_args(model=shortcut))
+
+        assert cmd[cmd.index("--provider") + 1] == "openai-codex"
+        assert cmd[cmd.index("--model") + 1] == model
 
     def test_matching_explicit_provider_preserves_exact_identity(self):
         """A confirming provider still dispatches a separate bare model id."""

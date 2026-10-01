@@ -98,8 +98,8 @@ class PiService:
         ":opus": "anthropic/claude-opus-4-6",
         ":haiku": "anthropic/claude-haiku-4-5-20251001",
         # OpenAI
-        ":luna": "openai-codex/gpt-5.6-luna",
-        ":sol": "openai-codex/gpt-5.6-sol",
+        ":luna": "openai-codex/gpt-6-luna",
+        ":sol": "openai-codex/gpt-6.1-sol",
         ":gpt": "openai-codex/gpt-6-astra",
         ":astra": "openai-codex/gpt-6-astra",
         ":gpt5.5": "openai-codex/gpt-5.5",
@@ -853,8 +853,8 @@ Model shorthands:
   :sonnet          -> anthropic/claude-sonnet-4-6
   :opus            -> anthropic/claude-opus-4-6
   :haiku           -> anthropic/claude-haiku-4-5-20251001
-  :luna            -> openai-codex/gpt-5.6-luna
-  :sol             -> openai-codex/gpt-5.6-sol
+  :luna            -> openai-codex/gpt-6-luna
+  :sol             -> openai-codex/gpt-6.1-sol
   :gpt, :astra     -> openai-codex/gpt-6-astra
   :gpt5.5          -> openai-codex/gpt-5.5
   :mini            -> openai-codex/gpt-5.6-terra

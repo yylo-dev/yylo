@@ -1668,8 +1668,8 @@ ${chalk.blue('Model Shorthands:')}
   :opus                anthropic/claude-opus-4-6
   :haiku               anthropic/claude-haiku-4-5-20251001
   ${chalk.gray('# OpenAI / OpenAI Codex')}
-  :luna                openai-codex/gpt-5.6-luna
-  :sol                 openai-codex/gpt-5.6-sol
+  :luna                openai-codex/gpt-6-luna
+  :sol                 openai-codex/gpt-6.1-sol
   :gpt                 openai-codex/gpt-6-astra ${chalk.gray('(default)')}
   :astra               openai-codex/gpt-6-astra
   :gpt5.5              openai-codex/gpt-5.5
