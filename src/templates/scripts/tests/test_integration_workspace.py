@@ -67,6 +67,120 @@ def launcher_package(root: Path, label: str, bins=None) -> Path:
     return root / "dist/bin/cli.mjs"
 
 
+class DarwinOwnerProcessTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="yylo-owner-process-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.owner = self.root / "owner with spaces"
+        self.owner.mkdir()
+        self.child = self.owner / "nested\npath"
+        self.child.mkdir()
+        self.owners = [{"path": str(self.owner)}]
+        self.self_pid = str(os.getpid())
+        self.started = "Wed Oct 14 16:00:00 2026"
+
+    def ps(self, pids=None):
+        pids = [self.self_pid, "42"] if pids is None else pids
+        return ("".join(f"{pid} {os.getuid()} {self.started}\n" for pid in pids)
+                + f"99999 {os.getuid()} {self.started}\n").encode()
+
+    def lsof(self, path=None):
+        return (f"p{self.self_pid}\0\nfcwd\0n{self.root}\0\n"
+                + f"p42\0\nfcwd\0n{path or self.child}\0\n").encode()
+
+    def observe(self, before=None, payload=None, after=None):
+        with mock.patch.object(runtime, "owner_process_read", side_effect=[
+            (99999, self.ps() if before is None else before),
+            (99998, self.lsof() if payload is None else payload),
+            (99999, self.ps() if after is None else after),
+        ]) as read:
+            result = runtime.darwin_owner_processes(self.owners)
+        return result, read
+
+    def assertUnknown(self, result):
+        self.assertEqual(result, [{"status": "unknown", "reason": "owner process observation unavailable"}])
+
+    def test_observes_owner_descendant_without_command_arguments(self):
+        result, read = self.observe()
+        self.assertEqual(result, [{"pid": "42", "cwd": str(self.child), "lstart": self.started}])
+        self.assertEqual(read.call_args_list[1].args[0], [
+            "/usr/sbin/lsof", "-n", "-P", "-a", "-u", str(os.getuid()), "-d", "cwd", "-F0pn"])
+
+    def test_unrelated_processes_and_observer_do_not_block(self):
+        result, _ = self.observe(payload=self.lsof(self.root))
+        self.assertEqual(result, [])
+        sibling = self.root / "owner with spaces-other"
+        sibling.mkdir()
+        self.assertEqual(self.observe(payload=self.lsof(sibling))[0], [])
+
+    def test_macos_negative_system_uid_is_not_a_malformed_identity(self):
+        snapshot = self.ps() + f"123 -2 {self.started}\n".encode()
+        self.assertEqual(self.observe(before=snapshot, after=snapshot, payload=self.lsof(self.root))[0], [])
+
+    def test_owner_symlink_is_resolved(self):
+        link = self.root / "alias"
+        link.symlink_to(self.child, target_is_directory=True)
+        self.assertEqual(self.observe(payload=self.lsof(link))[0][0]["cwd"], str(self.child))
+
+    def test_missing_coverage_pid_reuse_and_new_process_refuse(self):
+        cases = [
+            {"payload": f"p{self.self_pid}\0\nfcwd\0n{self.root}\0\n".encode()},
+            {"after": self.ps().replace(b"42 " + str(os.getuid()).encode() + b" Wed", b"42 " + str(os.getuid()).encode() + b" Thu")},
+            {"after": self.ps([self.self_pid, "42", "43"])},
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                self.assertUnknown(self.observe(**case)[0])
+
+    def test_vanished_process_does_not_grant_or_require_task_authority(self):
+        self.assertEqual(self.observe(after=self.ps([self.self_pid]))[0], [])
+
+    def test_malformed_or_truncated_observation_refuses(self):
+        cases = [b"", b"p42\0\nfcwd\0nrelative\0\n", self.lsof()[:-2],
+                 self.lsof() + b"p42\0\n", self.lsof() + b"xunexpected\0\n",
+                 b"pnot-a-pid\0\n", self.lsof(self.root / "missing")]
+        for payload in cases:
+            with self.subTest(payload=payload):
+                self.assertUnknown(self.observe(payload=payload)[0])
+        for payload in (b"", b"malformed\n", b"42 501 invalid-start\n", self.ps() + self.ps()):
+            with self.subTest(ps=payload):
+                self.assertUnknown(self.observe(before=payload)[0])
+
+    def test_failed_unavailable_and_timed_out_observation_refuse(self):
+        for error in (OSError("unavailable"), runtime.IntegrationError("failed"),
+                      subprocess.TimeoutExpired("ps", 10)):
+            with self.subTest(error=error), mock.patch.object(runtime, "owner_process_read", side_effect=error):
+                self.assertUnknown(runtime.darwin_owner_processes(self.owners))
+
+    def test_os_reader_bounds_output_and_rejects_stderr_or_nonzero_exit(self):
+        commands = ["print('x' * (1024 * 1024 + 1))",
+                    "import sys; sys.stderr.write('warning')", "raise SystemExit(1)"]
+        for source in commands:
+            with self.subTest(source=source), self.assertRaises(runtime.IntegrationError):
+                runtime.owner_process_read([sys.executable, "-c", source])
+        pid, payload = runtime.owner_process_read([sys.executable, "-c", "print('ok')"])
+        self.assertGreater(pid, 0)
+        self.assertEqual(payload, b"ok\n")
+
+    def test_os_reader_timeout_terminates_only_its_observer(self):
+        with mock.patch.object(runtime.time, "monotonic", side_effect=[0, 11]), \
+                self.assertRaisesRegex(runtime.IntegrationError, "timed out"):
+            runtime.owner_process_read([sys.executable, "-c", "import time; time.sleep(60)"])
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS OS tools")
+    def test_real_macos_owner_cwd_never_reports_quiescence(self):
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=self.owner)
+        try:
+            observed = runtime.darwin_owner_processes(self.owners)
+            self.assertTrue(observed)
+            self.assertTrue(any(row.get("pid") == str(process.pid) or row.get("status") == "unknown"
+                                for row in observed), observed)
+        finally:
+            process.terminate()
+            process.wait()
+
+
 class LauncherSelectionTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="yylo-launchers-")
@@ -1123,6 +1237,9 @@ class IntegrationWorkspaceTests(unittest.TestCase):
     def test_nonlegacy_owner_refresh_rejects_unavailable_process_observation(self) -> None:
         _, review, _ = self.owner_refresh_fixture()
         (self.procfs / "self/cwd").unlink()
+        platform = mock.patch.object(runtime.sys, "platform", "unsupported")
+        platform.start()
+        self.addCleanup(platform.stop)
         self.approve_owner_inventory(review)
         inventory = runtime.refresh_owner_inventory(self.controller, self.controller)
         self.assertEqual(inventory["owner_processes"], [{
@@ -1146,6 +1263,28 @@ class IntegrationWorkspaceTests(unittest.TestCase):
         finally:
             process.terminate()
             process.wait()
+
+    def test_nonlegacy_owner_refresh_dispatches_to_macos_observer(self) -> None:
+        _, review, _ = self.owner_refresh_fixture()
+        (self.procfs / "self/cwd").unlink()
+        with mock.patch.object(runtime.sys, "platform", "darwin"), \
+                mock.patch.object(runtime, "darwin_owner_processes", return_value=[]) as observe:
+            self.approve_owner_inventory(review)
+            planned, code = self.refresh_plan(review)
+        self.assertEqual(code, 0, planned)
+        self.assertTrue(observe.called)
+        self.assertEqual(observe.call_args.args[0][0]["path"], str(self.owner.resolve()))
+
+    def test_nonlegacy_owner_refresh_still_preserves_unfinished_released_tasks(self) -> None:
+        _, review, _ = self.owner_refresh_fixture()
+        state = runtime.task_workspace.read_state(self.controller)
+        state["tasks"]["unfinished"] = {"state": "WORKING", "fencing": {"state": "RELEASED"}}
+        runtime.task_workspace.write_state(self.controller, state)
+        self.approve_owner_inventory(review)
+        refused, code = self.refresh_plan(review)
+        self.assertEqual(code, 2, refused)
+        self.assertIn("canonical_owner_refresh:no_active_producers", refused["blockers"])
+        self.assertEqual(runtime.task_workspace.read_state(self.controller), state)
 
     def test_nonlegacy_owner_refresh_rejects_active_task_lease(self) -> None:
         _, review, _ = self.owner_refresh_fixture()

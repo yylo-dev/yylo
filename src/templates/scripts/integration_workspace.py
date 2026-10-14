@@ -12,6 +12,7 @@ import io
 import json
 import os
 import re
+import selectors
 import shutil
 import signal
 import stat
@@ -1627,6 +1628,114 @@ def stale_owner_cache_migration(status: dict[str, Any], repository: Path,
     }
 
 
+def owner_process_read(argv: list[str]) -> tuple[int, bytes]:
+    """Bound OS observations; never echo process output into a refusal."""
+    process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, start_new_session=True,
+                               env={**os.environ, "LC_ALL": "C"})
+    chunks = {"stdout": bytearray(), "stderr": bytearray()}
+    deadline = time.monotonic() + 10
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+            while selector.get_map():
+                if time.monotonic() >= deadline:
+                    raise IntegrationError("owner process observation timed out")
+                for key, _ in selector.select(0.1):
+                    data = os.read(key.fileobj.fileno(), 65536)
+                    if not data:
+                        selector.unregister(key.fileobj)
+                        continue
+                    chunks[key.data].extend(data)
+                    if sum(map(len, chunks.values())) > 1024 * 1024:
+                        raise IntegrationError("owner process observation exceeded byte limit")
+        process.wait(timeout=max(0.01, deadline - time.monotonic()))
+        if process.returncode or chunks["stderr"]:
+            raise IntegrationError("owner process observation failed")
+        return process.pid, bytes(chunks["stdout"])
+    finally:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        process.wait()
+        process.stdout.close()
+        process.stderr.close()
+
+
+def darwin_owner_processes(owners: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Observe same-user cwd ownership without procfs or command-line disclosure.
+
+    Two ps identity snapshots bracket lsof. Every surviving same-user process
+    must have one absolute cwd. Missing coverage, PID reuse, or a newly observed
+    process leaves the result unknown; a vanished process grants no task lease
+    authority. As on Linux, task fencing is checked independently. This is a
+    point-in-time maintenance preflight, not a process sandbox or a global lock.
+    """
+    unknown = [{"status": "unknown", "reason": "owner process observation unavailable"}]
+    try:
+        def snapshot() -> dict[str, str]:
+            rows = {}
+            observer, payload = owner_process_read(["/bin/ps", "-axo", "pid=,uid=,lstart="])
+            for line in payload.decode().splitlines():
+                pid, uid, started = line.split(None, 2)
+                if not pid.isdecimal() or int(pid) <= 0 or not re.fullmatch(r"-?\d+", uid) or not started.strip():
+                    raise ValueError("invalid process identity")
+                time.strptime(started.strip(), "%a %b %d %H:%M:%S %Y")
+                if int(uid) == os.getuid() and int(pid) != observer:
+                    if pid in rows:
+                        raise ValueError("duplicate process identity")
+                    rows[pid] = started.strip()
+            if str(os.getpid()) not in rows:
+                raise ValueError("incomplete process inventory")
+            return rows
+
+        before = snapshot()
+        _, payload = owner_process_read(["/usr/sbin/lsof", "-n", "-P", "-a", "-u",
+                                         str(os.getuid()), "-d", "cwd", "-F0pn"])
+        after = snapshot()
+        if not payload.endswith(b"\0\n"):
+            raise ValueError("truncated cwd observation")
+        paths: dict[str, Path] = {}
+        seen = set()
+        pid = None
+        # lsof terminates fields with NUL and process/file sets with newline.
+        for field in payload.split(b"\0"):
+            field = field.removeprefix(b"\n")
+            if not field:
+                continue
+            if field.startswith(b"p"):
+                pid = field[1:].decode("ascii")
+                if not pid.isdecimal() or int(pid) <= 0 or pid in seen:
+                    raise ValueError("invalid cwd process")
+                seen.add(pid)
+            elif field.startswith(b"f"):
+                if field != b"fcwd":
+                    raise ValueError("unexpected descriptor")
+            elif field.startswith(b"n"):
+                path = Path(os.fsdecode(field[1:]))
+                if pid is None or pid in paths or not path.is_absolute():
+                    raise ValueError("invalid cwd observation")
+                paths[pid] = path.resolve(strict=True)
+            else:
+                raise ValueError("unexpected cwd field")
+        survivors = before.keys() & after.keys()
+        if any(before[pid] != after[pid] or pid not in paths for pid in survivors):
+            return unknown
+        # The observer ps is excluded by its actual child PID. Any other new
+        # process makes this non-atomic observation insufficient for repair.
+        if after.keys() - before.keys():
+            return unknown
+        roots = [Path(row["path"]).resolve(strict=True) for row in owners]
+        return [{"pid": pid, "cwd": str(paths[pid]), "lstart": after[pid]}
+                for pid in sorted(survivors)
+                if any(paths[pid] == root or root in paths[pid].parents for root in roots)]
+    except (OSError, ValueError, UnicodeError, RuntimeError, subprocess.SubprocessError):
+        return unknown
+
+
 def refresh_owner_inventory(controller: Path, repository: Path) -> dict[str, Any]:
     """Read-only, exact registration/evidence inventory; no owner is disposable."""
     owners = []
@@ -1669,7 +1778,10 @@ def refresh_owner_inventory(controller: Path, repository: Path) -> dict[str, Any
                        or record.get("state") in {"WORKING", "HYDRATING", "HYDRATION_FAILED"})
     owner_processes = []
     if not Path("/proc/self/cwd").exists():
-        owner_processes.append({"status": "unknown", "reason": "owner process observation unavailable"})
+        if sys.platform == "darwin":
+            owner_processes = darwin_owner_processes(owners)
+        else:
+            owner_processes.append({"status": "unknown", "reason": "owner process observation unavailable"})
     else:
         for entry in Path("/proc").iterdir():
             if not entry.name.isdigit():
