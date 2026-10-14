@@ -1639,6 +1639,9 @@ ${chalk.blue('Examples:')}
   yylo pi -m openai/gpt-4o --provider openai 'Task'
   yylo pi -m :gemini-pro 'Analyze performance'
 
+  ${chalk.gray('# Import Codex OAuth credentials for openai-codex provider')}
+  yy auth import-codex
+
   ${chalk.gray('# Extended thinking')}
   yylo pi --thinking high 'Complex architecture redesign'
 
@@ -2044,6 +2047,152 @@ function configureEnvironment(): void {
   }
 }
 
+/**
+ * Register root-scoped help text: the intro banner ('before') and the examples
+ * block ('after'). Registered with the command surface itself so terminal help
+ * paths (classifyExplicitInvocation -> outputHelp) render it before any
+ * environment, controller, lifecycle, or installer bootstrap runs.
+ */
+function registerRootHelpText(program: Command): void {
+  program.addHelpText(
+    'before',
+    `
+${chalk.blue.bold('🎯 YYLO')} - TypeScript CLI for AI Subagent Orchestration
+
+`,
+  );
+
+  program.addHelpText(
+    'after',
+    `
+${chalk.blue.bold('Examples:')}
+  ${chalk.gray('# Initialize new project (interactive mode)')}
+  yylo init
+
+  ${chalk.gray('# Initialize with inline mode (automation-friendly)')}
+  yylo init 'Build a REST API' --subagent claude --git-repo https://github.com/user/repo
+
+  ${chalk.gray('# Start execution using .juno_task/init.md')}
+  yylo start
+
+  ${chalk.gray('# AI-powered testing')}
+  yylo test --generate --run
+  yylo test src/utils.ts --subagent claude
+  yylo test --analyze --coverage
+
+  ${chalk.gray('# Quick execution with Claude')}
+  yylo claude 'Analyze this codebase and suggest improvements'
+
+  ${chalk.gray('# Short aliases')}
+  yy pi --live 'hello'
+  ypl 'hello'     ${chalk.gray('# same as: yy pi --live hello')}
+
+  ${chalk.gray('# Pipe prompt via stdin (heredoc, pipe, redirect)')}
+  echo 'Analyze this codebase' | yylo -s claude
+  yylo -s claude << 'EOF'
+  Analyze this codebase and suggest improvements
+  EOF
+
+  ${chalk.gray('# Shell safety')}
+  ${chalk.gray('Use single quotes or -f/stdin when prompts include backticks or $()')}
+
+  ${chalk.gray('# Prompt-time command substitution (per iteration)')}
+  yylo claude -p "Status: !'git status --short'"
+  yylo claude -i 3 -p "Recent commits:\n!\`\`\`git log -n 5 --oneline\`\`\`"
+
+  ${chalk.gray('# Interactive project setup')}
+  yylo init --interactive
+
+  ${chalk.gray('# Continue the last session without retyping settings')}
+  yylo continue 'Implement the next step'
+  yylo continue -p 'Continue from here'
+
+  ${chalk.gray('# Clone Pi sessions for independent branches')}
+  yylo clone 'Explore approach A'
+  yylo clone --name C 'Explore C'
+  yylo clone --from C --name M 'Explore M'
+  yylo --resume <session-id> --clone '@@close_loop'  ${chalk.gray('# explicit id fork')}
+  yylo branches
+  yylo switch C
+  yylo continue --clone 'Explore approach B'
+  yylo --resume <session-id> --clone 'Explore approach C'
+
+  ${chalk.gray('# Force-refresh installed project scripts from the current package')}
+  yylo scripts update --force
+  yylo install-scripts --force
+
+  ${chalk.gray('# Query continue scope hash/status for scripts')}
+  yylo continue-scope --json
+  yylo continue-scope A1B2C3 --json
+
+  ${chalk.gray('# Manage sessions')}
+  yylo session list
+  yylo session info abc123
+
+  ${chalk.gray('# Enable feedback collection globally')}
+  yylo --enable-feedback start
+
+  ${chalk.gray('# Collect feedback')}
+  yylo feedback --interactive
+
+  ${chalk.gray('# Import Codex auth into Pi auth.json')}
+  yylo auth import-codex
+
+  ${chalk.gray('# Set subagent-specific default models')}
+  yylo pi set-default-model :api-codex
+  yylo claude set-default-model :opus
+
+  ${chalk.gray('# Setup Git repository')}
+  yylo setup-git https://github.com/yylo-dev/yylo
+
+  ${chalk.gray('# Verbose is ON by default. Disable with:')}
+  yylo -v false -s claude 'prompt'
+  yylo -v 0 -s claude 'prompt'
+  yylo -v no -s claude 'prompt'
+
+  ${chalk.gray('# Quiet mode (suppress agent output and hooks):')}
+  yylo --quiet -s claude 'prompt'
+  yylo --silent -s claude 'prompt'
+
+${chalk.blue.bold('Environment Variables:')}
+  YYLO_SUBAGENT              Default subagent (claude, cursor, codex, gemini, pi)
+  YYLO_CONFIG                Configuration file path
+  YYLO_VERBOSE               Verbose output (true/false/0/1/no/yes, default: true)
+  YYLO_ENABLE_FEEDBACK       Enable concurrent feedback collection (true/false)
+  YYLO_MCP_TIMEOUT           Operation timeout in milliseconds
+  YYLO_ON_HOURLY_LIMIT       Behavior when quota limit reached (wait/raise)
+  JUNO_INTERACTIVE_FEEDBACK_MODE  Enable interactive feedback mode (true/false)
+  NO_COLOR                        Disable colored output (standard)
+
+${chalk.blue.bold('Env File Bootstrap:')}
+  Auto-creates ${chalk.cyan('.env.yylo')} in project root and loads it on startup.
+  (Python virtual environment path is ${chalk.cyan('.venv_juno')}; this is separate from env files.)
+  Configure custom env file in ${chalk.cyan('.juno_task/config.json')}:
+    ${chalk.gray('"envFilePath": ".env.local", "envFileCopied": true')}
+
+${chalk.blue.bold('Prompt Macros (@@key):')}
+  Define reusable prompt macros in ${chalk.cyan('.juno_task/config.json')} under ${chalk.cyan('promptMacros')}.
+  Example: ${chalk.gray('"promptMacros": {"global": {"git": "commit changes", "spec": {"path": "prompts/spec.md"}}, "local": {"ship": "run tests then @@git"}, "maxDepth": 10}')}
+  Values can be strings or {path}/{text}; relative paths resolve from the project working directory.
+  Local keys override global keys. Default order is before command substitution.
+
+${chalk.blue.bold('Configuration:')}
+  Configuration can be specified via:
+  1. Command line arguments (highest priority)
+  2. Environment variables
+  3. Configuration files (.json, .toml, pyproject.toml)
+  4. Built-in defaults (lowest priority)
+
+${chalk.blue.bold('Support:')}
+  Documentation: https://github.com/yylo-dev/yylo#readme
+  Issues: https://github.com/yylo-dev/yylo/issues
+  Website: https://yylo.dev
+  License: MIT
+
+`,
+  );
+}
+
 function configureCommandSurface(program: Command): void {
   program
     .name('yylo')
@@ -2084,6 +2233,7 @@ function configureCommandSurface(program: Command): void {
   setupContinuityCommand(program);
   setupContinueScopeCommand(program);
   setupMainCommand(program);
+  registerRootHelpText(program);
 }
 
 /**
@@ -2261,144 +2411,6 @@ async function main(): Promise<void> {
   );
   displayBanner(isWorkspaceDiscovery ? 0 : isVerbose);
 
-  // Add comprehensive help (scoped to root command only — 'before'/'after' not 'beforeAll'/'afterAll')
-  program.addHelpText(
-    'before',
-    `
-${chalk.blue.bold('🎯 YYLO')} - TypeScript CLI for AI Subagent Orchestration
-
-`,
-  );
-
-  program.addHelpText(
-    'after',
-    `
-${chalk.blue.bold('Examples:')}
-  ${chalk.gray('# Initialize new project (interactive mode)')}
-  yylo init
-
-  ${chalk.gray('# Initialize with inline mode (automation-friendly)')}
-  yylo init 'Build a REST API' --subagent claude --git-repo https://github.com/user/repo
-
-  ${chalk.gray('# Start execution using .juno_task/init.md')}
-  yylo start
-
-  ${chalk.gray('# AI-powered testing')}
-  yylo test --generate --run
-  yylo test src/utils.ts --subagent claude
-  yylo test --analyze --coverage
-
-  ${chalk.gray('# Quick execution with Claude')}
-  yylo claude 'Analyze this codebase and suggest improvements'
-
-  ${chalk.gray('# Short aliases')}
-  yy pi --live 'hello'
-  ypl 'hello'     ${chalk.gray('# same as: yy pi --live hello')}
-
-  ${chalk.gray('# Pipe prompt via stdin (heredoc, pipe, redirect)')}
-  echo 'Analyze this codebase' | yylo -s claude
-  yylo -s claude << 'EOF'
-  Analyze this codebase and suggest improvements
-  EOF
-
-  ${chalk.gray('# Shell safety')}
-  ${chalk.gray('Use single quotes or -f/stdin when prompts include backticks or $()')}
-
-  ${chalk.gray('# Prompt-time command substitution (per iteration)')}
-  yylo claude -p "Status: !'git status --short'"
-  yylo claude -i 3 -p "Recent commits:\n!\`\`\`git log -n 5 --oneline\`\`\`"
-
-  ${chalk.gray('# Interactive project setup')}
-  yylo init --interactive
-
-  ${chalk.gray('# Continue the last session without retyping settings')}
-  yylo continue 'Implement the next step'
-  yylo continue -p 'Continue from here'
-
-  ${chalk.gray('# Clone Pi sessions for independent branches')}
-  yylo clone 'Explore approach A'
-  yylo clone --name C 'Explore C'
-  yylo clone --from C --name M 'Explore M'
-  yylo --resume <session-id> --clone '@@close_loop'  ${chalk.gray('# explicit id fork')}
-  yylo branches
-  yylo switch C
-  yylo continue --clone 'Explore approach B'
-  yylo --resume <session-id> --clone 'Explore approach C'
-
-  ${chalk.gray('# Force-refresh installed project scripts from the current package')}
-  yylo scripts update --force
-  yylo install-scripts --force
-
-  ${chalk.gray('# Query continue scope hash/status for scripts')}
-  yylo continue-scope --json
-  yylo continue-scope A1B2C3 --json
-
-  ${chalk.gray('# Manage sessions')}
-  yylo session list
-  yylo session info abc123
-
-  ${chalk.gray('# Enable feedback collection globally')}
-  yylo --enable-feedback start
-
-  ${chalk.gray('# Collect feedback')}
-  yylo feedback --interactive
-
-  ${chalk.gray('# Import Codex auth into Pi auth.json')}
-  yylo auth import-codex
-
-  ${chalk.gray('# Set subagent-specific default models')}
-  yylo pi set-default-model :api-codex
-  yylo claude set-default-model :opus
-
-  ${chalk.gray('# Setup Git repository')}
-  yylo setup-git https://github.com/yylo-dev/yylo
-
-  ${chalk.gray('# Verbose is ON by default. Disable with:')}
-  yylo -v false -s claude 'prompt'
-  yylo -v 0 -s claude 'prompt'
-  yylo -v no -s claude 'prompt'
-
-  ${chalk.gray('# Quiet mode (suppress agent output and hooks):')}
-  yylo --quiet -s claude 'prompt'
-  yylo --silent -s claude 'prompt'
-
-${chalk.blue.bold('Environment Variables:')}
-  YYLO_SUBAGENT              Default subagent (claude, cursor, codex, gemini, pi)
-  YYLO_CONFIG                Configuration file path
-  YYLO_VERBOSE               Verbose output (true/false/0/1/no/yes, default: true)
-  YYLO_ENABLE_FEEDBACK       Enable concurrent feedback collection (true/false)
-  YYLO_MCP_TIMEOUT           Operation timeout in milliseconds
-  YYLO_ON_HOURLY_LIMIT       Behavior when quota limit reached (wait/raise)
-  JUNO_INTERACTIVE_FEEDBACK_MODE  Enable interactive feedback mode (true/false)
-  NO_COLOR                        Disable colored output (standard)
-
-${chalk.blue.bold('Env File Bootstrap:')}
-  Auto-creates ${chalk.cyan('.env.yylo')} in project root and loads it on startup.
-  (Python virtual environment path is ${chalk.cyan('.venv_juno')}; this is separate from env files.)
-  Configure custom env file in ${chalk.cyan('.juno_task/config.json')}:
-    ${chalk.gray('"envFilePath": ".env.local", "envFileCopied": true')}
-
-${chalk.blue.bold('Prompt Macros (@@key):')}
-  Define reusable prompt macros in ${chalk.cyan('.juno_task/config.json')} under ${chalk.cyan('promptMacros')}.
-  Example: ${chalk.gray('"promptMacros": {"global": {"git": "commit changes", "spec": {"path": "prompts/spec.md"}}, "local": {"ship": "run tests then @@git"}, "maxDepth": 10}')}
-  Values can be strings or {path}/{text}; relative paths resolve from the project working directory.
-  Local keys override global keys. Default order is before command substitution.
-
-${chalk.blue.bold('Configuration:')}
-  Configuration can be specified via:
-  1. Command line arguments (highest priority)
-  2. Environment variables
-  3. Configuration files (.json, .toml, pyproject.toml)
-  4. Built-in defaults (lowest priority)
-
-${chalk.blue.bold('Support:')}
-  Documentation: https://github.com/yylo-dev/yylo#readme
-  Issues: https://github.com/yylo-dev/yylo/issues
-  Website: https://yylo.dev
-  License: MIT
-
-`,
-  );
 
   // Commander treats the root --version option as global even after a nested
   // command. Preserve the documented skills --version spelling by routing it
