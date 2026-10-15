@@ -31,10 +31,13 @@ resulting file. Only explicitly selected package versions advance. Dependency
 compatibility is an explicit intent, not an inferred bump of every package.
 
 Owned fields include CLI/Benchmark manifests and both lockfile root versions,
-current capability `sourceVersion` fields, Ledger's authored `__version__`, skills
+current capability `sourceVersion` fields, the CLI README's exact checkout
+install/source and dependency declarations, Ledger's authored `__version__`, skills
 VERSION/plugin/manifest identities, CLI dependencies, and the Ledger shell policy
 and its declared runtime twin. Historical release evidence and old documentation
-examples are intentionally not globally rewritten. New version-bearing fields
+examples are intentionally not globally rewritten. Missing, duplicate or stale
+current README declarations refuse preparation; repair that drift separately
+before making a version plan. New version-bearing fields
 must be added to the inventory and independent tests when introduced.
 
 `check` distinguishes prepared, partial and applied bytes. It does not claim that
