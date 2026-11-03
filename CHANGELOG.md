@@ -1,5 +1,13 @@
 # YYLO release notes
 
+## 0.2.13
+
+- Allow current-runtime admission and new task starts when an unrelated historical
+  task's pinned package is unavailable, including archived predecessors whose
+  lifecycle still records WORKING. Preserve historical pins and ownership.
+- Continue authenticating the exact retained package for a selected old attempt.
+  Refusals now identify its task, attempt, installed root, artifact and digest.
+
 ## Unreleased
 
 ### 0.2.10 source baseline

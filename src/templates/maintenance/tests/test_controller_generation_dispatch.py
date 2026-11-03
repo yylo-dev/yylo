@@ -153,7 +153,24 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         self.assertEqual((controller / migration.CURRENT).read_bytes(), marker_before)
         self.assertEqual((controller / migration.INVENTORY).read_bytes(), before)
         invoke('scripts', 'generation', 'upgrade')
-        started = invoke('task', 'start', 'X')
+        # Missing historical packages must not block an unrelated new task.
+        # Preserve and restore fixture bytes so subsequent continuation checks
+        # still prove exact retained-runtime dispatch.
+        missing = [Path(retained_previous[key]) for key in ('root', 'artifact')]
+        saved = [path.with_name(path.name + '.preserved') for path in missing]
+        for path, backup in zip(missing, saved):
+            path.rename(backup)
+        try:
+            started = invoke('task', 'start', 'X')
+            refused = subprocess.run(['node', executable, 'task', 'lease-heartbeat', 'Y',
+                                      '--lease-token', active['lease_token']],
+                                     cwd=controller, env=env, capture_output=True, text=True, timeout=120)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn('task=Y', refused.stderr)
+            self.assertIn(retained_previous['sha256'], refused.stderr)
+        finally:
+            for path, backup in zip(missing, saved):
+                backup.rename(path)
         self.assertEqual(started['state'], 'WORKING')
         self.assertTrue((controller / migration.CURRENT).is_file())
         self.assertEqual((controller / 'AGENTS.md').read_bytes(), b'candidate guidance\n')

@@ -148,9 +148,13 @@ After activation these doctors retain prospective package-generation assessment,
 separate from ordinary observation's active-only admission. When the invoked
 package root is already the selected active generation,
 assessment validates the active package, managed inventory, runtime selectors and
-applicable attempt/ACTIVE-lease pins directly, without discovering a candidate or
-building a hypothetical migration plan. Authentication and schema facts are reused
-only within one assessment and only for identical evidence tuples; different roots
+shared-state schema directly, without discovering a candidate or building a
+hypothetical migration plan. Unrelated historical attempt packages are not
+required for ordinary current-runtime admission. Selecting a retained task
+authenticates its exact attempt pin; missing or invalid retained packages refuse
+with the task ID, attempt, installed root, artifact path and digest. Explicit
+generation migration still validates retained pins before changing shared state.
+Authentication and schema facts are reused only within one assessment and only for identical evidence tuples; different roots
 and later invocations still require authentication. This read-only observation is
 not a transferable admission proof. Same-artifact distinct-root comparison avoids
 redundant retained redispatch, not distinct-root authentication. Dispatch acquires the reader lease before its
