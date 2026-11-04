@@ -1,5 +1,13 @@
 # YYLO release notes
 
+## 0.2.14
+
+- Allow controller generation upgrades with missing historical task packages.
+  Validate current/candidate compatibility while preserving task state, ownership,
+  and exact historical pins; authenticate historical packages only on selection.
+- Cover upgrade, repeated upgrade, unrelated task start, and explicit historical
+  continuation refusal with missing artifacts.
+
 ## 0.2.13
 
 - Allow current-runtime admission and new task starts when an unrelated historical

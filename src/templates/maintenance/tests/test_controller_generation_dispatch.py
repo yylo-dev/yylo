@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Actual built CLI invocation against two authenticated offline fixture packages.
+"""Actual built CLI invocation against three authenticated offline fixture packages.
 
 The CLI bytes are shipped build output; old/new manifests are deliberately small
 representative generations, not claims about a historical published tarball.
@@ -54,7 +54,7 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         board = (controller / '.juno_task/scripts/kanban.sh').read_bytes()
         version = json.loads((PACKAGE / 'package.json').read_text())['version']
         packages = []
-        for label in ('previous', 'candidate'):
+        for label in ('previous', 'intermediate', 'candidate'):
             package = root / label
             write(package / 'package.json', {'name': '@yylo/cli', 'version': version, 'type': 'module',
                 'yyloControllerGeneration': {'ordinaryDispatch': 'explicit-only-v1'},
@@ -84,7 +84,7 @@ class PublicGenerationDispatchTests(unittest.TestCase):
             evidence = {'root': str(package), 'artifact': str(tar), 'sha256': migration.digest(tar.read_bytes())}
             write(package / '.yylo-generation-evidence.json', evidence)
             packages.append(evidence)
-        previous, candidate = packages
+        previous, intermediate, candidate = packages
         old = migration.authenticate(previous)
         inventory = {'schemaVersion': 1, 'packageName': '@yylo/cli', 'packageVersion': version, 'assets': {}}
         for relative, item in migration.assets(old).items():
@@ -136,6 +136,7 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         self.assertTrue(Path(retained_previous['root']).is_relative_to(root / 'state'))
         self.assertNotEqual(retained_previous['root'], previous['root'])
         self.assertEqual(migration.authenticate(retained_previous)['files'], old['files'])
+        invoke('scripts', 'generation', 'upgrade', cli=str(Path(intermediate['root']) / 'dist/bin/cli.mjs'))
         for relative in runtime_paths: write(fixture.repository / relative, (SCRIPTS / 'task_workspace.py').read_bytes())
         git(fixture.repository, 'add', *runtime_paths)
         git(fixture.repository, 'commit', '-m', 'candidate source runtime fixture')
@@ -152,8 +153,8 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         self.assertIn('Using retained controller runtime:', ordinary.stderr)
         self.assertEqual((controller / migration.CURRENT).read_bytes(), marker_before)
         self.assertEqual((controller / migration.INVENTORY).read_bytes(), before)
-        invoke('scripts', 'generation', 'upgrade')
-        # Missing historical packages must not block an unrelated new task.
+        # Missing historical packages must not block a new explicit upgrade
+        # or an unrelated new task. The active package remains available.
         # Preserve and restore fixture bytes so subsequent continuation checks
         # still prove exact retained-runtime dispatch.
         missing = [Path(retained_previous[key]) for key in ('root', 'artifact')]
@@ -161,6 +162,9 @@ class PublicGenerationDispatchTests(unittest.TestCase):
         for path, backup in zip(missing, saved):
             path.rename(backup)
         try:
+            self.assertEqual(invoke('scripts', 'generation', 'doctor')['disposition'], 'migration_required')
+            self.assertEqual(invoke('scripts', 'generation', 'upgrade')['disposition'], 'ready')
+            self.assertEqual(invoke('scripts', 'generation', 'upgrade')['disposition'], 'ready')
             started = invoke('task', 'start', 'X')
             refused = subprocess.run(['node', executable, 'task', 'lease-heartbeat', 'Y',
                                       '--lease-token', active['lease_token']],

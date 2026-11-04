@@ -794,12 +794,27 @@ def prepare(root: Path, candidate_evidence: dict[str, str], previous_evidence: d
         raise Refusal("active_pin_unverified", "invalid retained pin map")
     for name, pin in pins.items():
         prior = prior_pins.get(name)
+        if prior is not None and not isinstance(prior, dict):
+            raise Refusal("active_pin_unverified", name)
         if prior is not None and prior.get("attempt") == pin["attempt"]:
-            retained = facts.package(prior["generation"])
-            if (prior.get("executable") != retained["executable"]
-                    or state.get("schema_version") not in facts.state_schemas(prior["generation"])):
+            # Retention is not execution admission. This transaction leaves
+            # task-state bytes/schema and ownership untouched, and validates
+            # both current and candidate readers above. Missing historical
+            # packages must not prevent that state-preserving upgrade.
+            generation = prior.get("generation")
+            if (not isinstance(generation, dict)
+                    or set(generation) != {"root", "artifact", "sha256"}
+                    or any(not isinstance(generation.get(key), str) for key in generation)
+                    or not Path(generation["root"]).is_absolute()
+                    or not Path(generation["artifact"]).is_absolute()
+                    or not re.fullmatch(r"[0-9a-f]{64}", generation["sha256"])
+                    or prior.get("executable") != str(Path(generation["root"]) / "dist/bin/cli.mjs")):
                 raise Refusal("active_pin_unverified", name)
             pins[name] = prior
+    # Schema-changing task migrations need their own explicit compatibility
+    # protocol; they cannot inherit this state-preserving retention rule.
+    if STATE in after:
+        raise Refusal("shared_state_incompatible", "generation upgrade must preserve task state")
     marker = decode_json(content(after[CURRENT]))
     marker["active_pins"] = pins
     after[CURRENT] = image(encoded(marker))

@@ -46,6 +46,7 @@ try {
       || JSON.stringify(result.scenarios.map(row => row.profile).sort()) !== JSON.stringify(['historical-consumer-shape', 'source-controller'])
       || result.scenarios.some(row => row.candidate_sha256 !== sha256(before)
         || row.native_merge !== 'GIT_INTEGRATED' || row.hydration !== 'passed' || row.candidate_package !== 'unchanged'
+        || (row.profile === 'source-controller' && row.missing_historical_package !== 'upgrade-and-start-passed')
         || !launcherChecksPass(row))
       || sha256(fs.readFileSync(artifact)) !== sha256(before)) throw new Error('Contradictory packed acceptance result');
   const sourceSha = run('git', ['rev-parse', 'HEAD'], 10_000).trim();

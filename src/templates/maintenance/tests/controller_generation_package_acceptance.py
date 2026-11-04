@@ -349,13 +349,13 @@ def scenario(artifact, historical=False, handoff_report=None):
             rows = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
             return rows[-1] if rows else None
 
-        if handoff_report is not None:
+        if not historical:
             # Synthetic isolated workload, not lifecycle receipts or live tasks.
             # Upgrade must bind every applicable attempt to the authenticated
             # full predecessor package, as in the structural migration tests.
             state = json.loads((controller / migration.STATE).read_text()) if (controller / migration.STATE).exists() else {
                 'schema_version': 'juno_task_workspace_state.v1', 'tasks': {}}
-            for number in range(78):
+            for number in range(78 if handoff_report is not None else 2):
                 state['tasks'][f'PIN{number:03}'] = {'state': 'WORKING', 'fencing': {'attempt': 1, 'state': 'ACTIVE'}}
             write(controller / migration.STATE, state)
         before = (controller / migration.INVENTORY).read_bytes()
@@ -370,8 +370,21 @@ def scenario(artifact, historical=False, handoff_report=None):
         assert (controller / migration.INVENTORY).read_bytes() == before
         assert not (controller / migration.CURRENT).exists()
         assert invoke('scripts', 'generation', 'upgrade')['disposition'] == 'ready'
-        # Same-artifact explicit repeat must be safe and leave coherent selectors.
+        # The packed release must recover with historical package bytes absent.
+        missing_history = []
+        history_state = (controller / migration.STATE).read_bytes() if not historical else None
+        if not historical:
+            pins = json.loads((controller / migration.CURRENT).read_text())['active_pins']
+            generation = pins['PIN000']['generation']
+            for key in ('root', 'artifact'):
+                path = Path(generation[key])
+                backup = path.with_name(path.name + '.preserved')
+                path.rename(backup)
+                missing_history.append((path, backup))
+        assert invoke('scripts', 'generation', 'doctor')['disposition'] == 'ready'
         assert invoke('scripts', 'generation', 'upgrade')['disposition'] == 'ready'
+        if not historical:
+            assert (controller / migration.STATE).read_bytes() == history_state
         def advance_source(suffix):
             # Product source is not the installed controller. Exercise real
             # source movement without activation or rewriting generation pins.
@@ -392,6 +405,8 @@ def scenario(artifact, historical=False, handoff_report=None):
 
         advance_source('\n# Source-only change must not require activation.\n')
         task = invoke('task', 'start', 'X')
+        for path, backup in missing_history:
+            backup.rename(path)
         assert task['state'] == 'WORKING' and task['hydration']['status'] == 'passed'
         if not historical:
             assert task['creation_receipt']['runtime_generation']['target_copy_current'] is False
@@ -669,6 +684,7 @@ os.execvpe(sys.argv[2], sys.argv[2:], dict(os.environ))
                 'native_merge': landed['outcome'], 'independent_bytes': 'preserved',
                 'candidate_package': 'unchanged-before-explicit-npm-replacement' if second_upgrade else 'unchanged',
                 'second_global_upgrade': second_upgrade, 'agent_checks': agent_checks,
+                'missing_historical_package': 'upgrade-and-start-passed' if not historical else 'not-applicable',
                 'public_launchers': public_launchers}
     finally:
         fixture.tearDown()
