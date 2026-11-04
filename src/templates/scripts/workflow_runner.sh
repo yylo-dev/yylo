@@ -486,6 +486,16 @@ def parse_scalar(value: str) -> Any:
     value = value.strip()
     if value == "":
         return ""
+    if value.startswith("["):
+        # Shipped hydration workflows use JSON-compatible YAML flow lists.
+        # Preserve argv boundaries without requiring ambient PyYAML or eval.
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise WorkflowError("flow lists require JSON syntax without PyYAML") from exc
+        if not isinstance(parsed, list):
+            raise WorkflowError("expected a flow list")
+        return parsed
     if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
         return value[1:-1]
     lowered = value.lower()
@@ -652,7 +662,7 @@ def parse_yaml_like(text: str) -> dict[str, Any]:
                     if v == "|":
                         item[k], i = read_literal_block(lines, i + 1, child_indent)
                         continue
-                    if v == "" and k == "command":
+                    if v == "" and k in {"command", "probe", "outputs"}:
                         item[k], i = read_scalar_list(lines, i + 1, child_indent)
                         continue
                     item[k] = parse_scalar(v)
@@ -679,7 +689,7 @@ def parse_yaml_like(text: str) -> dict[str, Any]:
             if v == "|":
                 nested[k], i = read_literal_block(lines, i + 1, indent)
                 continue
-            if v == "" and k == "command":
+            if v == "" and k in {"command", "probe", "outputs"}:
                 nested[k], i = read_scalar_list(lines, i + 1, indent)
                 continue
             nested[k] = parse_scalar(v)

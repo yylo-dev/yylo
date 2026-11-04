@@ -297,6 +297,37 @@ class WorkflowRunnerResumeContractTests(unittest.TestCase):
         self.assertEqual(payload["expected"], "abc")
         self.assertEqual(payload["actual"], "def")
 
+    def test_hydration_yaml_without_pyyaml_preserves_argv_and_outputs(self):
+        workflow_yaml = """schema_version: v1
+workflow_id: hydration_fallback
+workflow_class: task_hydration
+hydration_selection: admitted_scope_v1
+steps:
+  - id: node_dependencies
+    dependency_root: juno-code
+    name: Hydrate exact Node lock
+    command: ["python3", "helper.py", "space in argument", "$(never execute)"]
+    probe:
+      - python3
+      - helper.py
+    timeout_seconds: 900
+    fail_workflow: true
+    non_interactive: true
+    network: true
+    sensitive: false
+    outputs: ["juno-code/node_modules"]
+"""
+        with mock.patch.object(runner, "_managed_yaml_module", return_value=(None, "fixture")):
+            workflow = runner.parse_yaml_like(workflow_yaml)
+            runner.validate_workflow(workflow)
+            step = workflow["steps"][0]
+            self.assertEqual(step["command"], ["python3", "helper.py", "space in argument", "$(never execute)"])
+            self.assertEqual(step["probe"], ["python3", "helper.py"])
+            self.assertEqual(step["outputs"], ["juno-code/node_modules"])
+            self.assertEqual(runner.parse_scalar("[]"), [])
+            with self.assertRaisesRegex(runner.WorkflowError, "JSON syntax"):
+                runner.parse_scalar("[unsupported, YAML]")
+
     def test_advanced_yaml_without_pyyaml_fails_with_dependency_guidance(self):
         real_import = __import__
 

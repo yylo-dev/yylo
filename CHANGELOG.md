@@ -2,6 +2,9 @@
 
 ## 0.2.14
 
+- Parse shipped hydration YAML argv/probe/output lists without requiring PyYAML
+  in the caller’s Python environment; exercise real YAML in packed acceptance.
+
 - Allow controller generation upgrades with missing historical task packages.
   Validate current/candidate compatibility while preserving task state, ownership,
   and exact historical pins; authenticate historical packages only on selection.

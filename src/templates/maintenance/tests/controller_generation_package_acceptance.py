@@ -313,11 +313,24 @@ def scenario(artifact, historical=False, handoff_report=None):
             git(fixture.repository, 'add', 'juno-code/src/templates/managed-assets.json')
             git(fixture.repository, 'commit', '-m', 'future compatible source declaration')
         workflow = fixture.repository / '.juno_task/config/worktree-hydration.yaml'
-        write(workflow, {'schema_version': 'v1', 'workflow_id': 'controller-upgrade-acceptance',
-                         'workflow_class': 'task_hydration', 'steps': [{
-                             'id': 'ready', 'name': 'Offline fixture hydration', 'probe': ['true'],
-                             'command': ['true'], 'timeout_seconds': 30, 'fail_workflow': True,
-                             'non_interactive': True, 'network': False, 'sensitive': False, 'outputs': []}]})
+        # Exercise real YAML flow lists, not the JSON shortcut: task hydration
+        # selection runs before the runner selects its managed Python environment.
+        write(workflow, b'''schema_version: v1
+workflow_id: controller-upgrade-acceptance
+workflow_class: task_hydration
+hydration_selection: admitted_scope_v1
+steps:
+  - id: ready
+    name: Offline fixture hydration
+    probe: ["true"]
+    command: ["true"]
+    timeout_seconds: 30
+    fail_workflow: true
+    non_interactive: true
+    network: false
+    sensitive: false
+    outputs: []
+''')
         git(fixture.repository, 'add', '.juno_task/config/worktree-hydration.yaml')
         git(fixture.repository, 'commit', '-m', 'frozen offline task hydration')
         target = git(fixture.repository, 'rev-parse', 'product')
