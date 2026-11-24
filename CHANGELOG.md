@@ -1,5 +1,10 @@
 # YYLO release notes
 
+## 0.2.16
+
+- Add default-off post-merge worktree cleanup with controller configuration and strict environment override, per-task preview/apply, preservation checks, and separate cleanup outcomes.
+- Align lifecycle skills and requirements with explicit cleanup opt-in.
+
 ## 0.2.15
 
 - Update Pi defaults and `:gpt`/`:astra` to GPT-6.2 Astra and `:sol` to GPT-6.2 Sol.

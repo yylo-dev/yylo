@@ -70,3 +70,14 @@ This is schema `juno.life_cycle.v1`, revision 9. Change the canonical source in
 notes when behavior changes, and validate source/dist/tarball plus managed-install
 parity. Project customizations are user-owned: managed update must preserve or
 surface conflicts rather than silently replacing customized bytes.
+
+
+Post-merge worktree cleanup is opt-in. Controller task-workspace policy
+`cleanup.after_merge` defaults to `false`; `YYLO_WORKTREE_CLEANUP_AFTER_MERGE=true`
+or `false` overrides it. Explicit owner opt-in authorizes only eligible delivered
+worktrees. `cleanup.disposable_paths` lists exact relative dependency/build paths;
+ignored files outside those paths preserve the worktree. Preview retained worktrees
+with `yy merge cleanup TASK_ID --dry-run`; use `--apply` only with cleanup authority.
+Cleanup preserves branches and evidence, skips dirty/active/unknown worktrees and
+initialized submodules, and never changes a successful merge into a failed merge.
+Inspect the separate cleanup result; do not force removal to resolve a skip.

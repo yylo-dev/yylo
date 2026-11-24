@@ -22,7 +22,7 @@ describe('native Git merge CLI', () => {
     configureMergeCommand(program, async () => undefined);
     const merge = program.commands.find((command) => command.name() === 'merge');
     expect(merge?.commands.map((command) => command.name())).toEqual([
-      'status', 'land', 'project',
+      'status', 'land', 'cleanup', 'project',
     ]);
     expect(merge?.description()).toContain('one task');
     expect(merge?.commands.find((command) => command.name() === 'land')?.description())
@@ -45,6 +45,8 @@ describe('native Git merge CLI', () => {
     { argv: ['status', 'T123'], expected: ['status', 'T123'] },
     { argv: ['land', 'T123'], expected: ['land', 'T123', []] },
     { argv: ['project', 'T123'], expected: ['project', 'T123'] },
+    { argv: ['cleanup', 'T123'], expected: ['cleanup', 'T123', ['--dry-run']] },
+    { argv: ['cleanup', 'T123', '--apply'], expected: ['cleanup', 'T123', ['--apply']] },
   ] as const)('forwards $argv', async ({ argv, expected }) => {
     const invoke = vi.fn(async () => undefined);
     const program = new Command().exitOverride();

@@ -336,5 +336,12 @@
       "where",
       "wiki"
     ]
+  },
+  "cleanup": {
+    "after_merge": false,
+    "disposable_paths": [
+      "juno-code/node_modules",
+      "juno-benchmark/node_modules"
+    ]
   }
 }

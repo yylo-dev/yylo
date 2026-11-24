@@ -908,6 +908,21 @@ class ValidationProfilesRoundTripTests(unittest.TestCase):
                 r"missing fields: full_suite_validation; extra fields: unexpected_policy"):
             task_runtime.load_config(self.controller)
 
+    def test_cleanup_policy_rejects_unsafe_shapes_and_paths(self) -> None:
+        for cleanup in (True, {"after_merge": "true"}, {"after_merge": 1},
+                        {"unknown": True}, {"disposable_paths": "node_modules"},
+                        {"disposable_paths": ["../outside"]},
+                        {"disposable_paths": ["."]},
+                        {"disposable_paths": ["/tmp"]},
+                        {"disposable_paths": [".env"]}):
+            with self.subTest(cleanup=cleanup):
+                self.write_config({**self.base_config(), "cleanup": cleanup})
+                with self.assertRaises(task_runtime.TaskWorkspaceError):
+                    task_runtime.load_config(self.controller)
+        self.write_config({**self.base_config(), "cleanup": {
+            "after_merge": True, "disposable_paths": ["app/node_modules"]}})
+        self.assertTrue(task_runtime.load_config(self.controller)["cleanup"]["after_merge"])
+
     def test_absent_profiles_stay_absent_across_renormalization(self) -> None:
         self.write_config(self.base_config())
         first = task_runtime.load_config(self.controller)
@@ -4831,6 +4846,22 @@ raise SystemExit(2)
         self.assertEqual(git(self.repository, "rev-parse", "refs/heads/product"), self.base)
         self.assertTrue((self.workspaces / "X").is_dir())
         self.assertEqual(self.payload("finish", "X")["outcome"], "already_queued")
+
+    def test_cleanup_identity_accepts_only_explicit_merged_state(self) -> None:
+        self.payload("start", "X")
+        record = task_runtime.read_state(self.controller)["tasks"]["X"]
+        config = task_runtime.load_config(self.controller)
+        repository = task_runtime.product_repository(self.controller, config)
+        record["state"] = "MERGED"
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "identity drifted"):
+            task_runtime.observe_task_identity(record, repository, config, "X")
+        _, worktree, _ = task_runtime.observe_task_identity(
+            record, repository, config, "X", expected_state="MERGED")
+        self.assertEqual(worktree, self.workspaces / "X")
+        record["creation_receipt"]["task_id"] = "OTHER"
+        with self.assertRaisesRegex(task_runtime.TaskWorkspaceError, "identity drifted"):
+            task_runtime.observe_task_identity(
+                record, repository, config, "X", expected_state="MERGED")
 
     def test_state_ineligible_preflight_refuses_before_runtime_or_validation(self) -> None:
         self.payload("start", "X")
