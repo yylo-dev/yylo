@@ -1,5 +1,12 @@
 # YYLO release notes
 
+## 0.2.15
+
+- Update Pi defaults and `:gpt`/`:astra` to GPT-6.2 Astra and `:sol` to GPT-6.2 Sol.
+- Add `:terra` and update `:mini` to GPT-6.1 Terra; keep `:luna` on GPT-6 Luna.
+  All four model families use the ChatGPT Codex provider (`openai-codex`).
+- Align CLI help and documentation, with exact provider/model dispatch regression coverage.
+
 ## 0.2.14
 
 - Parse shipped hydration YAML argv/probe/output lists without requiring PyYAML
