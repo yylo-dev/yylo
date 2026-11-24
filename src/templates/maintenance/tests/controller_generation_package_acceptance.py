@@ -444,6 +444,12 @@ steps:
         landed = invoke('merge', 'land', 'X')
         assert landed['outcome'] == 'GIT_INTEGRATED'
         assert landed['ledger']['board_status'] == 'done'
+        cleanup_preview = invoke('merge', 'cleanup', 'X', '--dry-run')
+        assert cleanup_preview['schema_version'] == 'juno_worktree_cleanup.v1'
+        assert cleanup_preview['operation'] == 'preview'
+        source_row = next(row for row in cleanup_preview['worktrees'] if row['path'] == task['worktree'])
+        assert source_row['status'] == 'eligible', source_row
+        assert Path(task['worktree']).is_dir(), 'cleanup preview removed the task worktree'
         assert git(controller, 'show', 'product:src/feature.txt') == 'X'
         assert (controller / 's1034-out.txt').read_bytes() == b'unrelated output\x00preserved'
         assert (controller / '.pi/skills/independent/SKILL.md').read_bytes() == b'independent custom skill'

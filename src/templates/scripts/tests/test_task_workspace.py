@@ -2131,7 +2131,7 @@ class TaskWorkspaceTests(TaskWorkspaceFixture):
 
     def test_merge_audit_exposes_only_native_delivery_operations(self) -> None:
         audit_root = self.controller / ".juno_task/runtime/control-audit/merge"
-        for operation in ("land", "project"):
+        for operation in ("land", "project", "cleanup"):
             receipt = task_runtime.record_control_audit(
                 self.controller, "merge", operation, "X")
             audit = json.loads(Path(receipt["path"]).read_text())
