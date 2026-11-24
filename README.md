@@ -231,10 +231,10 @@ Record relations.
 | Shortcut | Resolved model |
 | --- | --- |
 | `:luna` | `openai-codex/gpt-6-luna` |
-| `:sol` | `openai-codex/gpt-6.1-sol` |
-| `:gpt` | `openai-codex/gpt-6-astra` (Pi default) |
-| `:astra` | `openai-codex/gpt-6-astra` |
-| `:mini` | `openai-codex/gpt-5.6-terra` |
+| `:sol` | `openai-codex/gpt-6.2-sol` |
+| `:gpt` | `openai-codex/gpt-6.2-astra` (Pi default) |
+| `:astra` | `openai-codex/gpt-6.2-astra` |
+| `:terra`, `:mini` | `openai-codex/gpt-6.1-terra` |
 | `:sonnet` | `anthropic/claude-sonnet-4-6` |
 | `:opus` | `anthropic/claude-opus-4-6` |
 

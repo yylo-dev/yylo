@@ -1669,11 +1669,12 @@ ${chalk.blue('Model Shorthands:')}
   :haiku               anthropic/claude-haiku-4-5-20251001
   ${chalk.gray('# OpenAI / OpenAI Codex')}
   :luna                openai-codex/gpt-6-luna
-  :sol                 openai-codex/gpt-6.1-sol
-  :gpt                 openai-codex/gpt-6-astra ${chalk.gray('(default)')}
-  :astra               openai-codex/gpt-6-astra
+  :sol                 openai-codex/gpt-6.2-sol
+  :gpt                 openai-codex/gpt-6.2-astra ${chalk.gray('(default)')}
+  :astra               openai-codex/gpt-6.2-astra
   :gpt5.5              openai-codex/gpt-5.5
-  :mini                openai-codex/gpt-5.6-terra
+  :terra               openai-codex/gpt-6.1-terra
+  :mini                openai-codex/gpt-6.1-terra
   :gpt-5               openai/gpt-5
   :gpt-4o              openai/gpt-4o
   :o3                  openai/o3
@@ -1705,7 +1706,7 @@ ${chalk.blue('Service-Specific Options:')}
   --live                    Run Pi in interactive TUI mode (auto-exits on non-aborted completion)
 
 ${chalk.blue('Environment Variables:')}
-  PI_MODEL                  Model override (default: :gpt → openai-codex/gpt-6-astra)
+  PI_MODEL                  Model override (default: :gpt → openai-codex/gpt-6.2-astra)
   PI_PROVIDER               Provider override
   PI_PROJECT_PATH           Project directory
   PI_THINKING               Thinking level

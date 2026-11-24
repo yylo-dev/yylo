@@ -944,13 +944,14 @@ exit 1
       expect(result.stdout).toContain(':luna');
       expect(result.stdout).toContain('openai-codex/gpt-6-luna');
       expect(result.stdout).toContain(':sol');
-      expect(result.stdout).toContain('openai-codex/gpt-6.1-sol');
-      expect(result.stdout).toMatch(/:gpt\s+openai-codex\/gpt-6-astra/);
-      expect(result.stdout).toMatch(/:astra\s+openai-codex\/gpt-6-astra/);
+      expect(result.stdout).toContain('openai-codex/gpt-6.2-sol');
+      expect(result.stdout).toMatch(/:gpt\s+openai-codex\/gpt-6\.2-astra/);
+      expect(result.stdout).toMatch(/:astra\s+openai-codex\/gpt-6\.2-astra/);
       expect(result.stdout).toContain(':gpt5.5');
       expect(result.stdout).toContain('openai-codex/gpt-5.5');
       expect(result.stdout).toContain(':mini');
-      expect(result.stdout).toContain('openai-codex/gpt-5.6-terra');
+      expect(result.stdout).toMatch(/:terra\s+openai-codex\/gpt-6\.1-terra/);
+      expect(result.stdout).toMatch(/:mini\s+openai-codex\/gpt-6\.1-terra/);
       expect(result.stdout).not.toMatch(/:gpt\s+openai-codex\/gpt-5\.5/);
       expect(result.stdout).toContain('high, xhigh, max');
     });
