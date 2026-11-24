@@ -292,6 +292,18 @@ class NativeDeliveryTests(unittest.TestCase):
         self.assertEqual(result["worktrees"][0]["reason"], "initialized_submodules")
         self.assertTrue(source.exists())
 
+    def test_cleanup_malformed_receipt_does_not_fail_completed_delivery(self):
+        source, _ = self.cleanup_source()
+        landed = self.f.runtime.land(self.f.controller, "TASK")
+        Path(landed["receipt"]["path"]).write_text("[]")
+        self.f.config["cleanup"]["after_merge"] = True
+        retried = self.f.runtime.land(self.f.controller, "TASK")
+        self.assertEqual(retried["outcome"], "ALREADY_PROJECTED")
+        self.assertEqual(retried["cleanup"]["status"], "failed")
+        self.assertTrue(Path(retried["cleanup"]["receipt"]["path"]).exists())
+        self.assertEqual(self.f.state["tasks"]["TASK"]["state"], "MERGED")
+        self.assertTrue(source.exists())
+
     def test_cleanup_failure_does_not_fail_delivery(self):
         self.cleanup_source()
         self.f.config["cleanup"]["after_merge"] = True

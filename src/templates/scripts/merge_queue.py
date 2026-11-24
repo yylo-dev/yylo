@@ -264,8 +264,9 @@ def automatic_cleanup(controller: Path, task_id: str) -> dict[str, Any]:
         if not cleanup_policy(config):
             return {"status": "disabled"}
         return cleanup(controller, task_id, apply=True)
-    except (DeliveryError, task_runtime.TaskWorkspaceError, OSError, ValueError, KeyError) as exc:
-        # Delivery is already complete. Never turn cleanup into a failed merge.
+    except Exception as exc:
+        # Optional cleanup must also contain malformed metadata and unexpected
+        # runtime failures. Delivery is already complete; never fail the merge.
         result = {"status": "failed", "reason": str(exc)[:512], "task_id": task_id,
                   "schema_version": "juno_worktree_cleanup.v1", "operation": "apply"}
         try:
