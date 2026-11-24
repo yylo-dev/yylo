@@ -177,6 +177,35 @@ source generation, explicit controller rebind, and exact target-transition
 runtime refresh. These are maintenance authorities, not task delivery, and must
 not publish, push, deploy, or mutate the product ref.
 
+## Opt-in worktree cleanup
+
+Post-merge worktree cleanup is opt-in. Controller task-workspace policy
+`cleanup.after_merge` defaults to `false`; `YYLO_WORKTREE_CLEANUP_AFTER_MERGE=true`
+or `false` overrides it. Explicit owner opt-in authorizes only eligible delivered
+worktrees. `cleanup.disposable_paths` lists exact relative dependency/build paths;
+ignored files outside those paths preserve the worktree. Preview retained worktrees
+with `yy merge cleanup TASK_ID --dry-run`; use `--apply` only with cleanup authority.
+Cleanup preserves branches and evidence, skips dirty/active/unknown worktrees and
+initialized submodules, and never changes a successful merge into a failed merge.
+Inspect the separate cleanup result; do not force removal to resolve a skip.
+
+Example controller `.juno_task/config/task-workspace.json` policy:
+
+```json
+"cleanup": {
+  "after_merge": false,
+  "disposable_paths": ["juno-code/node_modules", "juno-benchmark/node_modules"]
+}
+```
+
+Strict environment values are `true` and `false`; malformed values refuse before
+integration. Cleanup runs only after Git and Ledger delivery are complete, including
+projection recovery. Each apply rechecks current ancestry and worktree identity.
+Receipts live in controller runtime storage outside removed worktrees. Repeating
+apply is safe; missing worktrees report `already_removed`. A preview makes no
+cleanup writes. Unknown ownership, initialized submodules and unknown ignored
+content require separate review. No branch deletion or bulk historical sweep occurs.
+
 ## Preservation and exclusions
 
 Never reset, stash, force, rebase, squash, or clean to manufacture compliance.

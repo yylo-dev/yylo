@@ -122,6 +122,158 @@ def persist_task(controller: Path, task_id: str, expected: dict[str, Any],
         task_runtime.write_state(controller, state)
 
 
+def cleanup_policy(config: dict[str, Any]) -> bool:
+    value = os.environ.get("YYLO_WORKTREE_CLEANUP_AFTER_MERGE")
+    if value is not None:
+        if value not in {"true", "false"}:
+            raise DeliveryError("YYLO_WORKTREE_CLEANUP_AFTER_MERGE must be true or false")
+        return value == "true"
+    return config.get("cleanup", {}).get("after_merge", False)
+
+
+def full_task_record(controller: Path, task_id: str, record: dict[str, Any]) -> dict[str, Any]:
+    if record.get("schema_version") == "juno_task_terminal_tombstone.v1":
+        return task_runtime.state_archive_get(
+            controller, task_id, record["archive"]["cold_ref"], tombstone=record)["record"]
+    return record
+
+
+def cleanup_worktree(repository: Path, path: Path, target: str,
+                     disposable: list[str], apply: bool) -> dict[str, Any]:
+    row: dict[str, Any] = {"path": str(path), "status": "skipped"}
+    def skip(reason: str) -> dict[str, Any]:
+        return {**row, "reason": reason}
+    # Lexical and physical paths must agree, including parent components.
+    if not path.is_absolute() or path.resolve() != path or path.is_symlink():
+        return skip("path_identity_changed")
+    registrations = git(repository, "worktree", "list", "--porcelain", "-z").split("\0\0")
+    entries = [entry.split("\0") for entry in registrations]
+    selected = next((entry for entry in entries if f"worktree {path}" in entry), None)
+    if selected is None:
+        return skip("unregistered_path" if path.exists() else "already_removed")
+    if any(field.startswith("locked") or field.startswith("prunable") for field in selected):
+        return skip("locked_or_prunable")
+    if f"branch {target}" in selected:
+        return skip("protected_target_worktree")
+    if git(path, "config", "--worktree", "--get", "juno.workspace.role", check=False) in {"controller", "integration-owner"}:
+        return skip("protected_workspace_role")
+    if not (path / ".git").is_file():
+        return skip("not_linked_worktree")
+    if Path(git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")) != Path(
+            git(repository, "rev-parse", "--path-format=absolute", "--git-common-dir")):
+        return skip("repository_identity_changed")
+    # Initialized submodules need a separate reviewed retention policy.
+    if any(line and line[0] != "-" for line in git(path, "submodule", "status").splitlines()):
+        return skip("initialized_submodules")
+    for marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG", "rebase-merge", "rebase-apply", "sequencer"):
+        if Path(git(path, "rev-parse", "--path-format=absolute", "--git-path", marker)).exists():
+            return skip("git_operation_in_progress")
+    head = ref_sha(path, "HEAD")
+    if not is_ancestor(repository, head, target):
+        return skip("current_head_not_in_target")
+    if git(path, "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"):
+        return skip("dirty_worktree")
+    ignored = git(path, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
+    for item in filter(None, ignored.split("\0")):
+        relative = item.rstrip("/")
+        if not any(relative == allowed or relative.startswith(allowed + "/") for allowed in disposable):
+            return skip("unknown_ignored_content")
+        # Do not let a declared disposable directory follow a substituted link.
+        current = path
+        for part in Path(relative).parts:
+            current /= part
+            if current.is_symlink():
+                return skip("ignored_path_symlink")
+    if not apply:
+        return {**row, "status": "eligible", "head": head}
+    if ref_sha(path, "HEAD") != head or not is_ancestor(repository, head, ref_sha(repository, target)):
+        return skip("identity_changed_before_removal")
+    removed = git_result(repository, "worktree", "remove", str(path))
+    return {**row, "status": "removed" if removed.returncode == 0 else "failed",
+            "reason": None if removed.returncode == 0 else "git_worktree_remove_refused"}
+
+
+def cleanup(controller: Path, task_id: str, *, apply: bool = False) -> dict[str, Any]:
+    config, repository, target_ref = roots(controller)
+    cleanup_policy(config)  # Validate overrides even for explicit cleanup.
+    results: list[dict[str, Any]] = []
+    with task_runtime.state_lock(controller):
+        record = full_task_record(controller, task_id, task_record(controller, task_id))
+        source, integrated = record.get("tip_sha"), record.get("integrated_sha")
+        target = ref_sha(repository, target_ref)
+        if (record.get("state") != "MERGED" or not isinstance(source, str)
+                or not isinstance(integrated, str) or not is_ancestor(repository, source, integrated)
+                or not is_ancestor(repository, integrated, target)):
+            raise DeliveryError("cleanup requires completed delivery and current target ancestry")
+        if record.get("fencing", {}).get("state") != "RELEASED":
+            raise DeliveryError("cleanup requires a released task lease; unknown ownership is preserved")
+        worktree = Path(record.get("worktree", ""))
+        if worktree.exists():
+            task_runtime.observe_task_identity(record, repository, config, task_id, expected_state="MERGED")
+        elif worktree != task_runtime.worktree_path(config, task_id):
+            raise DeliveryError("recorded task path differs from configured task path")
+        protected = {controller.resolve(), repository.resolve(), Path.cwd().resolve()}
+        paths = [(worktree, config.get("cleanup", {}).get("disposable_paths", []))]
+        # Only exact successful native composition receipts authorize candidates.
+        candidate_root = controller / ".juno_task/runtime/native-merge" / task_id
+        receipts = sorted(candidate_root.glob("*/result.json"))
+        if len(receipts) > 100:
+            raise DeliveryError("too many candidate receipts; explicit review required")
+        for receipt in receipts:
+            if receipt.resolve() != receipt:
+                continue
+            data = json.loads(receipt.read_text())
+            expected = data.get("expected_target", "")
+            if (data.get("task_id") == task_id and data.get("outcome") == "GIT_INTEGRATED"
+                    and data.get("source_sha") == source and data.get("target_ref") == target_ref
+                    and re.fullmatch(r"[0-9a-f]{40}", expected)
+                    and receipt.parent == operation_root(controller, task_id, expected, source)):
+                candidate = receipt.parent / "candidate"
+                if candidate.exists() and ref_sha(candidate, "HEAD") != data.get("candidate_sha"):
+                    results.append({"path": str(candidate), "status": "skipped", "reason": "candidate_head_changed"})
+                else:
+                    paths.append((candidate, []))
+        for path, disposable in paths:
+            if any(path == item or path in item.parents for item in protected):
+                results.append({"path": str(path), "status": "skipped", "reason": "protected_worktree"})
+            else:
+                results.append(cleanup_worktree(repository, path, target_ref, disposable, apply))
+    result = {"schema_version": "juno_worktree_cleanup.v1", "task_id": task_id,
+              "operation": "apply" if apply else "preview", "worktrees": results}
+    if apply:
+        directory = controller / ".juno_task/runtime/worktree-cleanup" / task_id
+        directory.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix="cleanup-", suffix=".json", dir=directory)
+        os.close(fd)
+        result["receipt"] = atomic_json(Path(name), result)
+    return result
+
+
+def cleanup_failure_receipt(controller: Path, task_id: str, result: dict[str, Any]) -> dict[str, Any]:
+    directory = controller / ".juno_task/runtime/worktree-cleanup" / task_id
+    directory.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix="cleanup-", suffix=".json", dir=directory)
+    os.close(fd)
+    result["receipt"] = atomic_json(Path(name), result)
+    return result
+
+
+def automatic_cleanup(controller: Path, task_id: str) -> dict[str, Any]:
+    try:
+        config, _repository, _target = roots(controller)
+        if not cleanup_policy(config):
+            return {"status": "disabled"}
+        return cleanup(controller, task_id, apply=True)
+    except (DeliveryError, task_runtime.TaskWorkspaceError, OSError, ValueError, KeyError) as exc:
+        # Delivery is already complete. Never turn cleanup into a failed merge.
+        result = {"status": "failed", "reason": str(exc)[:512], "task_id": task_id,
+                  "schema_version": "juno_worktree_cleanup.v1", "operation": "apply"}
+        try:
+            return cleanup_failure_receipt(controller, task_id, result)
+        except OSError:
+            return {**result, "receipt_error": "cleanup receipt could not be written"}
+
+
 def integrated_result(controller: Path, task_id: str, record: dict[str, Any],
                       target_ref: str, integrated_sha: str, source: str,
                       outcome: str, receipt: Optional[dict[str, str]] = None) -> dict[str, Any]:
@@ -145,15 +297,18 @@ def integrated_result(controller: Path, task_id: str, record: dict[str, Any],
             "git": {"status": "integrated", "source_sha": source,
                     "target_ref": target_ref, "integrated_sha": integrated_sha},
             "ledger": projected["ledger"], "projection": projected,
+            "cleanup": projected["cleanup"],
             "receipt": receipt}
 
 
 def land(controller: Path, task_id: str, *, candidate_sha: Optional[str] = None,
          expected_target: Optional[str] = None) -> dict[str, Any]:
     _config, repository, target_ref = roots(controller)
+    cleanup_policy(_config)
     record = task_record(controller, task_id)
     if record.get("state") == "MERGED":
-        return {"schema_version": SCHEMA, "task_id": task_id, "outcome": "ALREADY_PROJECTED"}
+        return {"schema_version": SCHEMA, "task_id": task_id, "outcome": "ALREADY_PROJECTED",
+                "cleanup": automatic_cleanup(controller, task_id)}
     if record.get("state") == "GIT_INTEGRATED":
         integrated = record.get("integrated_sha")
         if isinstance(integrated, str) and is_ancestor(repository, integrated, ref_sha(repository, target_ref)):
@@ -236,7 +391,9 @@ def land(controller: Path, task_id: str, *, candidate_sha: Optional[str] = None,
 
 def project(controller: Path, task_id: str) -> dict[str, Any]:
     _config, repository, target_ref = roots(controller)
-    record = task_record(controller, task_id)
+    cleanup_policy(_config)
+    hot_record = task_record(controller, task_id)
+    record = full_task_record(controller, task_id, hot_record)
     source = record.get("tip_sha")
     integrated = record.get("integrated_sha")
     target = ref_sha(repository, target_ref)
@@ -258,8 +415,9 @@ def project(controller: Path, task_id: str) -> dict[str, Any]:
                "kanban_sync": projection,
                "git_delivery": {**record.get("git_delivery", {}), "projection": "complete"}}
     if updated != record:
-        persist_task(controller, task_id, record, updated)
+        persist_task(controller, task_id, hot_record, updated)
     return {"schema_version": SCHEMA, "task_id": task_id,
+            "cleanup": automatic_cleanup(controller, task_id),
             "outcome": ("ALREADY_PROJECTED" if projection.get("outcome") == "verified"
                         and record.get("state") == "MERGED" else "PROJECTED"),
             "git": {"status": "integrated", "integrated_sha": integrated},
@@ -298,6 +456,11 @@ def parser() -> argparse.ArgumentParser:
     deliver.add_argument("--expected-target")
     projection = commands.add_parser("project")
     projection.add_argument("task")
+    clean = commands.add_parser("cleanup")
+    clean.add_argument("task")
+    mode = clean.add_mutually_exclusive_group()
+    mode.add_argument("--apply", action="store_true")
+    mode.add_argument("--dry-run", action="store_true")
     return result
 
 
@@ -310,6 +473,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif args.operation == "land":
             result = land(controller, args.task, candidate_sha=args.candidate,
                           expected_target=args.expected_target)
+        elif args.operation == "cleanup":
+            result = cleanup(controller, args.task, apply=args.apply)
         else:
             result = project(controller, args.task)
         print(json.dumps(result, sort_keys=True))

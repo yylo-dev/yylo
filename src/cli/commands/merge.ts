@@ -5,7 +5,7 @@ import { Command } from 'commander';
 import { routeControlPlane } from '../../utils/control-plane-router.js';
 import { addMachineOutputOptions, invokeMachineAwareChild, resolveMachineOutput } from '../machine-output.js';
 
-export type MergeOperation = 'status' | 'land' | 'project';
+export type MergeOperation = 'status' | 'land' | 'project' | 'cleanup';
 export type MergeInvoker = (
   operation: MergeOperation,
   taskId?: string,
@@ -85,6 +85,16 @@ export function configureMergeCommand(
         ? ['--candidate', options.candidate, '--expected-target', options.expectedTarget!]
         : [];
       return invoke('land', taskId, args);
+    });
+
+  merge.command('cleanup')
+    .description('Preview eligible delivered worktrees; --apply explicitly removes them')
+    .argument('<task-id>', 'Merged task to inspect')
+    .option('--dry-run', 'Preview only (default)')
+    .option('--apply', 'Remove eligible worktrees, preserving branches and evidence')
+    .action((taskId: string, options: { apply?: boolean; dryRun?: boolean }) => {
+      if (options.apply && options.dryRun) throw new Error('--apply and --dry-run are mutually exclusive');
+      return invoke('cleanup', taskId, [options.apply ? '--apply' : '--dry-run']);
     });
 
   merge.command('project')

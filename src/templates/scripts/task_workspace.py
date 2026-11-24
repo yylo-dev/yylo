@@ -447,7 +447,7 @@ def load_config(controller: Path) -> dict[str, Any]:
                 "allowed_paths", "controller_private_paths", "focused_validation",
                 "full_suite_validation"}
     optional = {"selectable_paths", "hydration_workflow", "validation_profiles", "documentation_validation",
-                "legacy_umbrella_creation"}
+                "legacy_umbrella_creation", "cleanup"}
     if not isinstance(value, dict):
         raise TaskWorkspaceError("task workspace policy must be a JSON object")
     missing = sorted(required - set(value))
@@ -463,6 +463,18 @@ def load_config(controller: Path) -> dict[str, Any]:
     if value.get("schema_version") != CONFIG_SCHEMA:
         raise TaskWorkspaceError(
             f"task workspace policy schema_version must be {CONFIG_SCHEMA}")
+    cleanup = value.setdefault("cleanup", {"after_merge": False, "disposable_paths": []})
+    if (not isinstance(cleanup, dict) or set(cleanup) - {"after_merge", "disposable_paths"}
+            or not isinstance(cleanup.get("after_merge", False), bool)
+            or not isinstance(cleanup.get("disposable_paths", []), list)):
+        raise TaskWorkspaceError("cleanup requires boolean after_merge and disposable_paths list")
+    cleanup.setdefault("after_merge", False)
+    cleanup.setdefault("disposable_paths", [])
+    for item in cleanup["disposable_paths"]:
+        if not isinstance(item, str) or normalized_relative(item, "cleanup disposable path") != item:
+            raise TaskWorkspaceError("cleanup disposable paths must be exact relative paths")
+        if any(part.startswith(".") for part in Path(item).parts):
+            raise TaskWorkspaceError("cleanup disposable paths must not include hidden paths")
     value.setdefault("selectable_paths", [])
     value.setdefault("hydration_workflow", ".juno_task/config/worktree-hydration.yaml")
     value.setdefault("legacy_umbrella_creation", False)
@@ -4517,7 +4529,8 @@ def _persist_failed_validation(controller: Path, task_id: str, frozen: dict[str,
 
 
 def observe_task_identity(record: dict[str, Any], configured_repository: Path,
-                           config: dict[str, Any], task_id: str) -> tuple[Path, Path, str]:
+                           config: dict[str, Any], task_id: str, *,
+                           expected_state: str = "WORKING") -> tuple[Path, Path, str]:
     """Verify recorded identity and return (repository, worktree, tip head)."""
     creation_receipt = record.get("creation_receipt", {})
     identity = record.get("workspace_identity", {})
@@ -4536,7 +4549,7 @@ def observe_task_identity(record: dict[str, Any], configured_repository: Path,
         and stable_sha256(creation_receipt.get("allowed_paths")) == identity.get("expected_paths_sha256")
         and stable_sha256(creation_receipt.get("materialization")) == identity.get("materialization_sha256")
     )
-    if record.get("task_id") != task_id or record.get("state") != "WORKING" or not receipt_matches:
+    if record.get("task_id") != task_id or record.get("state") != expected_state or not receipt_matches:
         raise TaskWorkspaceError("task creation receipt or recorded identity drifted")
     try:
         recorded_repository = exact_root(
