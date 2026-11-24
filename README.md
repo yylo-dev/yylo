@@ -59,13 +59,13 @@ npm install --global '@yylo/cli@latest'
 # Explicit prerelease
 npm install --global '@yylo/cli@next'
 # Exact version matching this checkout (once published)
-npm install -g @yylo/cli@0.2.12
+npm install -g @yylo/cli@0.2.15
 
 npm view '@yylo/cli' version dist-tags --json
 yy --version
 ```
 
-This unreleased source targets CLI **0.2.12**, requiring **Ledger 0.4.0 exactly** for universal
+This unreleased source targets CLI **0.2.15**, requiring **Ledger 0.4.0 exactly** for universal
 Record retrieval and storage-kind-prefixed IDs. Older Ledger 0.3.3, prereleases,
 and later versions are rejected before delegation. Install the matching Ledger
 explicitly once published; ordinary delegation does not auto-install a substitute.
@@ -231,10 +231,10 @@ Record relations.
 | Shortcut | Resolved model |
 | --- | --- |
 | `:luna` | `openai-codex/gpt-6-luna` |
-| `:sol` | `openai-codex/gpt-6.1-sol` |
-| `:gpt` | `openai-codex/gpt-6-astra` (Pi default) |
-| `:astra` | `openai-codex/gpt-6-astra` |
-| `:mini` | `openai-codex/gpt-5.6-terra` |
+| `:sol` | `openai-codex/gpt-6.2-sol` |
+| `:gpt` | `openai-codex/gpt-6.2-astra` (Pi default) |
+| `:astra` | `openai-codex/gpt-6.2-astra` |
+| `:terra`, `:mini` | `openai-codex/gpt-6.1-terra` |
 | `:sonnet` | `anthropic/claude-sonnet-4-6` |
 | `:opus` | `anthropic/claude-opus-4-6` |
 
@@ -487,7 +487,7 @@ Install canonical packages independently:
 
 ```bash
 python3 -m pip install 'yylo-ledger==0.4.0'
-# Exact Benchmark dependency for CLI 0.2.12, once separately published:
+# Exact Benchmark dependency for CLI 0.2.15, once separately published:
 npm install --global '@yylo/benchmark@0.2.1'
 
 yylo-ledger --help
@@ -496,7 +496,7 @@ yylo-benchmark --help
 yy benchmark --help
 ```
 
-CLI 0.2.12 source requires Benchmark **0.2.1 exactly**, whose thin lifecycle is
+CLI 0.2.15 source requires Benchmark **0.2.1 exactly**, whose thin lifecycle is
 case draft/create → run → evaluate → report, plus append-only disqualify. Older
 Benchmark versions are rejected before dispatch. These source changes do not
 publish Benchmark, update installed skills, or activate a new global runtime.

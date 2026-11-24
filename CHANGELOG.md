@@ -1,5 +1,31 @@
 # YYLO release notes
 
+## 0.2.15
+
+- Update Pi defaults and `:gpt`/`:astra` to GPT-6.2 Astra and `:sol` to GPT-6.2 Sol.
+- Add `:terra` and update `:mini` to GPT-6.1 Terra; keep `:luna` on GPT-6 Luna.
+  All four model families use the ChatGPT Codex provider (`openai-codex`).
+- Align CLI help and documentation, with exact provider/model dispatch regression coverage.
+
+## 0.2.14
+
+- Parse shipped hydration YAML argv/probe/output lists without requiring PyYAML
+  in the caller’s Python environment; exercise real YAML in packed acceptance.
+
+- Allow controller generation upgrades with missing historical task packages.
+  Validate current/candidate compatibility while preserving task state, ownership,
+  and exact historical pins; authenticate historical packages only on selection.
+- Cover upgrade, repeated upgrade, unrelated task start, and explicit historical
+  continuation refusal with missing artifacts.
+
+## 0.2.13
+
+- Allow current-runtime admission and new task starts when an unrelated historical
+  task's pinned package is unavailable, including archived predecessors whose
+  lifecycle still records WORKING. Preserve historical pins and ownership.
+- Continue authenticating the exact retained package for a selected old attempt.
+  Refusals now identify its task, attempt, installed root, artifact and digest.
+
 ## Unreleased
 
 ### 0.2.10 source baseline

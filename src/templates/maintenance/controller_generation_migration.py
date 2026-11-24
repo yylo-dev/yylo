@@ -794,12 +794,27 @@ def prepare(root: Path, candidate_evidence: dict[str, str], previous_evidence: d
         raise Refusal("active_pin_unverified", "invalid retained pin map")
     for name, pin in pins.items():
         prior = prior_pins.get(name)
+        if prior is not None and not isinstance(prior, dict):
+            raise Refusal("active_pin_unverified", name)
         if prior is not None and prior.get("attempt") == pin["attempt"]:
-            retained = facts.package(prior["generation"])
-            if (prior.get("executable") != retained["executable"]
-                    or state.get("schema_version") not in facts.state_schemas(prior["generation"])):
+            # Retention is not execution admission. This transaction leaves
+            # task-state bytes/schema and ownership untouched, and validates
+            # both current and candidate readers above. Missing historical
+            # packages must not prevent that state-preserving upgrade.
+            generation = prior.get("generation")
+            if (not isinstance(generation, dict)
+                    or set(generation) != {"root", "artifact", "sha256"}
+                    or any(not isinstance(generation.get(key), str) for key in generation)
+                    or not Path(generation["root"]).is_absolute()
+                    or not Path(generation["artifact"]).is_absolute()
+                    or not re.fullmatch(r"[0-9a-f]{64}", generation["sha256"])
+                    or prior.get("executable") != str(Path(generation["root"]) / "dist/bin/cli.mjs")):
                 raise Refusal("active_pin_unverified", name)
             pins[name] = prior
+    # Schema-changing task migrations need their own explicit compatibility
+    # protocol; they cannot inherit this state-preserving retention rule.
+    if STATE in after:
+        raise Refusal("shared_state_incompatible", "generation upgrade must preserve task state")
     marker = decode_json(content(after[CURRENT]))
     marker["active_pins"] = pins
     after[CURRENT] = image(encoded(marker))
@@ -1092,6 +1107,22 @@ def recover(root: Path, transaction_id: str, rollback: bool = False, boundary=No
         return transition(root, value, rollback=rollback, boundary=boundary)
 
 
+def authenticate_task_pin(task_id: str, pin: dict[str, Any], state: dict[str, Any],
+                          facts: AssessmentFacts) -> dict[str, Any]:
+    """Validate only the selected attempt, retaining exact recovery diagnostics."""
+    generation = pin["generation"]
+    try:
+        retained = facts.package(generation)
+        if (pin.get("executable") != retained["executable"]
+                or state.get("schema_version") not in facts.state_schemas(generation)):
+            raise Refusal("active_pin_unverified", "executable or shared-state schema mismatch")
+        return retained
+    except Refusal as exc:
+        raise Refusal(exc.code, f"task={task_id} attempt={pin.get('attempt')} "
+                      f"root={generation.get('root')} artifact={generation.get('artifact')} "
+                      f"sha256={generation.get('sha256')}; {exc}") from exc
+
+
 def runtime_ready(root: Path, repository: Path, running: Path,
                   facts: AssessmentFacts | None = None) -> dict[str, Any]:
     """Read-only package-generation admission, independent of product script copies.
@@ -1156,16 +1187,20 @@ def runtime_ready(root: Path, repository: Path, running: Path,
     state = decode_json(content(state_image)) if state_image else {"tasks": {}}
     if state_image and state.get("schema_version") not in facts.state_schemas(marker["candidate"]):
         raise Refusal("shared_state_incompatible", "preserve active tasks")
-    for task_id, pin in marker.get("active_pins", {}).items():
-        task = state.get("tasks", {}).get(task_id, {})
-        if (task.get("fencing", {}).get("attempt") == pin.get("attempt")
-                and (task.get("state") in {"WORKING", "HYDRATING", "HYDRATION_FAILED"}
-                     or task.get("fencing", {}).get("state") == "ACTIVE")):
-            retained = facts.package(pin["generation"])
-            if (pin.get("executable") != retained["executable"]
-                    or state.get("schema_version") not in facts.state_schemas(pin["generation"])):
-                raise Refusal("active_pin_unverified", task_id)
-            permitted.add(digest(retained["files"]["dist/templates/scripts/task_workspace.py"]))
+    # Current-generation admission depends only on the current package and its
+    # shared-state schema. Unrelated historical attempts may have unavailable
+    # packages; their ownership and pins remain untouched. A retained reader
+    # must still authenticate the exact pin whose installed path it executes.
+    if running_sha not in permitted:
+        for task_id, pin in marker.get("active_pins", {}).items():
+            task = state.get("tasks", {}).get(task_id, {})
+            pinned_script = Path(pin["generation"]["root"]) / "dist/templates/scripts/task_workspace.py"
+            if (running.absolute() == pinned_script.absolute()
+                    and task.get("fencing", {}).get("attempt") == pin.get("attempt")
+                    and (task.get("state") in {"WORKING", "HYDRATING", "HYDRATION_FAILED"}
+                         or task.get("fencing", {}).get("state") == "ACTIVE")):
+                retained = authenticate_task_pin(task_id, pin, state, facts)
+                permitted.add(digest(retained["files"]["dist/templates/scripts/task_workspace.py"]))
     if running_sha not in permitted:
         raise Refusal("running_generation_unverified", "runtime is not current or attempt-pinned")
     return {"schema_version": "yylo_controller_generation_admission.v1", "controller": str(repository),
@@ -1183,7 +1218,7 @@ def active_runtime_ready(root: Path, facts: AssessmentFacts | None = None,
     assert_ready(root)
     facts = facts or AssessmentFacts()
     result = runtime_ready(root, root, safe(root, '.juno_task/scripts/task_workspace.py'), facts)
-    # runtime_ready authenticates the full active package, inventory and pins.
+    # runtime_ready authenticates the full active package, inventory and shared state.
     # Unlike projected preactivation readiness, live dispatch must also prove
     # the installed executable selector has not diverged from that identity.
     config_path = git(root, 'rev-parse', '--path-format=absolute', '--git-path', 'config.worktree')
@@ -1229,10 +1264,7 @@ def pinned_task_runtime(root: Path, task_id: str) -> dict[str, Any]:
     if (task.get("fencing", {}).get("attempt") != pin.get("attempt")
             or task.get("state") not in {"WORKING", "HYDRATING", "HYDRATION_FAILED"}):
         return {"pinned": False}
-    retained = facts.package(pin["generation"])
-    if (pin.get("executable") != retained["executable"]
-            or state.get("schema_version") not in facts.state_schemas(pin["generation"])):
-        raise Refusal("active_pin_unverified", task_id)
+    retained = authenticate_task_pin(task_id, pin, state, facts)
     target = authority["target_sha"]
     source_repository = (compatibility.target_blob(root, target, "juno-code/package.json") is not None
                          or compatibility.target_blob(root, target, "juno-code/src/templates/scripts/task_workspace.py") is not None)

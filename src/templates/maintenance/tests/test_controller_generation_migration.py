@@ -299,7 +299,7 @@ class GenerationTests(unittest.TestCase):
                     mock.patch.object(migration, 'discover_installed', side_effect=AssertionError('no discovery')), \
                     mock.patch.object(migration, 'plan', side_effect=AssertionError('no planning')):
                 result = migration.active_runtime_ready(self.controller, invocation_root=alias)
-            self.assertEqual(auth.call_count, 2)  # active and predecessor, not a third archive extraction
+            self.assertEqual(auth.call_count, 1)  # active artifact only; alias compares its exact bytes
             self.assertEqual(result['equivalent_executable'], str(alias / 'dist/bin/cli.mjs'))
             self.assertNotEqual(result['executable'], result['equivalent_executable'])
         finally:
@@ -334,7 +334,7 @@ class GenerationTests(unittest.TestCase):
                 self.assertNotIn('equivalent_executable', result)
                 self.assertEqual(result['executable'], str(Path(self.candidate['root']) / 'dist/bin/cli.mjs'))
 
-    def test_many_pins_authenticate_each_retained_generation_once_per_plan(self):
+    def test_many_pins_preserve_history_without_authenticating_unselected_packages(self):
         state = json.loads((self.controller / migration.STATE).read_text())
         for number in range(77):
             state['tasks'][f'PIN{number:03}'] = {'state': 'WORKING', 'fencing': {'attempt': 3}}
@@ -345,13 +345,13 @@ class GenerationTests(unittest.TestCase):
                 mock.patch.object(migration, 'state_schemas', wraps=migration.state_schemas) as schemas:
             second = migration.plan(self.controller, self.candidate, self.candidate)
         self.assertEqual(second['active_pins'], first['active_pins'])
-        self.assertEqual(authenticate.call_count, 2)
-        self.assertEqual(schemas.call_count, 1)  # identical authenticated source bytes
-        self.assertEqual(sum(call.args[0] == self.previous for call in authenticate.call_args_list), 1)
-        # The optimization is invocation-local, never a stale trust cache.
-        write(Path(self.previous['root']) / 'dist/bin/cli.mjs', b'changed after earlier assessment')
+        self.assertEqual(authenticate.call_count, 1)
+        self.assertEqual(schemas.call_count, 1)
+        self.assertEqual(sum(call.args[0] == self.previous for call in authenticate.call_args_list), 0)
+        write(Path(self.previous['root']) / 'dist/bin/cli.mjs', b'changed historical executable')
+        migration.plan(self.controller, self.candidate, self.candidate)
         with self.assertRaisesRegex(migration.Refusal, 'package_provenance_invalid'):
-            migration.plan(self.controller, self.candidate, self.candidate)
+            migration.pinned_task_runtime(self.controller, 'ABC123')
 
     def test_schema_parsing_scales_with_sources_not_pins(self):
         migration.apply(self.controller, self.plan())
@@ -386,17 +386,18 @@ class GenerationTests(unittest.TestCase):
                 marker['active_pins']['ABC123']['generation'] = evidence
                 write(self.controller / migration.CURRENT, marker)
                 with mock.patch.object(migration.ast, 'parse', wraps=migration.ast.parse) as parse:
-                    if error:
-                        with self.assertRaises(error):
-                            migration.prepare(self.controller, self.candidate, self.candidate)
-                    else:
-                        result = migration.prepare(self.controller, self.candidate, self.candidate)
-                        self.assertEqual(result['active_pins'], marker['active_pins'])
-                self.assertEqual(parse.call_count, 2)
+                    result = migration.prepare(self.controller, self.candidate, self.candidate)
+                    self.assertEqual(result['active_pins'], marker['active_pins'])
+                self.assertEqual(parse.call_count, 1)
+                if error:
+                    with self.assertRaises(error):
+                        migration.pinned_task_runtime(self.controller, 'ABC123')
+                else:
+                    migration.pinned_task_runtime(self.controller, 'ABC123')
         # A successful earlier assessment cannot authorize subsequently changed bytes.
         write(path, original)
         with self.assertRaisesRegex(migration.Refusal, 'package_provenance_invalid'):
-            migration.prepare(self.controller, self.candidate, self.candidate)
+            migration.pinned_task_runtime(self.controller, 'ABC123')
 
     def test_plan_and_runtime_work_scales_with_distinct_evidence_not_pin_count(self):
         migration.apply(self.controller, self.plan())
@@ -438,22 +439,19 @@ class GenerationTests(unittest.TestCase):
                                 finally:
                                     migration.admission_inputs.reset(token)
                                 self.assertTrue(inputs.unchanged())
-                            self.assertEqual(auth.call_count, generations + 1)
-                            # All generations authenticate separately, but their
-                            # identical schema source is parsed only once.
+                            self.assertEqual(auth.call_count, 1)
+                            # Only the selected current package is authenticated;
+                            # historical pins remain inert until explicitly selected.
                             self.assertEqual(schemas.call_count, 1)
-                    # Even the last pin must be checked after earlier identical
-                    # evidence hits; neither schema nor executable checks vanish.
+                    # Migration structurally checks every retained pin;
+                    # ordinary admission does not select historical packages.
                     last = next(reversed(pins))
                     pins[last]['executable'] = '/foreign/executable'
                     write(self.controller / migration.CURRENT, marker)
-                    for operation in (lambda: migration.plan(self.controller, successor, successor),
-                                      lambda: migration.runtime_ready(self.controller, self.controller, running),
-                                      lambda: migration.active_runtime_ready(self.controller)):
-                        with self.assertRaisesRegex(migration.Refusal, 'active_pin_unverified'):
-                            operation()
+                    with self.assertRaisesRegex(migration.Refusal, 'active_pin_unverified'):
+                        migration.plan(self.controller, successor, successor)
 
-    def test_runtime_readback_keeps_active_lease_pins_outside_working_state(self):
+    def test_current_readback_does_not_authenticate_unrelated_active_lease(self):
         migration.apply(self.controller, self.plan())
         state = json.loads((self.controller / migration.STATE).read_text())
         state['tasks']['ABC123']['state'] = 'QUEUED'
@@ -461,8 +459,7 @@ class GenerationTests(unittest.TestCase):
         running = Path(self.candidate['root']) / 'dist/templates/scripts/task_workspace.py'
         migration.runtime_ready(self.controller, self.controller, running)
         write(Path(self.previous['root']) / 'dist/bin/cli.mjs', b'tampered active lease runtime')
-        with self.assertRaisesRegex(migration.Refusal, 'package_provenance_invalid'):
-            migration.runtime_ready(self.controller, self.controller, running)
+        migration.runtime_ready(self.controller, self.controller, running)
 
     def test_active_readiness_never_discovers_or_plans_candidate(self):
         migration.apply(self.controller, migration.plan(self.controller, self.candidate, self.previous))
@@ -472,10 +469,10 @@ class GenerationTests(unittest.TestCase):
                 mock.patch.object(migration, 'authenticate', wraps=migration.authenticate) as authenticate:
             result = migration.active_runtime_ready(self.controller)
         self.assertEqual(result['executable'], str(Path(self.candidate['root']) / 'dist/bin/cli.mjs'))
-        # The fixture has one active attempt pinned to the predecessor.
-        self.assertEqual(authenticate.call_count, 2)
+        # Unrelated predecessors are authenticated only when selected.
+        self.assertEqual(authenticate.call_count, 1)
         self.assertEqual({call.args[0]['root'] for call in authenticate.call_args_list},
-                         {self.candidate['root'], self.previous['root']})
+                         {self.candidate['root']})
 
     def test_reader_reuse_binds_all_authenticated_inputs_without_reauthentication(self):
         migration.apply(self.controller, self.plan())
@@ -491,8 +488,7 @@ class GenerationTests(unittest.TestCase):
             for path in (self.controller / migration.CURRENT, self.controller / migration.STATE,
                          self.controller / migration.IDENTITY, self.controller / migration.INVENTORY,
                          self.controller / '.juno_task/scripts/task_workspace.py',
-                         Path(self.candidate['root']) / 'dist/bin/cli.mjs',
-                         Path(self.previous['root']) / 'dist/bin/cli.mjs', Path(self.previous['artifact'])):
+                         Path(self.candidate['root']) / 'dist/bin/cli.mjs'):
                 with self.subTest(path=path):
                     original = path.read_bytes()
                     try:
@@ -501,9 +497,7 @@ class GenerationTests(unittest.TestCase):
                     finally:
                         path.write_bytes(original)
             for added in (self.controller / migration.ROOT / 'fence.json',
-                          Path(self.candidate['root']) / 'dist/poison.pyc',
-                          Path(self.previous['root']) / 'dist/poison.pyc',
-                          Path(self.previous['root']) / '.git'):
+                          Path(self.candidate['root']) / 'dist/poison.pyc'):
                 with self.subTest(added=added):
                     try:
                         write(added, b'not authenticated')
@@ -535,7 +529,7 @@ class GenerationTests(unittest.TestCase):
             with self.assertRaisesRegex(migration.Refusal, 'generation_migration_busy'):
                 with migration.locked(self.controller):
                     pass
-            write(Path(self.previous['root']) / 'dist/poison.pyc', b'not executed')
+            write(Path(self.candidate['root']) / 'dist/poison.pyc', b'not executed')
             process.stdin.write('recheck-active\n'); process.stdin.flush()
             self.assertEqual(json.loads(process.stdout.readline()), {'unchanged': False})
             process.stdin.write('recheck-active\n'); process.stdin.flush()
@@ -586,7 +580,7 @@ class GenerationTests(unittest.TestCase):
         migration.apply(self.controller, self.plan())
         running = Path(self.candidate['root']) / 'dist/templates/scripts/task_workspace.py'
         migration.runtime_ready(self.controller, self.controller, running)
-        write(Path(self.previous['root']) / 'dist/templates/scripts/__pycache__/poison.pyc', b'poison')
+        write(Path(self.candidate['root']) / 'dist/templates/scripts/__pycache__/poison.pyc', b'poison')
         with self.assertRaisesRegex(migration.Refusal, 'package_provenance_invalid'):
             migration.runtime_ready(self.controller, self.controller, running)
 
@@ -600,6 +594,78 @@ class GenerationTests(unittest.TestCase):
         incompatible = self.package('incompatible', incompatible=True)
         self.assertNotIn('juno_task_workspace_state.v1', facts.state_schemas(incompatible))
         self.assertIn('juno_task_workspace_state.v1', facts.state_schemas(self.previous))
+
+    def test_upgrade_preserves_missing_historical_pins_and_state(self):
+        migration.apply(self.controller, self.plan())
+        shutil.rmtree(self.previous['root'])
+        Path(self.previous['artifact']).unlink()
+        state_path = self.controller / migration.STATE
+        state = json.loads(state_path.read_text())
+        state['tasks']['RELEASED'] = copy.deepcopy(state['tasks']['ABC123'])
+        state['tasks']['RELEASED']['fencing']['state'] = 'RELEASED'
+        write(state_path, state)
+        current = json.loads((self.controller / migration.CURRENT).read_text())
+        current['active_pins']['RELEASED'] = copy.deepcopy(current['active_pins']['ABC123'])
+        write(self.controller / migration.CURRENT, current)
+        before = state_path.read_bytes()
+        successor = self.package('successor')
+        plan = migration.plan(self.controller, successor, self.candidate)
+        self.assertEqual(plan['active_pins'], current['active_pins'])
+        self.assertNotIn(migration.STATE, plan['after'])
+        migration.apply(self.controller, plan)
+        self.assertEqual(state_path.read_bytes(), before)
+        migration.active_runtime_ready(self.controller)
+        self.assertFalse(migration.pinned_task_runtime(self.controller, 'NEW')['pinned'])
+        for task in ('ABC123', 'RELEASED'):
+            with self.assertRaisesRegex(migration.Refusal, 'task=' + task):
+                migration.pinned_task_runtime(self.controller, task)
+        # Repeated upgrades retain both pins, and incompatible current readers
+        # still refuse rather than treating retention as execution authority.
+        repeat = migration.plan(self.controller, successor, successor)
+        self.assertEqual(repeat['active_pins'], current['active_pins'])
+        with self.assertRaisesRegex(migration.Refusal, 'shared_state_incompatible'):
+            migration.plan(self.controller, self.package('incompatible', incompatible=True), successor)
+
+    def test_retained_reader_checks_only_its_selected_runtime(self):
+        running = Path(self.previous['root']) / 'dist/templates/scripts/task_workspace.py'
+        write(running, running.read_bytes() + b'\n# distinct retained reader\n')
+        self.previous = self.pack(Path(self.previous['root']))
+        self.install(self.previous)
+        migration.apply(self.controller, self.plan())
+        marker = json.loads((self.controller / migration.CURRENT).read_text())
+        marker['active_pins']['MISSING'] = copy.deepcopy(marker['active_pins']['ABC123'])
+        marker['active_pins']['MISSING']['generation']['root'] = str(self.root / 'missing')
+        write(self.controller / migration.CURRENT, marker)
+        state = json.loads((self.controller / migration.STATE).read_text())
+        state['tasks']['MISSING'] = copy.deepcopy(state['tasks']['ABC123'])
+        write(self.controller / migration.STATE, state)
+        migration.runtime_ready(self.controller, self.controller, running)
+        migration.pinned_task_runtime(self.controller, 'ABC123')
+        write(Path(self.previous['root']) / 'dist/bin/cli.mjs', b'tampered retained executable')
+        with self.assertRaisesRegex(migration.Refusal, 'task=ABC123'):
+            migration.runtime_ready(self.controller, self.controller, running)
+
+    def test_missing_archived_predecessor_does_not_block_new_task(self):
+        migration.apply(self.controller, self.plan())
+        shutil.rmtree(self.previous['root'])
+        Path(self.previous['artifact']).unlink()
+        state = json.loads((self.controller / migration.STATE).read_text())
+        for fence in ('ACTIVE', 'RELEASED'):
+            with self.subTest(fence=fence):
+                state['tasks']['ABC123'].update(state='WORKING', status='archive')
+                state['tasks']['ABC123']['fencing']['state'] = fence
+                write(self.controller / migration.STATE, state)
+                before = {name: (self.controller / name).read_bytes()
+                          for name in (migration.STATE, migration.CURRENT)}
+                migration.active_runtime_ready(self.controller)
+                self.assertFalse(migration.pinned_task_runtime(self.controller, 'NEW001')['pinned'])
+                with self.assertRaises(migration.Refusal) as caught:
+                    migration.pinned_task_runtime(self.controller, 'ABC123')
+                for detail in ('task=ABC123', 'attempt=3', self.previous['root'],
+                               self.previous['artifact'], self.previous['sha256']):
+                    self.assertIn(detail, str(caught.exception))
+                for name, data in before.items():
+                    self.assertEqual((self.controller / name).read_bytes(), data)
 
     def test_retained_task_pin_is_authenticated_and_attempt_bound(self):
         migration.apply(self.controller, self.plan())

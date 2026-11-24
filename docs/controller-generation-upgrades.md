@@ -148,9 +148,18 @@ After activation these doctors retain prospective package-generation assessment,
 separate from ordinary observation's active-only admission. When the invoked
 package root is already the selected active generation,
 assessment validates the active package, managed inventory, runtime selectors and
-applicable attempt/ACTIVE-lease pins directly, without discovering a candidate or
-building a hypothetical migration plan. Authentication and schema facts are reused
-only within one assessment and only for identical evidence tuples; different roots
+shared-state schema directly, without discovering a candidate or building a
+hypothetical migration plan. Unrelated historical attempt packages are not
+required for ordinary current-runtime admission. Selecting a retained task
+authenticates its exact attempt pin; missing or invalid retained packages refuse
+with the task ID, attempt, installed root, artifact path and digest. Generation
+upgrades validate the current and candidate packages against the
+existing task-state schema and preserve task-state bytes and ownership. Historical
+pins are structurally checked and retained without loading their packages. Missing
+historical packages block only explicit execution of those attempts. A future
+state-schema migration requires a separate compatibility protocol; this retention
+rule does not authorize rewriting task state.
+Authentication and schema facts are reused only within one assessment and only for identical evidence tuples; different roots
 and later invocations still require authentication. This read-only observation is
 not a transferable admission proof. Same-artifact distinct-root comparison avoids
 redundant retained redispatch, not distinct-root authentication. Dispatch acquires the reader lease before its
@@ -390,7 +399,8 @@ node scripts/verify-managed-assets.mjs --check-dist --check-pack
 The packed gate installs offline in disposable registered fixtures and consumes an
 unmodified npm artifact. It exercises source and consumer targets separately:
 unchanged/refused ordinary launch before explicit activation, explicit upgrade and
-same-artifact repeat, compatible future instruction revision, all runtime doctors,
+same-artifact repeat and task start with missing historical packages, compatible
+future instruction revision, all runtime doctors,
 clean frozen hydration, task finish, native merge, independent byte preservation,
 and deterministic successful/failing agent processes with secondary checkpoint
 failure. Separate engine/public-dispatch suites cover malformed/unsupported

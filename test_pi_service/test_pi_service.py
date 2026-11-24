@@ -111,10 +111,10 @@ class TestModelShorthandExpansion:
         self.svc = _load_pi_service()
 
     def test_shorthand_pi(self):
-        assert self.svc.expand_model_shorthand(":pi") == "openai-codex/gpt-6-astra"
+        assert self.svc.expand_model_shorthand(":pi") == "openai-codex/gpt-6.2-astra"
 
     def test_shorthand_default(self):
-        assert self.svc.expand_model_shorthand(":default") == "openai-codex/gpt-6-astra"
+        assert self.svc.expand_model_shorthand(":default") == "openai-codex/gpt-6.2-astra"
 
     def test_shorthand_sonnet(self):
         assert self.svc.expand_model_shorthand(":sonnet") == "anthropic/claude-sonnet-4-6"
@@ -129,18 +129,21 @@ class TestModelShorthandExpansion:
         assert self.svc.expand_model_shorthand(":luna") == "openai-codex/gpt-6-luna"
 
     def test_shorthand_sol(self):
-        assert self.svc.expand_model_shorthand(":sol") == "openai-codex/gpt-6.1-sol"
+        assert self.svc.expand_model_shorthand(":sol") == "openai-codex/gpt-6.2-sol"
 
-    def test_shorthand_gpt_aliases_sol(self):
-        assert self.svc.MODEL_SHORTHANDS[":gpt"] == "openai-codex/gpt-6-astra"
-        assert self.svc.expand_model_shorthand(":gpt") == "openai-codex/gpt-6-astra"
-        assert self.svc.expand_model_shorthand(":astra") == "openai-codex/gpt-6-astra"
+    def test_shorthand_gpt_aliases_astra(self):
+        assert self.svc.MODEL_SHORTHANDS[":gpt"] == "openai-codex/gpt-6.2-astra"
+        assert self.svc.expand_model_shorthand(":gpt") == "openai-codex/gpt-6.2-astra"
+        assert self.svc.expand_model_shorthand(":astra") == "openai-codex/gpt-6.2-astra"
 
     def test_shorthand_gpt55(self):
         assert self.svc.expand_model_shorthand(":gpt5.5") == "openai-codex/gpt-5.5"
 
+    def test_shorthand_terra(self):
+        assert self.svc.expand_model_shorthand(":terra") == "openai-codex/gpt-6.1-terra"
+
     def test_shorthand_mini(self):
-        assert self.svc.expand_model_shorthand(":mini") == "openai-codex/gpt-5.6-terra"
+        assert self.svc.expand_model_shorthand(":mini") == "openai-codex/gpt-6.1-terra"
 
     def test_shorthand_gpt5(self):
         assert self.svc.expand_model_shorthand(":gpt-5") == "openai/gpt-5"
@@ -221,10 +224,16 @@ class TestBuildPiCommand:
         assert cmd[model_idx + 1] == "claude-sonnet-4-6"
 
     @pytest.mark.parametrize("shortcut,model", [
-        (":sol", "gpt-6.1-sol"),
+        (":pi", "gpt-6.2-astra"),
+        (":default", "gpt-6.2-astra"),
+        (":gpt", "gpt-6.2-astra"),
+        (":astra", "gpt-6.2-astra"),
+        (":terra", "gpt-6.1-terra"),
+        (":mini", "gpt-6.1-terra"),
+        (":sol", "gpt-6.2-sol"),
         (":luna", "gpt-6-luna"),
     ])
-    def test_sol_luna_shortcuts_dispatch_exact_codex_models(self, shortcut, model):
+    def test_gpt_family_shortcuts_dispatch_exact_codex_models(self, shortcut, model):
         self.svc.model_name = self.svc.expand_model_shorthand(shortcut)
         self.svc.prompt = "test prompt"
         cmd, _stdin = self.svc.build_pi_command(_make_args(model=shortcut))
@@ -1610,7 +1619,7 @@ class TestDefaultModelConstant:
 
     def test_shorthand_count(self):
         svc = _load_pi_service()
-        assert len(svc.MODEL_SHORTHANDS) == 22
+        assert len(svc.MODEL_SHORTHANDS) == 23
         assert set(svc.MODEL_SHORTHANDS) == {
             ":pi",
             ":default",
@@ -1622,6 +1631,7 @@ class TestDefaultModelConstant:
             ":gpt",
             ":astra",
             ":gpt5.5",
+            ":terra",
             ":mini",
             ":gpt-5",
             ":gpt-4o",
